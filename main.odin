@@ -5,6 +5,8 @@ import "constants"
 import "core:fmt"
 import "core:math/bits"
 import "moves"
+import "search"
+import "uci"
 import "zobrist"
 
 starting_bitboard: u64 = 0
@@ -36,6 +38,7 @@ is_bit_set :: proc(bitboard: ^u64, square: u64) -> bool {
 
 
 main :: proc() {
+	// Initialize Magic Bitboards
 	fmt.println("Initializing Magic Bitboards...")
 	moves.init_sliders()
 
@@ -46,32 +49,8 @@ main :: proc() {
 	board.init_board()
 	fmt.println("Initialization Complete.")
 
-	// Test FEN Parsing
-	fmt.println("\n--- FEN Parsing Test ---")
-	// Standard Start Position
-	start_fen := "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-	game_board := board.parse_fen(start_fen)
-	board.print_board(game_board)
-
-	// Test Tricky Position (KiwiPete)
-	fmt.println("\n--- KiwiPete Position ---")
-	kiwipete_fen := "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
-
-	// Test Perft
-	fmt.println("\n--- Perft Test ---")
-
-	// Position 1 (Start Pos)
-	// Depth 1: 20
-	// Depth 2: 400
-	// Depth 3: 8902
-	// Depth 4: 197281
-	board.perft_test(start_fen, 3)
-
-	// Position 2 (KiwiPete)
-	// Depth 1: 48
-	// Depth 2: 2039
-	// Depth 3: 97862
-	board.perft_test(kiwipete_fen, 3)
+	// Start UCI Loop
+	uci.uci_loop()
 }
 
 print_move_list :: proc(list: [dynamic]moves.Move) {

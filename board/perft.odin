@@ -3,32 +3,43 @@ package board
 import "../constants"
 import "../moves"
 import "../utils"
+import "../zobrist"
 import "core:fmt"
 import "core:time"
 
 // Make Move
 // Returns false if the move is illegal (leaves king in check)
+// Make Move
+// Returns false if the move is illegal (leaves king in check)
 make_move :: proc(board: ^Board, move: moves.Move, side: int) -> bool {
-	// Copy board state to restore if illegal?
-	// For perft, we usually do Copy-Make or Make-Unmake.
-	// Copy-Make is slower but easier to implement safely first.
-	// Make-Unmake is faster but requires careful implementation.
-	// Let's do Copy-Make for simplicity and robustness first.
-	// Actually, Odin structs are value types, so passing by value creates a copy.
-	// But here we passed a pointer.
+	// Update Hash: Side
+	board.hash ~= zobrist.side_key
 
-	// We need to update bitboards
+	// Update Hash: Castling Rights (Remove old)
+	board.hash ~= zobrist.castling_keys[board.castle]
 
-	// Note: move.piece stores Piece Type (0-5). We need to adjust for color.
-	// If we stored the full piece index (0-11) in the Move struct, this offset calculation
-	// would not be necessary, as we could index bitboards directly.
+	// Update Hash: En Passant (Remove old)
+	if board.en_passant != -1 {
+		board.hash ~= zobrist.en_passant_keys[board.en_passant]
+	}
+
 	piece_idx := move.piece + (side == constants.WHITE ? 0 : 6)
 
 	// 1. Remove piece from source
 	board.bitboards[piece_idx] &= ~(u64(1) << u64(move.source))
+	board.hash ~= zobrist.piece_keys[piece_idx][move.source]
 
-	// 2. Add piece to target
-	board.bitboards[piece_idx] |= (u64(1) << u64(move.target))
+	// 2. Add piece to target (Handle Promotion)
+	if move.promoted == -1 {
+		board.bitboards[piece_idx] |= (u64(1) << u64(move.target))
+		board.hash ~= zobrist.piece_keys[piece_idx][move.target]
+	} else {
+		// Remove the pawn from target (we just added it? No, we didn't add it yet)
+		// We removed pawn from source. We need to add promoted piece to target.
+		promoted_index := move.promoted + (side == constants.WHITE ? 0 : 6)
+		board.bitboards[promoted_index] |= (u64(1) << u64(move.target))
+		board.hash ~= zobrist.piece_keys[promoted_index][move.target]
+	}
 
 	// 3. Captures
 	if move.capture {
@@ -39,45 +50,22 @@ make_move :: proc(board: ^Board, move: moves.Move, side: int) -> bool {
 		for i in start_piece ..< end_piece {
 			if (board.bitboards[i] & (u64(1) << u64(move.target))) != 0 {
 				board.bitboards[i] &= ~(u64(1) << u64(move.target))
+				board.hash ~= zobrist.piece_keys[i][move.target]
 				break
 			}
 		}
 	}
 
-	// 4. Promotions
-	if move.promoted != -1 {
-		// Remove the pawn from target (we just added it)
-		board.bitboards[piece_idx] &= ~(u64(1) << u64(move.target))
-		// Add the promoted piece
-		// Note: move.promoted is 0-5 (piece type). We need to adjust for color.
-		promoted_index := move.promoted + (side == constants.WHITE ? 0 : 6)
-		board.bitboards[promoted_index] |= (u64(1) << u64(move.target))
-	}
-
 	// 5. En Passant Capture
 	if move.en_passant {
 		// The captured pawn is not at target, but behind it.
-		// White moves to E6, captures pawn on E5.
-		// Black moves to E3, captures pawn on E4.
 		capture_square := (side == constants.WHITE) ? move.target - 8 : move.target + 8
 		enemy_pawn := (side == constants.WHITE) ? constants.PAWN + 6 : constants.PAWN
-		board.bitboards[enemy_pawn] &= ~(1 << u64(capture_square))
+		board.bitboards[enemy_pawn] &= ~(u64(1) << u64(capture_square))
+		board.hash ~= zobrist.piece_keys[enemy_pawn][capture_square]
 	}
 
 	// 6. Castling
-	// We need to move the rook.
-	// King move is already handled by generic logic (piece at source -> target).
-	// But we need to move the rook.
-	// White King Side: E1->G1. Rook H1->F1.
-	// White Queen Side: E1->C1. Rook A1->D1.
-	// Black King Side: E8->G8. Rook H8->F8.
-	// Black Queen Side: E8->C8. Rook A8->D8.
-
-	// We don't have a 'castling' flag in Move struct yet?
-	// Wait, we do: `castling: bool`
-	// But we need to know WHICH castling.
-	// We can infer from source/target of King.
-
 	if move.piece == constants.KING || move.piece == (constants.KING + 6) {
 		// Castling Logic
 		if abs(move.target - move.source) == 2 {
@@ -86,18 +74,26 @@ make_move :: proc(board: ^Board, move: moves.Move, side: int) -> bool {
 				// Move Rook H1 (7) -> F1 (5)
 				board.bitboards[constants.ROOK] &= ~(u64(1) << 7)
 				board.bitboards[constants.ROOK] |= (u64(1) << 5)
+				board.hash ~= zobrist.piece_keys[constants.ROOK][7]
+				board.hash ~= zobrist.piece_keys[constants.ROOK][5]
 			} else if move.target == 2 { 	// C1
 				// Move Rook A1 (0) -> D1 (3)
 				board.bitboards[constants.ROOK] &= ~(u64(1) << 0)
 				board.bitboards[constants.ROOK] |= (u64(1) << 3)
+				board.hash ~= zobrist.piece_keys[constants.ROOK][0]
+				board.hash ~= zobrist.piece_keys[constants.ROOK][3]
 			} else if move.target == 62 { 	// G8
 				// Move Rook H8 (63) -> F8 (61)
 				board.bitboards[constants.ROOK + 6] &= ~(u64(1) << 63)
 				board.bitboards[constants.ROOK + 6] |= (u64(1) << 61)
+				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][63]
+				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][61]
 			} else if move.target == 58 { 	// C8
 				// Move Rook A8 (56) -> D8 (59)
 				board.bitboards[constants.ROOK + 6] &= ~(u64(1) << 56)
 				board.bitboards[constants.ROOK + 6] |= (u64(1) << 59)
+				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][56]
+				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][59]
 			}
 		}
 	}
@@ -129,24 +125,17 @@ make_move :: proc(board: ^Board, move: moves.Move, side: int) -> bool {
 	board.side = 1 - side
 
 	// Update En Passant Target
-	// If double push, set target. Else reset.
 	if move.double_push {
 		board.en_passant = (side == constants.WHITE) ? move.target - 8 : move.target + 8
+		board.hash ~= zobrist.en_passant_keys[board.en_passant] // Add new
 	} else {
 		board.en_passant = -1
 	}
 
 	// Update Castling Rights
-	// If King moves, lose rights.
-	// If Rook moves, lose rights for that side.
-	// If Rook captured, lose rights for that side.
-	// (Simplification: Just mask out rights if King/Rook involved)
-
-	// This is complex to do perfectly in one pass without lookup tables.
-	// For now, let's assume we update it later or ignore for perft (Perft requires castling rights update).
-	// Let's add a simple update:
 	board.castle &= castling_rights_mask[move.source]
 	board.castle &= castling_rights_mask[move.target]
+	board.hash ~= zobrist.castling_keys[board.castle] // Add new
 
 	return true
 }

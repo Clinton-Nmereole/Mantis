@@ -27,6 +27,16 @@ Board :: struct {
 	// Counters
 	halfmove_clock:  int,
 	fullmove_number: int,
+
+	// NNUE Accumulators
+	// [0]: White, [1]: Black
+	// We store them here to carry them through the search
+	accumulators:    [2]Accumulator,
+}
+
+// NNUE Accumulator (256x2)
+Accumulator :: struct {
+	values: [256]i16, // Hardcoded 256 for now
 }
 
 // Castling Rights Bits

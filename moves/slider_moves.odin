@@ -329,14 +329,8 @@ init_magics :: proc(is_rook: bool) {
 		for !found {
 			magic := get_random_u64_fewbits()
 
-			// Skip if magic doesn't have enough bits (heuristic)
-			if utils.count_bits((mask * magic) & 0xFF00000000000000) < 6 {continue}
-
 			// Verify Magic
 			// We need to ensure that (occupancy * magic) >> (64 - bits) maps to a unique index for every distinct attack set.
-			// Actually, it must map to a unique index for every distinct *occupancy*?
-			// No, multiple occupancies can map to the same index IF they produce the same attack set (Constructive Collision).
-			// But for simplicity, we usually enforce unique mapping for occupancies or just clear the table.
 
 			// Let's try to fill the table
 			table := is_rook ? &RookTable : &BishopTable
