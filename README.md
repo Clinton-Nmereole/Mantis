@@ -1,0 +1,1 @@
+Mantis is a chess engine written in Odin. This is a pet project so this engine might not be to the strength level of modern engines like Stockfish and Leela. This is a hobby project and I will add to it as I feel the need to do so.
