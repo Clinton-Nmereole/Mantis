@@ -36,7 +36,7 @@ Board :: struct {
 
 // NNUE Accumulator (256x2)
 Accumulator :: struct {
-	values: [256]i16, // Hardcoded 256 for now
+	values: [2048]i16, // Matches NNUE HIDDEN_SIZE
 }
 
 // Castling Rights Bits
@@ -74,6 +74,7 @@ char_to_piece :: proc(c: rune) -> int {
 	case 'K':
 		return constants.KING
 	case 'p':
+		// offsets of +6 because in chess_constants pieces are not differentiated as white or black so the offset makes them black pieces.:
 		return constants.PAWN + 6
 	case 'n':
 		return constants.KNIGHT + 6
@@ -253,7 +254,11 @@ print_board :: proc(board: Board) {
 	}
 	fmt.println("     a   b   c   d   e   f   g   h\n")
 
-	fmt.printf("Side: %s\n", board.side == constants.WHITE ? "White" : "Black")
+	side_str := "White"
+	if board.side == constants.BLACK {
+		side_str = "Black"
+	}
+	fmt.printf("Side: %s\n", side_str)
 	fmt.printf("En Passant: %d\n", board.en_passant)
 	fmt.printf("Castling: %04b\n", board.castle)
 }

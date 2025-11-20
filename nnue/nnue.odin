@@ -5,18 +5,13 @@ import "../constants"
 import "../moves"
 import "core:fmt"
 import "core:os"
-import "core:simd"
 
-// NNUE Constants (Standard HalfKP-256x2-32-32)
-// Input Dimensions:
-// KingSquare (64) * Side (2) * PieceType (5) * PieceSquare (64) ?
-// HalfKP usually maps: (KingSq * 640) + (PieceType * 64) + PieceSq?
-// Actually, standard HalfKP is:
-// 64 King Squares * 5 Piece Types * 2 Colors * 64 Squares = 40960 inputs?
-// No, usually it's 41024 to align.
 
-INPUT_SIZE :: 41024
-HIDDEN_SIZE :: 256
+// NNUE Constants (HalfKAv2_hm)
+// Input: 45056 (HalfKAv2)
+// Hidden: 1024 (likely for this file size)
+INPUT_SIZE :: 45056
+HIDDEN_SIZE :: 2048
 
 // Quantization
 QA :: 255
@@ -30,8 +25,11 @@ Network :: struct {
 	feature_biases:  [HIDDEN_SIZE]i16,
 
 	// Hidden Layers (Hidden -> Output)
-	// Layer 1: 512 (2x256) -> 32
-	l1_weights:      [512 * 32]i8,
+	// Layer 1: 1024 (2x512) -> 32 ? Or 1024 -> 32?
+	// Usually: (Accumulator 2x512) -> Layer1 (32) -> Layer2 (32) -> Output (1)
+	// Wait, if Hidden is 1024, is it 2x512? Yes.
+	// Layer 1: 1024 -> 32
+	l1_weights:      [1024 * 32]i8,
 	l1_biases:       [32]i32,
 
 	// Layer 2: 32 -> 32
@@ -47,164 +45,187 @@ Network :: struct {
 current_network: Network
 is_initialized: bool = false
 
+// Helper to read LEB128
+read_uleb128 :: proc(data: []byte, offset: ^int) -> u32 {
+	result: u32 = 0
+	shift: u32 = 0
+	for {
+		byte_val := data[offset^]
+		offset^ += 1
+		result |= u32(byte_val & 0x7F) << shift
+		if (byte_val & 0x80) == 0 {
+			break
+		}
+		shift += 7
+	}
+	return result
+}
+
+read_sleb128 :: proc(data: []byte, offset: ^int) -> i32 {
+	result: i32 = 0
+	shift: u32 = 0
+	byte_val: byte
+	for {
+		byte_val = data[offset^]
+		offset^ += 1
+		result |= i32(byte_val & 0x7F) << shift
+		shift += 7
+		if (byte_val & 0x80) == 0 {
+			break
+		}
+	}
+	// Sign extension
+	if (shift < 32) && ((byte_val & 0x40) != 0) {
+		result |= (~i32(0)) << shift
+	}
+	return result
+}
+
+// Helper to read standard types
+read_i16 :: proc(data: []byte, offset: ^int) -> i16 {
+	b1 := data[offset^]; offset^ += 1
+	b2 := data[offset^]; offset^ += 1
+	return i16(u16(b1) | (u16(b2) << 8))
+}
+
+read_i32 :: proc(data: []byte, offset: ^int) -> i32 {
+	b1 := data[offset^]; offset^ += 1
+	b2 := data[offset^]; offset^ += 1
+	b3 := data[offset^]; offset^ += 1
+	b4 := data[offset^]; offset^ += 1
+	return i32(u32(b1) | (u32(b2) << 8) | (u32(b3) << 16) | (u32(b4) << 24))
+}
+
+read_i8 :: proc(data: []byte, offset: ^int) -> i8 {
+	val := (^i8)(&data[offset^])^
+	offset^ += 1
+	return val
+}
+
 // Initialize / Load Network
 init_nnue :: proc(filename: string) -> bool {
 	handle, err := os.open(filename)
 	if err != os.ERROR_NONE {
-		fmt.printf("Error opening file: %v\n", err)
 		return false
 	}
-	defer os.close(handle)
-
 	// Get file size
 	file_size, _ := os.file_size(handle)
 	data, read_success := os.read_entire_file(filename)
 	if !read_success {
-		fmt.println("Error reading file.")
 		return false
 	}
-	defer delete(data)
-
-	// Parse Data
-	// Standard NNUE file format (Stockfish/Marlinflow compatible usually has a header)
-	// Header: 4 bytes version (usually) + 4 bytes hash?
-	// Or sometimes just raw weights.
-	// Let's assume standard architecture:
-	// Feature Transformer:
-	//   Biases: 256 * 2 (i16) = 512 bytes
-	//   Weights: 41024 * 256 * 2 (i16) = 20,971,520 bytes approx
-	// Layer 1:
-	//   Biases: 32 * 4 (i32) = 128 bytes
-	//   Weights: 512 * 32 (i8) = 16,384 bytes
-	// Layer 2:
-	//   Biases: 32 * 4 (i32) = 128 bytes
-	//   Weights: 32 * 32 (i8) = 1024 bytes
-	// Output:
-	//   Bias: 4 (i32) = 4 bytes
-	//   Weights: 32 (i8) = 32 bytes
-
-	// Total size check?
-	// Let's try to read sequentially.
+	// defer delete(data) // Removed for debug
 
 	offset := 0
 
-	// Skip Header (usually 176 bytes or similar for recent formats, or just check magic)
-	// Simple check: if file size is exactly what we expect for raw weights.
-	// Raw size = 512 + 21004288 + 128 + 16384 + 128 + 1024 + 4 + 32 = ~21MB
+	// Read Header
+	version := read_i32(data, &offset)
+	hash := read_i32(data, &offset)
+	desc_len := read_i32(data, &offset)
 
-	// Let's assume a specific format or try to read raw.
-	// Many engines use a specific layout.
-	// Layout:
-	// FeatureTransformer:
-	//   bias: [256]i16
-	//   weight: [41024][256]i16 (Column Major? Row Major? Usually [Input][Output])
-	// Layer 1:
-	//   bias: [32]i32
-	//   weight: [32][512]i8 (Usually [Output][Input])
-	// Layer 2:
-	//   bias: [32]i32
-	//   weight: [32][32]i8
-	// Output:
-	//   bias: [1]i32
-	//   weight: [1][32]i8
-
-	// NOTE: Stockfish puts the header at the start.
-	// Header is usually: version (4 bytes), hash (4 bytes), description length (4 bytes), description...
-	// We will skip the header by finding the start of data?
-	// Or just assume a fixed header size if we use a specific net.
-	// Let's just try to read the weights directly. If the numbers look garbage, we know.
-
-	// Actually, reading raw bytes into structs is unsafe if endianness differs, but usually Little Endian.
-
-	// Helper to read
-	read_i16 :: proc(data: []byte, offset: ^int) -> i16 {
-		val := (^i16)(&data[offset^])^
-		offset^ += 2
-		return val
+	if desc_len > 0 {
+		offset += int(desc_len)
 	}
 
-	read_i32 :: proc(data: []byte, offset: ^int) -> i32 {
-		val := (^i32)(&data[offset^])^
-		offset^ += 4
-		return val
+	// Helper to read layer header
+	read_layer_header :: proc(data: []byte, offset: ^int) -> (i32, string) {
+		l_hash := read_i32(data, offset)
+		l_type := ""
+		if offset^ + 17 <= len(data) {
+			type_str := string(data[offset^:offset^ + 17])
+			if type_str == "COMPRESSED_LEB128" {
+				l_type = type_str
+				offset^ += 17
+			}
+		}
+		if l_type == "" {
+			l_type_len := read_i32(data, offset)
+			if offset^ + int(l_type_len) <= len(data) {
+				l_type_bytes := data[offset^:offset^ + int(l_type_len)]
+				l_type = string(l_type_bytes)
+				offset^ += int(l_type_len)
+			}
+		}
+		return l_hash, l_type
 	}
 
-	read_i8 :: proc(data: []byte, offset: ^int) -> i8 {
-		val := (^i8)(&data[offset^])^
-		offset^ += 1
-		return val
+	// 1. Feature Transformer Biases
+	_, l_type := read_layer_header(data, &offset)
+	if l_type == "COMPRESSED_LEB128" {
+		// Read only 1024 biases (File has 1024 biases but 2048 weights)
+		for i in 0 ..< 1024 {
+			current_network.feature_biases[i] = i16(read_sleb128(data, &offset))
+		}
+	} else {
+		return false
 	}
 
-	// Skip Header?
-	// Let's try to detect.
-	// Valid NNUE file usually starts with specific magic.
-	// For now, let's assume we are loading a "raw" dump or we skip 0 bytes.
-	// If the user provides a .nnue file from Stockfish, it has a header.
-	// The header size varies.
-	// But the weights are huge.
-
-	// Let's try to read Feature Transformer Biases first.
-	for i in 0 ..< HIDDEN_SIZE {
-		current_network.feature_biases[i] = read_i16(data, &offset)
+	// 2. Feature Transformer Weights
+	_, l_type = read_layer_header(data, &offset)
+	if l_type == "COMPRESSED_LEB128" {
+		// Read 2048 * INPUT_SIZE weights
+		for i in 0 ..< INPUT_SIZE * 2048 {
+			current_network.feature_weights[i] = i16(read_sleb128(data, &offset))
+		}
+	} else {
+		return false
 	}
 
-	// Feature Weights
-	// Order: [Input][Hidden] (41024 * 256)
-	for i in 0 ..< INPUT_SIZE * HIDDEN_SIZE {
-		current_network.feature_weights[i] = read_i16(data, &offset)
+	// 3. Layer 1 Biases
+	_, l_type = read_layer_header(data, &offset)
+	if l_type == "COMPRESSED_LEB128" {
+		for i in 0 ..< 32 {
+			current_network.l1_biases[i] = read_sleb128(data, &offset)
+		}
+	} else {
+		return false
 	}
 
-	// Layer 1 Biases
-	for i in 0 ..< 32 {
-		current_network.l1_biases[i] = read_i32(data, &offset)
-	}
-
-	// Layer 1 Weights
-	// Order: [Output][Input] (32 * 512)
-	// My struct has [512 * 32].
-	// If the file is [32][512], we need to transpose or index correctly.
-	// Stockfish stores [Output][Input].
-	// So file has: 32 rows of 512 weights.
-	// Row 0: w(0,0), w(0,1)... w(0,511) -> Weights for Output Neuron 0.
-	// My forward pass:
-	// for j in 0..<32 { l1_out[j] += input[i] * weight[i*32 + j] }
-	// This implies my struct is [Input][Output].
-	// So I need to transpose.
-
-	for r in 0 ..< 32 { 	// Output
-		for c in 0 ..< 512 { 	// Input
-			val := read_i8(data, &offset)
-			// Store at [Input][Output] -> [c][r] -> c*32 + r
-			current_network.l1_weights[c * 32 + r] = val
+	// 4. Layer 1 Weights
+	_, l_type = read_layer_header(data, &offset)
+	if l_type == "COMPRESSED_LEB128" {
+		for r in 0 ..< 32 {
+			for c in 0 ..< HIDDEN_SIZE {
+				val := i8(read_sleb128(data, &offset))
+				current_network.l1_weights[c * 32 + r] = val
+			}
 		}
 	}
 
-	// Layer 2 Biases
-	for i in 0 ..< 32 {
-		current_network.l2_biases[i] = read_i32(data, &offset)
-	}
-
-	// Layer 2 Weights
-	// Order: [Output][Input] (32 * 32)
-	for r in 0 ..< 32 {
-		for c in 0 ..< 32 {
-			val := read_i8(data, &offset)
-			// Store at [Input][Output] -> [c][r] -> c*32 + r
-			current_network.l2_weights[c * 32 + r] = val
+	// 5. Layer 2 Biases
+	_, l_type = read_layer_header(data, &offset)
+	if l_type == "COMPRESSED_LEB128" {
+		for i in 0 ..< 32 {
+			current_network.l2_biases[i] = read_sleb128(data, &offset)
 		}
 	}
 
-	// Output Bias
-	current_network.output_bias = read_i32(data, &offset)
+	// 6. Layer 2 Weights
+	_, l_type = read_layer_header(data, &offset)
+	if l_type == "COMPRESSED_LEB128" {
+		for r in 0 ..< 32 {
+			for c in 0 ..< 32 {
+				val := i8(read_sleb128(data, &offset))
+				current_network.l2_weights[c * 32 + r] = val
+			}
+		}
+	}
 
-	// Output Weights
-	// Order: [1][Input] (1 * 32)
-	for i in 0 ..< 32 {
-		current_network.output_weights[i] = read_i8(data, &offset)
+	// 7. Output Bias
+	_, l_type = read_layer_header(data, &offset)
+	if l_type == "COMPRESSED_LEB128" {
+		current_network.output_bias = read_sleb128(data, &offset)
+	}
+
+	// 8. Output Weights
+	_, l_type = read_layer_header(data, &offset)
+	if l_type == "COMPRESSED_LEB128" {
+		for i in 0 ..< 32 {
+			current_network.output_weights[i] = i8(read_sleb128(data, &offset))
+		}
 	}
 
 	is_initialized = true
-	fmt.println("NNUE Initialized.")
 	return true
 }
 
@@ -214,46 +235,34 @@ evaluate :: proc(b: ^board.Board) -> int {
 		return 0 // Should fallback to HCE
 	}
 
-	// 1. Refresh Accumulators (if needed)
-	// Ideally we update them incrementally in make_move.
-	// For now, we compute from scratch.
-
-	white_acc := compute_accumulator(b, constants.WHITE)
-	black_acc := compute_accumulator(b, constants.BLACK)
+	// Use the incrementally updated accumulators from the board
+	// (These are updated by update_accumulators in search)
+	white_acc := b.accumulators[constants.WHITE]
+	black_acc := b.accumulators[constants.BLACK]
 
 	// 2. Forward Pass
 	// Perspective: Side to move
+
 	stm := b.side
 
-	input: [512]i16
+	input: [HIDDEN_SIZE]i16
 
-	// Concat accumulators based on perspective
-	// [Us, Them]
+	// Use Accumulator directly (2048 size)
 	if stm == constants.WHITE {
-		for i in 0 ..< 256 {input[i] = white_acc.values[i]}
-		for i in 0 ..< 256 {input[256 + i] = black_acc.values[i]}
+		for i in 0 ..< HIDDEN_SIZE {input[i] = white_acc.values[i]}
 	} else {
-		for i in 0 ..< 256 {input[i] = black_acc.values[i]}
-		for i in 0 ..< 256 {input[256 + i] = white_acc.values[i]}
+		for i in 0 ..< HIDDEN_SIZE {input[i] = black_acc.values[i]}
 	}
-
-	// Clamp and Activation (Clipped ReLU: 0..127)
-	// The accumulator values are i16.
-	// We need to clamp them to 0..QA (255) or similar?
-	// Standard NNUE uses Clipped ReLU on the output of the feature transformer?
-	// Actually, usually the accumulator stores raw sums.
-	// The activation is applied before the next layer.
 
 	// Layer 1
 	l1_out: [32]i32
 	for i in 0 ..< 32 {l1_out[i] = current_network.l1_biases[i]}
 
-	for i in 0 ..< 512 {
+	for i in 0 ..< HIDDEN_SIZE {
 		val := input[i]
-		// Activation: Clipped ReLU (0..127 usually for i8 weights?)
-		// Actually, SF uses 0..127.
+		// Activation: Clipped ReLU (0..QA)
 		if val < 0 {val = 0}
-		if val > 127 {val = 127}
+		if val > QA {val = QA}
 
 		if val != 0 {
 			for j in 0 ..< 32 {
@@ -270,7 +279,7 @@ evaluate :: proc(b: ^board.Board) -> int {
 		val := l1_out[i]
 		// Activation
 		if val < 0 {val = 0}
-		if val > 127 {val = 127} 	// Quantization scaling might differ
+		if val > QA {val = QA}
 
 		if val != 0 {
 			for j in 0 ..< 32 {
@@ -284,14 +293,14 @@ evaluate :: proc(b: ^board.Board) -> int {
 	for i in 0 ..< 32 {
 		val := l2_out[i]
 		if val < 0 {val = 0}
-		if val > 127 {val = 127}
+		if val > QO {val = QO}
 
 		output += val * i32(current_network.output_weights[i])
 	}
 
 	// Scale to Centipawns
-	// Usually output is roughly cp * constant
-	return int(output / 16) // Example scaling
+	final_score := int(output / 16)
+	return final_score
 }
 
 // Compute Accumulator from scratch
@@ -368,17 +377,22 @@ get_feature_index :: proc(king_sq: int, sq: int, piece: int, side: int) -> int {
 		if p_type < 6 {p_type += 6} else {p_type -= 6}
 	}
 
-	// Map Piece Type to 0-10 (excluding King)
-	// P(0), N(1), B(2), R(3), Q(4)
-	// p(6)->5, n(7)->6, b(8)->7, r(9)->8, q(10)->9
-	// Kings are 5 and 11.
+	// Map Piece Type to 0-10
+	// Own: P(0), N(1), B(2), R(3), Q(4), K(5 - skipped for own)
+	// Enemy: p(6)->5, n(7)->6, b(8)->7, r(9)->8, q(10)->9, k(11)->10
 
 	idx := 0
-	if p_type < 5 {idx = p_type} else // Own pieces
-	if p_type > 5 && p_type < 11 {idx = p_type - 1} else // Enemy pieces (skip King 5)
-	{return 0} 	// Should not happen if King excluded
+	if p_type < 5 {
+		idx = p_type
+	} else if p_type > 5 && p_type < 11 {
+		idx = p_type - 1
+	} else if p_type == 11 {
+		idx = 10 // Enemy King
+	} else {
+		return 0 // Own King (should be skipped by caller) or invalid
+	}
 
-	return k_sq * 640 + idx * 64 + p_sq
+	return k_sq * 704 + idx * 64 + p_sq
 }
 
 // Update Accumulators Incrementally
@@ -461,7 +475,10 @@ update_single_accumulator :: proc(
 ) {
 	// Moving Piece
 	side := b.side
-	piece := move.piece + (side == constants.WHITE ? 0 : 6)
+	piece := move.piece
+	if side == constants.BLACK {
+		piece += 6
+	}
 
 	// Remove from Source
 	idx_rem := get_feature_index(
@@ -477,7 +494,10 @@ update_single_accumulator :: proc(
 	// Add to Target (Handle Promotion)
 	final_piece := piece
 	if move.promoted != -1 {
-		final_piece = move.promoted + (side == constants.WHITE ? 0 : 6)
+		final_piece = move.promoted
+		if side == constants.BLACK {
+			final_piece += 6
+		}
 	}
 
 	idx_add := get_feature_index(

@@ -1,0 +1,6 @@
+uci
+setoption name EvalFile value nn-82215d0fd0df.nnue
+isready
+position startpos
+go depth 4
+quit

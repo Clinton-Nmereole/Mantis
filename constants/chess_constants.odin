@@ -46,3 +46,13 @@ RANK_5: u64 = 0x000000FF00000000
 RANK_6: u64 = 0x0000FF0000000000
 RANK_7: u64 = 0x00FF000000000000
 RANK_8: u64 = 0xFF00000000000000
+
+// Piece Values for MVV-LVA
+PIECE_VALUES := [6]int {
+	100, // Pawn
+	300, // Knight
+	300, // Bishop
+	500, // Rook
+	900, // Queen
+	10000, // King
+}

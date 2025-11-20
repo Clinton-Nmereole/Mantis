@@ -18,9 +18,14 @@ uci_loop :: proc() {
 	bufio.reader_init(&reader, os.stream_from_handle(os.stdin))
 	defer bufio.reader_destroy(&reader)
 
-	game_board := board.init_board()
+	game_board := board.parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
 
-	fmt.println("Mantis Chess Engine")
+	// Initialize TT
+	search.init_tt(64) // Default 64MB
+
+	// Load Default NNUE (silently)
+	default_nnue := "nn-c0ae49f08b40.nnue"
+	nnue.init_nnue(default_nnue)
 
 	for {
 		line, err := bufio.reader_read_string(&reader, '\n')
@@ -37,12 +42,15 @@ uci_loop :: proc() {
 		} else if command == "uci" {
 			fmt.println("id name Mantis")
 			fmt.println("id author")
+			fmt.println("option name Hash type spin default 64 min 1 max 1024")
+			fmt.println("option name EvalFile type string default nn-c0ae49f08b40.nnue")
 			fmt.println("uciok")
 			os.flush(os.stdout)
 		} else if command == "isready" {
 			fmt.println("readyok")
 			os.flush(os.stdout)
 		} else if command == "ucinewgame" {
+			search.clear_tt()
 			game_board = board.init_board()
 		} else if strings.has_prefix(command, "position") {
 			parse_position(command, &game_board)
@@ -116,25 +124,59 @@ parse_go :: proc(command: string, b: ^board.Board) {
 	defer delete(parts)
 
 	depth := -1
+	tc: search.TimeControl
 
-	// Simple parsing for now
+	// Parse all parameters
 	for i in 1 ..< len(parts) {
 		if parts[i] == "depth" {
 			if i + 1 < len(parts) {
 				val, ok := strconv.parse_int(parts[i + 1])
 				if ok {depth = val}
 			}
+		} else if parts[i] == "wtime" {
+			if i + 1 < len(parts) {
+				val, ok := strconv.parse_int(parts[i + 1])
+				if ok {tc.wtime = val}
+			}
+		} else if parts[i] == "btime" {
+			if i + 1 < len(parts) {
+				val, ok := strconv.parse_int(parts[i + 1])
+				if ok {tc.btime = val}
+			}
+		} else if parts[i] == "winc" {
+			if i + 1 < len(parts) {
+				val, ok := strconv.parse_int(parts[i + 1])
+				if ok {tc.winc = val}
+			}
+		} else if parts[i] == "binc" {
+			if i + 1 < len(parts) {
+				val, ok := strconv.parse_int(parts[i + 1])
+				if ok {tc.binc = val}
+			}
+		} else if parts[i] == "movestogo" {
+			if i + 1 < len(parts) {
+				val, ok := strconv.parse_int(parts[i + 1])
+				if ok {tc.movestogo = val}
+			}
 		}
-		// TODO: Handle wtime, btime, movestogo, etc. for time management
 	}
 
 	if depth == -1 {
-		depth = 6 // Default depth
+		depth = 64 // Default to max depth with time control
 	}
 
-	// Run Search
-	search.search_position(b, depth)
+	// If time control specified, use time management
+	if tc.wtime > 0 || tc.btime > 0 {
+		limits := search.calculate_time(tc, b.side)
+		search.search_limits = limits
+		search.use_time_management = true
+		search.search_position(b, depth)
+		search.use_time_management = false
+	} else {
+		search.search_position(b, depth)
+	}
 }
+
 
 // Parse 'setoption' command
 // setoption name EvalFile value <path>
@@ -142,23 +184,29 @@ parse_setoption :: proc(command: string) {
 	parts := strings.split(command, " ")
 	defer delete(parts)
 
-	// setoption name EvalFile value <path>
-	// 0         1    2        3     4...
+	// setoption name <Name> value <Value>
+	// 0         1    2      3     4...
 
-	if len(parts) >= 5 && parts[1] == "name" && parts[2] == "EvalFile" && parts[3] == "value" {
-		// The value might be multiple words (though usually a path is one)
-		// Let's assume it's the rest of the string
-		// But strings.split splits by space.
-		// Reconstruct path
-		path_parts := parts[4:]
-		path := strings.join(path_parts, " ")
-		defer delete(path)
+	if len(parts) >= 5 && parts[1] == "name" && parts[3] == "value" {
+		name := parts[2]
 
-		fmt.printf("Loading network from: %s\n", path)
-		if nnue.init_nnue(path) {
-			fmt.println("Network loaded successfully.")
-		} else {
-			fmt.println("Failed to load network.")
+		if name == "EvalFile" {
+			// Reconstruct path
+			path_parts := parts[4:]
+			path := strings.join(path_parts, " ")
+			defer delete(path)
+
+			fmt.printf("Loading network from: %s\n", path)
+			if nnue.init_nnue(path) {
+				fmt.println("Network loaded successfully.")
+			} else {
+				fmt.println("Failed to load network.")
+			}
+		} else if name == "Hash" {
+			val, ok := strconv.parse_int(parts[4])
+			if ok {
+				search.init_tt(val)
+			}
 		}
 	}
 }

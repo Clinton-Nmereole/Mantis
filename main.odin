@@ -38,14 +38,19 @@ is_bit_set :: proc(bitboard: ^u64, square: u64) -> bool {
 
 
 main :: proc() {
+	fmt.println("Starting Mantis...")
 	// Initialize Magic Bitboards
 	fmt.println("Initializing Magic Bitboards...")
 	moves.init_sliders()
+	fmt.println("Magic Bitboards Initialized.")
 
 	// Initialize Zobrist Keys
+	fmt.println("Initializing Zobrist...")
 	zobrist.init_zobrist()
+	fmt.println("Zobrist Initialized.")
 
 	// Initialize Board
+	fmt.println("Initializing Board...")
 	board.init_board()
 	fmt.println("Initialization Complete.")
 
