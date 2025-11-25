@@ -19,6 +19,7 @@ QB :: 64
 QO :: 127 // Output quantization
 
 // Network Weights Structure
+//Arrays will be manually aligned during allocation for SIMD performance
 Network :: struct {
 	// Feature Transformer (Input -> Hidden)
 	feature_weights: [INPUT_SIZE * HIDDEN_SIZE]i16,

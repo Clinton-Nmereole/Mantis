@@ -181,7 +181,6 @@ negamax :: proc(
 	if !is_pv && !in_check && depth <= 3 {
 		evaluation := eval.evaluate(b)
 		razor_margin := 300 * depth
-
 		if evaluation + razor_margin < alpha {
 			// Position is so bad even with margin, just do quiescence
 			qscore := quiescence(b, alpha, beta)
@@ -342,22 +341,22 @@ negamax :: proc(
 			} else {
 				// Subsequent moves: PVS with LMR
 
-				// LMR Parameters - MUCH more aggressive
-				LMR_MIN_DEPTH :: 2 // Apply earlier (was 3)
-				LMR_MOVE_THRESHOLD :: 1 // After 1st move (was 3)
+				// LMR Parameters - Aggressive but stable
+				LMR_MIN_DEPTH :: 1 // Apply at all depths
+				LMR_MOVE_THRESHOLD :: 0 // Apply to all moves after PV
 
 				reduction := 0
 
 				// Apply LMR if:
-				// 1. Deep enough (depth >= 2)
+				// 1. Deep enough (depth >= 1)
 				// 2. Not a tactical move (capture, promotion)
-				// 3. After first move
+				// 3. After first move (PV move)
 				if combined_depth >= LMR_MIN_DEPTH &&
 				   !move.capture &&
 				   move.promoted == -1 &&
 				   legal_moves > LMR_MOVE_THRESHOLD {
-					// Logarithmic reduction formula - more aggressive
-					reduction = int(math.ln(f64(combined_depth)) * math.ln(f64(legal_moves)) / 2.0)
+					// Logarithmic reduction formula - aggressive but safe
+					reduction = int(math.ln(f64(combined_depth)) * math.ln(f64(legal_moves)) / 1.5)
 
 					// Clamp to reasonable range
 					if reduction < 1 {reduction = 1}
@@ -516,8 +515,8 @@ search_position :: proc(
 
 	start_time := time.now()
 
-	// Aspiration Windows
-	ASPIRATION_WINDOW :: 50
+	// Aspiration Windows - narrower for faster convergence
+	ASPIRATION_WINDOW :: 25 // Reduced from 50
 	prev_score := 0
 
 	// MultiPV storage - track best N moves
@@ -551,8 +550,8 @@ search_position :: proc(
 			alpha := -eval.INF
 			beta := eval.INF
 
-			// Use aspiration windows for depth >= 5 and first PV only
-			if current_depth >= 5 && pv_index == 0 {
+			// Use aspiration windows for depth >= 4 (was 5) and first PV only
+			if current_depth >= 4 && pv_index == 0 {
 				alpha = prev_score - ASPIRATION_WINDOW
 				beta = prev_score + ASPIRATION_WINDOW
 			}

@@ -55,9 +55,16 @@ Thread_Worker_Data :: struct {
 search_worker :: proc(t: ^thread.Thread) {
 	data := cast(^Thread_Worker_Data)t.data
 
+	// Add search diversity: each thread searches at slightly different depth
+	// This reduces duplicate work across threads
+	adjusted_depth := data.depth
+	if data.thread_id % 2 == 1 {
+		adjusted_depth = max(1, data.depth - 1) // Odd threads search 1 ply shallower
+	}
+
 	// Search the position (suppress bestmove output for workers)
 	// Each thread has its own killer/history tables (thread-local globals in Odin)
-	search_position(&data.board, data.depth, data.multi_pv, output_bestmove = false)
+	search_position(&data.board, adjusted_depth, data.multi_pv, output_bestmove = false)
 
 	// Clean up worker data
 	free(data)

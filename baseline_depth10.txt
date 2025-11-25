@@ -1,0 +1,39 @@
+Starting Mantis...
+Initializing Magic Bitboards...
+Magic Bitboards Initialized.
+Initializing Zobrist...
+Zobrist Initialized.
+Initializing Board...
+Initialization Complete.
+Transposition Table Initialized: 64 MB, 932067 Entries
+id name Mantis
+id author
+option name Hash type spin default 64 min 1 max 1024
+option name EvalFile type string default nn-c0ae49f08b40.nnue
+option name Move Overhead type spin default 10 min 0 max 5000
+option name MultiPV type spin default 1 min 1 max 500
+option name Ponder type check default false
+option name Threads type spin default 1 min 1 max 512
+uciok
+Transposition Table Initialized: 128 MB, 1864135 Entries
+info depth 1 score cp 50 nodes 40 time 0 nps 0 pv b1c3
+info depth 2 score cp 0 nodes 340 time 0 nps 0 pv b1c3 b8c6
+info depth 3 score cp 50 nodes 1606 time 0 nps 0 pv b1c3 b8c6 g1f3
+info depth 4 score cp 25 nodes 2628 time 0 nps 0 pv a2a3 b8c6 b1c3 a7a6
+info depth 5 score cp 5 nodes 6656 time 1 nps 6656000 pv b1a3 b8c6 g1f3 g8f6 a3c4
+info depth 6 score cp 0 nodes 15971 time 4 nps 3992750 pv b1c3 b8c6 g1f3 g8f6 a1b1 a8b8
+info depth 7 score cp 0 nodes 34710 time 10 nps 3471000 pv b1a3 b8c6 g1f3 g8f6 a3c4 f6e4 f3e5
+info depth 8 score cp 0 nodes 63492 time 19 nps 3341684 pv b1a3 b8c6 g1f3 g8f6 a3c4 f6e4 c4e5 c6e5
+info depth 9 score cp 0 nodes 112676 time 38 nps 2965157 pv b1a3 b8c6 g1f3 g8f6 a3c4 f6e4 c4e5 c6e5 f3e5
+info depth 10 score cp 0 nodes 197418 time 70 nps 2820257 pv b1a3 b8c6 g1f3 g8f6 a3c4 f6e4 c4e5 c6e5 f3e5 a8b8
+info depth 11 score cp 0 nodes 283728 time 99 nps 2865939 pv d2d3 g8f6 b1c3 b8c6 g1f3 c6b4 c1e3 b4d5 d1d2 d5e3 d2e3
+info depth 12 score cp 0 nodes 481796 time 180 nps 2676644 pv d2d3 g8f6 b1c3 b8c6 g1f3 c6b4 c1e3 b4d5 d1d2 d5e3 d2e3 h8g8
+info depth 13 score cp 0 nodes 772873 time 297 nps 2602265 pv d2d3 g8f6 b1c3 b8c6 g1f3 c6b4 c1e3 b4d5 d1d2 d5c3 d2c3 f6d5 c3d4
+info depth 14 score cp 0 nodes 1432070 time 623 nps 2298667 pv d2d3 g8f6 b1c3 b8c6 g1f3 c6b4 c1e3 b4d5 d1d2 d5c3 d2c3 f6d5 c3d4 d5e3
+info depth 15 score cp 0 nodes 3309543 time 1613 nps 2051793 pv e2e3 b8c6 g1f3 g8f6 b1c3 f6g4 f1d3 g4e5 d1e2 e5f3 e2f3 c6e5 f3e4 e5d3 e4d3
+info depth 16 score cp 5 nodes 6125138 time 3250 nps 1884657 pv d2d4 b8c6 g1f3 g8f6 b1c3 c6b4 c1e3 e7e6 f3e5 f8d6 e5c4 d6e7 c4e5 b4d5 c3d5 f6d5
+info depth 17 score cp 10 nodes 13160854 time 8152 nps 1614432 pv e2e3 b8c6 g1f3 g8f6 b1c3 f6g4 f1d3 g4e5 d1e2 e5f3 e2f3 c6e5 f3e4 e5d3 e4d3 a8b8 c3e4
+info depth 18 score cp 5 nodes 19816284 time 12557 nps 1578106 pv e2e3 b8c6 g1f3 g8f6 b1c3 e7e6 f1b5 c6b4 b5c4 f8d6 e1g1 b4d5 c3d5 f6d5 c4d5 e6d5 f3d4 e8f8
+info depth 19 score cp 10 nodes 42577387 time 29255 nps 1455388 pv e2e3 b8c6 g1f3 g8f6 b1c3 e7e6 f1b5 c6b4 b5c4 f8d6 e1g1 b4c6 g1h1 e8f8 c3b5 d8e7 b5d4 c6d4 f3d4
+info depth 20 score cp 5 nodes 77027546 time 56448 nps 1364575 pv e2e3 b8c6 g1f3 g8f6 b1c3 e7e6 f1b5 c6b4 b5c4 f8d6 e1g1 b4c6 g1h1 d8e7 f3d4 c6d4 e3d4 e8f8 d1f3 a8b8
+bestmove e2e3

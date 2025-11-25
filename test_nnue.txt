@@ -1,0 +1,5 @@
+uci
+setoption name EvalFile value nn-1111cefa1111.nnue
+position startpos
+go depth 6
+quit
