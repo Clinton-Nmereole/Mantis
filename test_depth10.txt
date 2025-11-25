@@ -1,0 +1,6 @@
+uci
+setoption name Threads value 1
+setoption name Hash value 128
+position startpos
+go depth 15
+quit

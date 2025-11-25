@@ -27,17 +27,19 @@ make_move :: proc(board: ^Board, move: moves.Move, side: int) -> bool {
 
 	// 1. Remove piece from source
 	board.bitboards[piece_idx] &= ~(u64(1) << u64(move.source))
+	board.mailbox[move.source] = -1 // Clear source square
 	board.hash ~= zobrist.piece_keys[piece_idx][move.source]
 
 	// 2. Add piece to target (Handle Promotion)
 	if move.promoted == -1 {
 		board.bitboards[piece_idx] |= (u64(1) << u64(move.target))
+		board.mailbox[move.target] = i8(piece_idx) // Update mailbox
 		board.hash ~= zobrist.piece_keys[piece_idx][move.target]
 	} else {
-		// Remove the pawn from target (we just added it? No, we didn't add it yet)
-		// We removed pawn from source. We need to add promoted piece to target.
+		// Promotion: add promoted piece to target
 		promoted_index := move.promoted + (side == constants.WHITE ? 0 : 6)
 		board.bitboards[promoted_index] |= (u64(1) << u64(move.target))
+		board.mailbox[move.target] = i8(promoted_index) // Update mailbox with promoted piece
 		board.hash ~= zobrist.piece_keys[promoted_index][move.target]
 	}
 
@@ -62,6 +64,7 @@ make_move :: proc(board: ^Board, move: moves.Move, side: int) -> bool {
 		capture_square := (side == constants.WHITE) ? move.target - 8 : move.target + 8
 		enemy_pawn := (side == constants.WHITE) ? constants.PAWN + 6 : constants.PAWN
 		board.bitboards[enemy_pawn] &= ~(u64(1) << u64(capture_square))
+		board.mailbox[capture_square] = -1 // Clear captured pawn
 		board.hash ~= zobrist.piece_keys[enemy_pawn][capture_square]
 	}
 
@@ -74,24 +77,32 @@ make_move :: proc(board: ^Board, move: moves.Move, side: int) -> bool {
 				// Move Rook H1 (7) -> F1 (5)
 				board.bitboards[constants.ROOK] &= ~(u64(1) << 7)
 				board.bitboards[constants.ROOK] |= (u64(1) << 5)
+				board.mailbox[7] = -1
+				board.mailbox[5] = i8(constants.ROOK)
 				board.hash ~= zobrist.piece_keys[constants.ROOK][7]
 				board.hash ~= zobrist.piece_keys[constants.ROOK][5]
 			} else if move.target == 2 { 	// C1
 				// Move Rook A1 (0) -> D1 (3)
 				board.bitboards[constants.ROOK] &= ~(u64(1) << 0)
 				board.bitboards[constants.ROOK] |= (u64(1) << 3)
+				board.mailbox[0] = -1
+				board.mailbox[3] = i8(constants.ROOK)
 				board.hash ~= zobrist.piece_keys[constants.ROOK][0]
 				board.hash ~= zobrist.piece_keys[constants.ROOK][3]
 			} else if move.target == 62 { 	// G8
 				// Move Rook H8 (63) -> F8 (61)
 				board.bitboards[constants.ROOK + 6] &= ~(u64(1) << 63)
 				board.bitboards[constants.ROOK + 6] |= (u64(1) << 61)
+				board.mailbox[63] = -1
+				board.mailbox[61] = i8(constants.ROOK + 6)
 				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][63]
 				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][61]
 			} else if move.target == 58 { 	// C8
 				// Move Rook A8 (56) -> D8 (59)
 				board.bitboards[constants.ROOK + 6] &= ~(u64(1) << 56)
 				board.bitboards[constants.ROOK + 6] |= (u64(1) << 59)
+				board.mailbox[56] = -1
+				board.mailbox[59] = i8(constants.ROOK + 6)
 				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][56]
 				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][59]
 			}

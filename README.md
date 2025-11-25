@@ -45,9 +45,29 @@ A **tournament-ready chess engine** written in Odin with NNUE evaluation and wor
 
 ## Build
 
+### Quick Build (Optimized for Speed)
+```bash
+./build_optimized.sh
+```
+
+### Manual Build
+
+**For maximum performance** (recommended):
+```bash
+odin build . -out:mantis -o:speed -microarch:native
+```
+
+**For portability** (works on any x86-64 CPU):
+```bash
+odin build . -out:mantis -o:speed
+```
+
+**Debug build** (not recommended for play):
 ```bash
 odin build . -out:mantis
 ```
+
+> **⚠️ Important**: Always use `-o:speed` for competitive play! Debug builds are 10-30x slower.
 
 ## Usage
 
@@ -78,6 +98,10 @@ go wtime 60000 btime 60000 winc 1000 binc 1000
 |--------|------|---------|-------|-------------|
 | Hash | spin | 64 | 1-1024 | Transposition table size (MB) |
 | EvalFile | string | nn-c0ae49f08b40.nnue | - | NNUE network file path |
+| Move Overhead | spin | 10 | 0-5000 | Network latency compensation (ms) |
+| MultiPV | spin | 1 | 1-500 | Number of principal variations |
+| Ponder | check | false | - | Enable pondering (background thinking) |
+| Threads | spin | 1 | 1-512 | Number of search threads |
 
 ## Testing
 

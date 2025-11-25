@@ -9,16 +9,53 @@ import "../zobrist"
 import "core:fmt"
 import "core:math"
 import "core:os"
+import "core:sync"
 import "core:time"
 
 // Search Constants
 MAX_PLY :: 64
+
+// Search Control - for ponder and stop functionality
+// Using i32 for atomic operations (Odin doesn't support atomic_bool directly)
+Search_Control :: struct {
+	should_stop:         i32, // Set to 1 to stop search immediately
+	ponder_mode:         i32, // Set to 1 if searching in ponder mode (infinite time)
+	ponderhit_triggered: i32, // Set to 1 when ponderhit received during pondering
+}
+
+search_control: Search_Control
+
+// Reset search control for new search
+reset_search_control :: proc() {
+	sync.atomic_store(&search_control.should_stop, i32(0))
+	sync.atomic_store(&search_control.ponder_mode, i32(0))
+	sync.atomic_store(&search_control.ponderhit_triggered, i32(0))
+}
+
+// Check if search should stop
+should_stop_search :: proc() -> bool {
+	return sync.atomic_load(&search_control.should_stop) != 0
+}
+
+// Signal search to stop
+stop_search :: proc() {
+	sync.atomic_store(&search_control.should_stop, i32(1))
+}
+
 
 // PV Line Structure
 PV_Line :: struct {
 	moves: [MAX_PLY]moves.Move,
 	count: int,
 }
+
+// MultiPV Result - stores move, score, and PV for each line
+MultiPV_Result :: struct {
+	move:  moves.Move,
+	score: int,
+	pv:    PV_Line,
+}
+
 
 // Search Info
 nodes: u64 = 0
@@ -98,6 +135,8 @@ negamax :: proc(
 	depth: int,
 	ply: int,
 	pv_line: ^PV_Line,
+	excluded_move: moves.Move = moves.Move{}, // For singular extensions
+	is_pv: bool = true, // Is this a PV node?
 ) -> int {
 	nodes += 1
 
@@ -105,6 +144,13 @@ negamax :: proc(
 	tt_score, tt_hit := probe_tt(b.hash, alpha, beta, depth)
 	if tt_hit {
 		return tt_score
+	}
+
+	// Periodic stop check (every 1024 nodes) - for ponder/stop functionality
+	if nodes % 1024 == 0 {
+		if should_stop_search() {
+			return alpha // Exit immediately if stop requested
+		}
 	}
 
 	// Periodic time check (every 1024 nodes)
@@ -117,12 +163,13 @@ negamax :: proc(
 	// fmt.printf("DEBUG: negamax depth %d alpha %d beta %d\n", depth, alpha, beta)
 	// os.flush(os.stdout)
 
+	// Check if in check (used by multiple features)
+	king_sq := board.get_king_square(b, b.side)
+	in_check := board.is_square_attacked(b, king_sq, 1 - b.side)
+
 	// Check Extension - extend if in check at frontier
 	effective_depth := depth
 	if depth == 0 {
-		king_sq := board.get_king_square(b, b.side)
-		in_check := board.is_square_attacked(b, king_sq, 1 - b.side)
-
 		if in_check {
 			effective_depth = 1 // Extend by 1 ply when in check
 		} else {
@@ -130,19 +177,29 @@ negamax :: proc(
 		}
 	}
 
+	// Razoring - drop into quiescence if position is hopeless
+	if !is_pv && !in_check && depth <= 3 {
+		evaluation := eval.evaluate(b)
+		razor_margin := 300 * depth
+
+		if evaluation + razor_margin < alpha {
+			// Position is so bad even with margin, just do quiescence
+			qscore := quiescence(b, alpha, beta)
+			if qscore < alpha {
+				return qscore
+			}
+		}
+	}
+
 	// Null Move Pruning
 	NMP_MIN_DEPTH :: 3
 	NMP_REDUCTION :: 2
 
-	// Check if we're in check
-	king_sq := board.get_king_square(b, b.side)
-	in_check := board.is_square_attacked(b, king_sq, 1 - b.side)
-
 	// Apply null move if:
-	// 1. Not in PV node (beta - alpha > 1)
+	// 1. Not in PV node (use is_pv flag)
 	// 2. Not in check
 	// 3. Deep enough
-	can_null_move := (beta - alpha > 1) && !in_check && depth >= NMP_MIN_DEPTH
+	can_null_move := !is_pv && !in_check && depth >= NMP_MIN_DEPTH
 
 	if can_null_move {
 		// Make null move
@@ -165,6 +222,8 @@ negamax :: proc(
 			effective_depth - 1 - NMP_REDUCTION,
 			ply + 1,
 			&null_pv,
+			{}, // no excluded move
+			false, // not PV
 		)
 
 		// If null move fails high, prune
@@ -185,12 +244,70 @@ negamax :: proc(
 	// Move Ordering
 	sort_moves(&move_list, b, tt_move, ply)
 
+	// Singular Extensions
+	// Test if TT move is "singularly" better than all alternatives
+	extension := 0
+	SE_DEPTH :: 8
+
+	if depth >= SE_DEPTH &&
+	   !in_check &&
+	   ply > 0 &&
+	   tt_move.source != 0 &&
+	   excluded_move.source == 0 { 	// Don't do SE during SE search
+
+		// Get TT score for singular test
+		tt_entry_score, tt_found := probe_tt(b.hash, alpha, beta, depth)
+
+		if tt_found {
+			// Singular beta - margin based on depth
+			singular_beta := tt_entry_score - depth * 2
+
+			// Reduced depth for singular search
+			reduced_depth := depth / 2
+
+			// Search all moves EXCEPT TT move
+			child_pv: PV_Line
+			singular_score := negamax(
+				b,
+				singular_beta - 1,
+				singular_beta,
+				reduced_depth,
+				ply,
+				&child_pv,
+				excluded_move = tt_move, // Exclude TT move
+			)
+
+			// If all other moves fail low, TT move is singular
+			if singular_score < singular_beta {
+				extension = 1
+			}
+		}
+	}
+
 	legal_moves := 0
 	best_score := -eval.INF
 	current_alpha := alpha
 	best_move: moves.Move
 
+	// Futility Pruning - pre-compute for move loop
+	do_futility := false
+	futility_value := 0
+	if !is_pv && !in_check && depth <= 3 {
+		futility_margin := 200 * depth
+		futility_value = eval.evaluate(b) + futility_margin
+		if futility_value < alpha {
+			do_futility = true
+		}
+	}
+
 	for move in move_list {
+		// Skip excluded move (for singular extensions)
+		if excluded_move.source != 0 &&
+		   move.source == excluded_move.source &&
+		   move.target == excluded_move.target {
+			continue
+		}
+
 		// Copy Board
 		next_board := b^
 
@@ -200,43 +317,51 @@ negamax :: proc(
 			// Update NNUE Accumulators
 			nnue.update_accumulators(b, &next_board, move)
 
+			// Futility Pruning - skip quiet moves that can't raise alpha
+			if do_futility && legal_moves > 0 && !move.capture && move.promoted == -1 {
+				// Skip this quiet move - position is too bad
+				continue
+			}
+
 			child_pv: PV_Line
 			score := 0
+
+			// Combine check extension with singular extension
+			combined_depth := effective_depth + extension
+
 			if legal_moves == 0 {
 				// First move (PV node): Full window search
 				score = -negamax(
 					&next_board,
 					-beta,
 					-current_alpha,
-					effective_depth - 1,
+					combined_depth - 1,
 					ply + 1,
 					&child_pv,
 				)
 			} else {
 				// Subsequent moves: PVS with LMR
 
-				// LMR Parameters
-				LMR_MIN_DEPTH :: 3
-				LMR_MOVE_THRESHOLD :: 3
+				// LMR Parameters - MUCH more aggressive
+				LMR_MIN_DEPTH :: 2 // Apply earlier (was 3)
+				LMR_MOVE_THRESHOLD :: 1 // After 1st move (was 3)
 
 				reduction := 0
 
 				// Apply LMR if:
-				// 1. Deep enough (depth >= LMR_MIN_DEPTH)
-				// 2. Not a tactical move (capture, promotion, check)
-				// 3. Not one of the first few moves
-				if effective_depth >= LMR_MIN_DEPTH &&
+				// 1. Deep enough (depth >= 2)
+				// 2. Not a tactical move (capture, promotion)
+				// 3. After first move
+				if combined_depth >= LMR_MIN_DEPTH &&
 				   !move.capture &&
 				   move.promoted == -1 &&
-				   legal_moves >= LMR_MOVE_THRESHOLD {
-					// Logarithmic reduction formula
-					reduction = int(
-						math.ln(f64(effective_depth)) * math.ln(f64(legal_moves)) / 2.5,
-					)
+				   legal_moves > LMR_MOVE_THRESHOLD {
+					// Logarithmic reduction formula - more aggressive
+					reduction = int(math.ln(f64(combined_depth)) * math.ln(f64(legal_moves)) / 2.0)
 
 					// Clamp to reasonable range
 					if reduction < 1 {reduction = 1}
-					if reduction > effective_depth - 1 {reduction = effective_depth - 1}
+					if reduction > combined_depth - 1 {reduction = combined_depth - 1}
 				}
 
 				// Null window search with reduction
@@ -244,9 +369,11 @@ negamax :: proc(
 					&next_board,
 					-current_alpha - 1,
 					-current_alpha,
-					effective_depth - 1 - reduction,
+					combined_depth - 1 - reduction,
 					ply + 1,
 					&child_pv,
+					{}, // no excluded move
+					false, // not PV (null window)
 				)
 
 				// Re-search if reduced search raised alpha
@@ -256,9 +383,11 @@ negamax :: proc(
 						&next_board,
 						-current_alpha - 1,
 						-current_alpha,
-						effective_depth - 1,
+						combined_depth - 1,
 						ply + 1,
 						&child_pv,
+						{}, // no excluded move
+						false, // not PV (null window)
 					)
 				}
 
@@ -268,7 +397,7 @@ negamax :: proc(
 						&next_board,
 						-beta,
 						-current_alpha,
-						effective_depth - 1,
+						combined_depth - 1,
 						ply + 1,
 						&child_pv,
 					)
@@ -370,7 +499,12 @@ quiescence :: proc(b: ^board.Board, alpha: int, beta: int) -> int {
 }
 
 // Root Search
-search_position :: proc(b: ^board.Board, depth: int) {
+search_position :: proc(
+	b: ^board.Board,
+	depth: int,
+	multi_pv_count: int = 1,
+	output_bestmove: bool = true,
+) {
 	// fmt.println("DEBUG: Entering search_position")
 	nodes = 0
 	clear_killers() // Clear killer moves for new search
@@ -386,162 +520,210 @@ search_position :: proc(b: ^board.Board, depth: int) {
 	ASPIRATION_WINDOW :: 50
 	prev_score := 0
 
+	// MultiPV storage - track best N moves
+	multi_pv_results: [dynamic]MultiPV_Result
+	defer delete(multi_pv_results)
+
 	// Iterative Deepening
 	for current_depth in 1 ..= depth {
 		// fmt.printf("DEBUG: Starting depth %d\n", current_depth)
-		root_pv: PV_Line
-		alpha := -eval.INF
-		beta := eval.INF
 
-		// Use aspiration windows for depth >= 5
-		if current_depth >= 5 {
-			alpha = prev_score - ASPIRATION_WINDOW
-			beta = prev_score + ASPIRATION_WINDOW
+		// Clear MultiPV results for this depth
+		clear(&multi_pv_results)
+
+		// Generate all root moves once
+		all_moves := make([dynamic]moves.Move)
+		defer delete(all_moves)
+		board.generate_all_moves(b, &all_moves)
+
+		// Track which moves have been searched for MultiPV
+		excluded_moves: [dynamic]moves.Move
+		defer delete(excluded_moves)
+
+		// Search each PV line
+		pv_lines_to_search := multi_pv_count
+		if pv_lines_to_search > len(all_moves) {
+			pv_lines_to_search = len(all_moves)
 		}
 
-		move_list := make([dynamic]moves.Move)
-		defer delete(move_list)
-		// fmt.println("DEBUG: Generating moves...")
-		board.generate_all_moves(b, &move_list)
-		// fmt.printf("DEBUG: Generated %d moves\n", len(move_list))
+		for pv_index in 0 ..< pv_lines_to_search {
+			root_pv: PV_Line
+			alpha := -eval.INF
+			beta := eval.INF
 
-		best_score := -eval.INF
-		current_best_move: moves.Move
-		found_move := false
+			// Use aspiration windows for depth >= 5 and first PV only
+			if current_depth >= 5 && pv_index == 0 {
+				alpha = prev_score - ASPIRATION_WINDOW
+				beta = prev_score + ASPIRATION_WINDOW
+			}
 
-		current_alpha := alpha
+			// Create move list excluding previously found PVs
+			move_list := make([dynamic]moves.Move)
+			defer delete(move_list)
 
-		for move in move_list {
-			next_board := b^
-			if board.make_move(&next_board, move, b.side) {
-				// Update NNUE Accumulators
-				nnue.update_accumulators(b, &next_board, move)
-
-				child_pv: PV_Line
-				score := -negamax(
-					&next_board,
-					-beta,
-					-current_alpha,
-					current_depth - 1,
-					0,
-					&child_pv,
-				)
-
-				if score > best_score {
-					best_score = score
-					current_best_move = move
-					found_move = true
-
-					// Update best PV line
-					best_pv.moves[0] = move
-					for i in 0 ..< child_pv.count {
-						best_pv.moves[i + 1] = child_pv.moves[i]
+			for move in all_moves {
+				// Check if this move is in excluded list
+				is_excluded := false
+				for excluded in excluded_moves {
+					if move.source == excluded.source &&
+					   move.target == excluded.target &&
+					   move.promoted == excluded.promoted {
+						is_excluded = true
+						break
 					}
-					best_pv.count = child_pv.count + 1
 				}
+				if !is_excluded {
+					append(&move_list, move)
+				}
+			}
 
-				if score > current_alpha {
-					current_alpha = score
+			if len(move_list) == 0 {
+				break // No more moves to search
+			}
+
+			best_score := -eval.INF
+			current_best_move: moves.Move
+			found_move := false
+
+			current_alpha := alpha
+
+			for move in move_list {
+				next_board := b^
+				if board.make_move(&next_board, move, b.side) {
+					// Update NNUE Accumulators
+					nnue.update_accumulators(b, &next_board, move)
+
+					child_pv: PV_Line
+					score := -negamax(
+						&next_board,
+						-beta,
+						-current_alpha,
+						current_depth - 1,
+						0,
+						&child_pv,
+					)
+
+					if score > best_score {
+						best_score = score
+						current_best_move = move
+						found_move = true
+
+						// Update best PV line
+						best_pv.moves[0] = move
+						for i in 0 ..< child_pv.count {
+							best_pv.moves[i + 1] = child_pv.moves[i]
+						}
+						best_pv.count = child_pv.count + 1
+					}
+
+					if score > current_alpha {
+						current_alpha = score
+					}
+				}
+			}
+
+			// Re-search if outside aspiration window (first PV only)
+			if current_depth >= 5 && pv_index == 0 {
+				if best_score <= alpha {
+					// Failed low - re-search with lower bound
+					alpha = -eval.INF
+					best_score = -eval.INF
+					current_alpha = alpha
+
+					for move in move_list {
+						next_board := b^
+						if board.make_move(&next_board, move, b.side) {
+							nnue.update_accumulators(b, &next_board, move)
+							child_pv: PV_Line
+							score := -negamax(
+								&next_board,
+								-beta,
+								-current_alpha,
+								current_depth - 1,
+								0,
+								&child_pv,
+							)
+
+							if score > best_score {
+								best_score = score
+								current_best_move = move
+
+								// Update best PV line
+								best_pv.moves[0] = move
+								for i in 0 ..< child_pv.count {
+									best_pv.moves[i + 1] = child_pv.moves[i]
+								}
+								best_pv.count = child_pv.count + 1
+							}
+
+							if score > current_alpha {
+								current_alpha = score
+							}
+						}
+					}
+				} else if best_score >= beta {
+					// Failed high - re-search with upper bound
+					beta = eval.INF
+					best_score = -eval.INF
+					current_alpha = alpha
+
+					for move in move_list {
+						next_board := b^
+						if board.make_move(&next_board, move, b.side) {
+							nnue.update_accumulators(b, &next_board, move)
+							child_pv: PV_Line
+							score := -negamax(
+								&next_board,
+								-beta,
+								-current_alpha,
+								current_depth - 1,
+								0,
+								&child_pv,
+							)
+
+							if score > best_score {
+								best_score = score
+								current_best_move = move
+
+								// Update best PV line
+								best_pv.moves[0] = move
+								for i in 0 ..< child_pv.count {
+									best_pv.moves[i + 1] = child_pv.moves[i]
+								}
+								best_pv.count = child_pv.count + 1
+							}
+
+							if score > current_alpha {
+								current_alpha = score
+							}
+						}
+					}
+				}
+			}
+
+			if found_move {
+				// Store this PV result
+				result: MultiPV_Result
+				result.move = current_best_move
+				result.score = best_score
+				result.pv = best_pv
+				append(&multi_pv_results, result)
+
+				// Add to excluded list for next PV
+				append(&excluded_moves, current_best_move)
+
+				// Update prev_score from first PV
+				if pv_index == 0 {
+					prev_score = best_score
+					best_move = current_best_move
 				}
 			}
 		}
 
-		// Re-search if outside aspiration window
-		if current_depth >= 5 {
-			if best_score <= alpha {
-				// Failed low - re-search with lower bound
-				alpha = -eval.INF
-				best_score = -eval.INF
-				current_alpha = alpha
-
-				for move in move_list {
-					next_board := b^
-					if board.make_move(&next_board, move, b.side) {
-						nnue.update_accumulators(b, &next_board, move)
-						child_pv: PV_Line
-						score := -negamax(
-							&next_board,
-							-beta,
-							-current_alpha,
-							current_depth - 1,
-							0,
-							&child_pv,
-						)
-
-						if score > best_score {
-							best_score = score
-							current_best_move = move
-
-							// Update best PV line
-							best_pv.moves[0] = move
-							for i in 0 ..< child_pv.count {
-								best_pv.moves[i + 1] = child_pv.moves[i]
-							}
-							best_pv.count = child_pv.count + 1
-						}
-
-						if score > current_alpha {
-							current_alpha = score
-						}
-					}
-				}
-			} else if best_score >= beta {
-				// Failed high - re-search with upper bound
-				beta = eval.INF
-				best_score = -eval.INF
-				current_alpha = alpha
-
-				for move in move_list {
-					next_board := b^
-					if board.make_move(&next_board, move, b.side) {
-						nnue.update_accumulators(b, &next_board, move)
-						child_pv: PV_Line
-						score := -negamax(
-							&next_board,
-							-beta,
-							-current_alpha,
-							current_depth - 1,
-							0,
-							&child_pv,
-						)
-
-						if score > best_score {
-							best_score = score
-							current_best_move = move
-
-							// Update best PV line
-							best_pv.moves[0] = move
-							for i in 0 ..< child_pv.count {
-								best_pv.moves[i + 1] = child_pv.moves[i]
-							}
-							best_pv.count = child_pv.count + 1
-						}
-
-						if score > current_alpha {
-							current_alpha = score
-						}
-					}
-				}
-			}
-		}
-
-		if found_move {
-			best_move = current_best_move
-		}
-
-		// Update previous score for next iteration
-		prev_score = best_score
-
-		// Print Info
+		// Print all PV lines for this depth
 		os.flush(os.stdout)
 		duration := time.since(start_time)
-		// fmt.println("DEBUG: Duration calculated.")
-		// os.flush(os.stdout)
 		ms := time.duration_milliseconds(duration)
-		// fmt.println("DEBUG: MS calculated.")
-		// fmt.println(ms)
-		// fmt.println("DEBUG: Nodes:")
-		// fmt.println(nodes)
 		os.flush(os.stdout)
 
 		nps := u64(0)
@@ -549,37 +731,72 @@ search_position :: proc(b: ^board.Board, depth: int) {
 		if ms_int > 0 {
 			nps = nodes * 1000 / u64(ms_int)
 		}
-		// fmt.println("DEBUG: Time calculated.")
-		// os.flush(os.stdout)
 
-		// fmt.println("DEBUG: Printing info...")
-		fmt.printf(
-			"info depth %d score cp %d nodes %d time %d nps %d pv ",
-			current_depth,
-			best_score,
-			nodes,
-			ms_int,
-			nps,
-		)
+		// Only output info lines if we're the main thread
+		if output_bestmove {
+			// Output each PV line
+			for pv_idx in 0 ..< len(multi_pv_results) {
+				result := &multi_pv_results[pv_idx]
 
-		// Print full PV line
-		for i in 0 ..< best_pv.count {
-			board.print_move(best_pv.moves[i])
-			if i < best_pv.count - 1 {
-				fmt.printf(" ")
+				if multi_pv_count > 1 {
+					// MultiPV format
+					fmt.printf(
+						"info depth %d multipv %d score cp %d nodes %d time %d nps %d pv ",
+						current_depth,
+						pv_idx + 1,
+						result.score,
+						nodes,
+						ms_int,
+						nps,
+					)
+				} else {
+					// Standard format
+					fmt.printf(
+						"info depth %d score cp %d nodes %d time %d nps %d pv ",
+						current_depth,
+						result.score,
+						nodes,
+						ms_int,
+						nps,
+					)
+				}
+
+				// Print PV line
+				for i in 0 ..< result.pv.count {
+					board.print_move(result.pv.moves[i])
+					if i < result.pv.count - 1 {
+						fmt.printf(" ")
+					}
+				}
+				fmt.println()
+				os.flush(os.stdout)
 			}
 		}
-		fmt.println()
-		os.flush(os.stdout)
+
+		// Check for stop signal (from ponder stop or user interrupt)
+		if should_stop_search() {
+			break // Exit immediately if stop requested
+		}
+
+		// If ponderhit was triggered during pondering, enable time management
+		if sync.atomic_load(&search_control.ponderhit_triggered) != 0 {
+			use_time_management = true
+			sync.atomic_store(&search_control.ponder_mode, i32(0))
+		}
 
 		// Check if we should stop iterative deepening
-		if use_time_management && exceeded_optimal(search_limits) {
+		// Skip time check if still in ponder mode (infinite search)
+		is_pondering := sync.atomic_load(&search_control.ponder_mode)
+		if is_pondering == 0 && use_time_management && exceeded_optimal(search_limits) {
 			break // Stop if we've used our optimal time
 		}
 	}
 
-	fmt.printf("bestmove ")
-	board.print_move(best_move)
-	fmt.printf("\n")
-	os.flush(os.stdout)
+	// Only output bestmove if requested (main thread only)
+	if output_bestmove {
+		fmt.printf("bestmove ")
+		board.print_move(best_move)
+		fmt.printf("\n")
+		os.flush(os.stdout)
+	}
 }

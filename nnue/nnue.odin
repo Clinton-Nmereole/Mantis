@@ -350,14 +350,9 @@ compute_accumulator :: proc(b: ^board.Board, side: int) -> board.Accumulator {
 	return acc
 }
 
-// Helper: Get Piece at Square (Slow, should use bitboards)
+// Helper: Get Piece at Square (FAST O(1) using mailbox)
 get_piece_at :: proc(b: ^board.Board, sq: int) -> int {
-	for p in 0 ..< 12 {
-		if (b.bitboards[p] & (u64(1) << u64(sq))) != 0 {
-			return p
-		}
-	}
-	return -1
+	return int(b.mailbox[sq])
 }
 
 // Helper: Get Feature Index

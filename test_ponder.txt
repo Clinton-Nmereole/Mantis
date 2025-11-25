@@ -1,0 +1,4 @@
+uci
+isready
+position startpos
+go ponder

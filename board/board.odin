@@ -16,6 +16,11 @@ Board :: struct {
 	// Occupancy Bitboards
 	occupancies:     [3]u64, // [WHITE, BLACK, BOTH]
 
+	// Mailbox (piece-at-square lookup) - CRITICAL FOR PERFORMANCE
+	// mailbox[square] = piece_index (0-11) or -1 if empty
+	// This gives O(1) piece lookup instead of O(12) bitboard scanning
+	mailbox:         [64]i8,
+
 	// Game State
 	side:            int, // 0: White, 1: Black
 	en_passant:      int, // Square index (0-63) or -1
@@ -47,15 +52,22 @@ BQ :: 8 // Black Queen Side
 
 // Initialize an empty board
 init_board :: proc() -> Board {
-	return Board {
-		bitboards = [12]u64{},
-		occupancies = [3]u64{},
-		side = constants.WHITE,
-		en_passant = -1,
-		castle = 0,
-		halfmove_clock = 0,
+	b := Board {
+		bitboards       = [12]u64{},
+		occupancies     = [3]u64{},
+		side            = constants.WHITE,
+		en_passant      = -1,
+		castle          = 0,
+		halfmove_clock  = 0,
 		fullmove_number = 1,
 	}
+
+	// Initialize mailbox with -1 (empty)
+	for i in 0 ..< 64 {
+		b.mailbox[i] = -1
+	}
+
+	return b
 }
 
 // Helper to map char to piece index
@@ -113,15 +125,9 @@ parse_fen :: proc(fen: string) -> Board {
 		} else {
 			piece := char_to_piece(c)
 			if piece != -1 {
-				// Determine piece color/type index
-				// char_to_piece returns 0-5 for White, 6-11 for Black
-				// But our bitboards array is 0-11?
-				// Let's assume bitboards are indexed:
-				// 0-5: White P, N, B, R, Q, K
-				// 6-11: Black P, N, B, R, Q, K
-
 				square := rank * 8 + file
 				board.bitboards[piece] |= (1 << u64(square))
+				board.mailbox[square] = i8(piece) // Update mailbox
 				file += 1
 			}
 		}

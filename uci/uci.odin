@@ -10,6 +10,25 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import "core:sync"
+import "core:thread"
+
+// UCI Configuration
+move_overhead: int = 10 // Default 10ms for network/GUI lag compensation
+multi_pv: int = 1 // Number of principal variations to display (1-500)
+ponder_enabled: bool = false // Whether pondering is allowed
+thread_count: int = 1 // Number of search threads (1-512)
+
+// Ponder State - manages background pondering
+Ponder_State :: struct {
+	thread_handle: ^thread.Thread,
+	is_active:     i32, // Using i32 for atomic operations
+	board:         board.Board,
+	time_control:  search.TimeControl,
+	depth:         int,
+}
+
+ponder_state: Ponder_State
 
 // UCI Main Loop
 uci_loop :: proc() {
@@ -22,6 +41,9 @@ uci_loop :: proc() {
 
 	// Initialize TT
 	search.init_tt(64) // Default 64MB
+
+	// Initialize thread pool
+	search.init_thread_pool(thread_count)
 
 	// Load Default NNUE (silently)
 	default_nnue := "nn-c0ae49f08b40.nnue"
@@ -38,12 +60,23 @@ uci_loop :: proc() {
 		if len(command) == 0 {continue}
 
 		if command == "quit" {
+			// Clean up ponder thread if active
+			if sync.atomic_load(&ponder_state.is_active) != 0 {
+				search.stop_search()
+				thread.join(ponder_state.thread_handle)
+				thread.destroy(ponder_state.thread_handle)
+				sync.atomic_store(&ponder_state.is_active, i32(0))
+			}
 			break
 		} else if command == "uci" {
 			fmt.println("id name Mantis")
 			fmt.println("id author")
 			fmt.println("option name Hash type spin default 64 min 1 max 1024")
 			fmt.println("option name EvalFile type string default nn-c0ae49f08b40.nnue")
+			fmt.println("option name Move Overhead type spin default 10 min 0 max 5000")
+			fmt.println("option name MultiPV type spin default 1 min 1 max 500")
+			fmt.println("option name Ponder type check default false")
+			fmt.println("option name Threads type spin default 1 min 1 max 512")
 			fmt.println("uciok")
 			os.flush(os.stdout)
 		} else if command == "isready" {
@@ -58,8 +91,37 @@ uci_loop :: proc() {
 			parse_go(command, &game_board)
 		} else if strings.has_prefix(command, "setoption") {
 			parse_setoption(command)
+		} else if command == "ponderhit" {
+			// Opponent made the predicted move - convert ponder to normal search
+			if sync.atomic_load(&ponder_state.is_active) != 0 {
+				// Trigger ponderhit flag to apply time management
+				sync.atomic_store(&search.search_control.ponderhit_triggered, i32(1))
+
+				// Apply time control limits
+				tc := ponder_state.time_control
+				if tc.wtime > 0 || tc.btime > 0 {
+					limits := search.calculate_time(tc, ponder_state.board.side, move_overhead)
+					search.search_limits = limits
+					search.use_time_management = true
+				}
+
+				// Wait for ponder thread to complete
+				thread.join(ponder_state.thread_handle)
+				thread.destroy(ponder_state.thread_handle)
+				sync.atomic_store(&ponder_state.is_active, i32(0))
+				search.use_time_management = false
+			}
 		} else if command == "stop" {
-			// TODO: Signal stop to search thread
+			// Stop current search (including pondering)
+			if sync.atomic_load(&ponder_state.is_active) != 0 {
+				// Signal search to stop immediately
+				search.stop_search()
+
+				// Wait for ponder thread to finish
+				thread.join(ponder_state.thread_handle)
+				thread.destroy(ponder_state.thread_handle)
+				sync.atomic_store(&ponder_state.is_active, i32(0))
+			}
 		}
 	}
 }
@@ -125,10 +187,13 @@ parse_go :: proc(command: string, b: ^board.Board) {
 
 	depth := -1
 	tc: search.TimeControl
+	is_pondering := false // Track if this is a ponder search
 
 	// Parse all parameters
 	for i in 1 ..< len(parts) {
-		if parts[i] == "depth" {
+		if parts[i] == "ponder" {
+			is_pondering = true
+		} else if parts[i] == "depth" {
 			if i + 1 < len(parts) {
 				val, ok := strconv.parse_int(parts[i + 1])
 				if ok {depth = val}
@@ -165,15 +230,47 @@ parse_go :: proc(command: string, b: ^board.Board) {
 		depth = 64 // Default to max depth with time control
 	}
 
+	// Handle pondering
+	if is_pondering {
+		// Store board state and parameters for ponder search
+		ponder_state.board = b^
+		ponder_state.time_control = tc
+		ponder_state.depth = depth
+		sync.atomic_store(&ponder_state.is_active, i32(1))
+
+		// Spawn background ponder thread
+		ponder_state.thread_handle = thread.create(ponder_search_thread)
+		ponder_state.thread_handle.data = &ponder_state
+		thread.start(ponder_state.thread_handle)
+
+		// Return immediately - search continues in background
+		return
+	}
+
+	// Regular search (non-ponder)
+	search.reset_search_control()
+
 	// If time control specified, use time management
 	if tc.wtime > 0 || tc.btime > 0 {
-		limits := search.calculate_time(tc, b.side)
+		limits := search.calculate_time(tc, b.side, move_overhead)
 		search.search_limits = limits
 		search.use_time_management = true
-		search.search_position(b, depth)
+
+		// Use parallel search if threading enabled
+		if thread_count > 1 {
+			search.parallel_search(b, depth, multi_pv)
+		} else {
+			search.search_position(b, depth, multi_pv)
+		}
+
 		search.use_time_management = false
 	} else {
-		search.search_position(b, depth)
+		// Use parallel search if threading enabled
+		if thread_count > 1 {
+			search.parallel_search(b, depth, multi_pv)
+		} else {
+			search.search_position(b, depth, multi_pv)
+		}
 	}
 }
 
@@ -206,6 +303,34 @@ parse_setoption :: proc(command: string) {
 			val, ok := strconv.parse_int(parts[4])
 			if ok {
 				search.init_tt(val)
+			}
+		} else if name == "Move" &&
+		   len(parts) >= 6 &&
+		   parts[3] == "Overhead" &&
+		   parts[4] == "value" {
+			// Handle "Move Overhead" (two-word option name)
+			val, ok := strconv.parse_int(parts[5])
+			if ok {
+				move_overhead = val
+			}
+		} else if name == "MultiPV" {
+			val, ok := strconv.parse_int(parts[4])
+			if ok && val >= 1 && val <= 500 {
+				multi_pv = val
+			}
+		} else if name == "Ponder" {
+			// Parse boolean value (true/false)
+			if parts[4] == "true" {
+				ponder_enabled = true
+			} else if parts[4] == "false" {
+				ponder_enabled = false
+			}
+		} else if name == "Threads" {
+			val, ok := strconv.parse_int(parts[4])
+			if ok && val >= 1 && val <= 512 {
+				thread_count = val
+				// Reinitialize thread pool with new count
+				search.init_thread_pool(val)
 			}
 		}
 	}
@@ -256,4 +381,19 @@ parse_move :: proc(b: ^board.Board, move_str: string) -> moves.Move {
 	}
 
 	return moves.Move{}
+}
+
+// Ponder Search Thread - runs in background
+ponder_search_thread :: proc(t: ^thread.Thread) {
+	state := cast(^Ponder_State)t.data
+
+	// Reset and configure search control for pondering
+	search.reset_search_control()
+	sync.atomic_store(&search.search_control.ponder_mode, i32(1))
+
+	// Run search with ponder mode (infinite until ponderhit or stop)
+	search.search_position(&state.board, state.depth, multi_pv)
+
+	// Mark ponder as inactive when done
+	sync.atomic_store(&ponder_state.is_active, i32(0))
 }
