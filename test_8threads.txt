@@ -1,6 +1,0 @@
-uci
-setoption name Threads value 8
-setoption name Hash value 256
-position startpos
-go depth 15
-quit
