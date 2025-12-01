@@ -100,16 +100,32 @@ clear_killers :: proc() {
 // History Heuristic - piece-to-square success rates
 history_table: [12][64]int // [piece][to_square]
 
-// Update history on beta cutoff
-update_history :: proc(move: moves.Move, depth: int) {
+// Update history with result (positive for cutoffs, negative for fails)
+update_history :: proc(move: moves.Move, depth: int, good: bool) {
 	// Bonus based on depth (deeper searches = more important)
 	bonus := depth * depth
+	if !good {
+		bonus = -bonus // Penalize moves that don't cause cutoffs
+	}
 
 	history_table[move.piece][move.target] += bonus
 
 	// Cap to prevent overflow
 	if history_table[move.piece][move.target] > 10000 {
 		history_table[move.piece][move.target] = 10000
+	}
+	if history_table[move.piece][move.target] < -10000 {
+		history_table[move.piece][move.target] = -10000
+	}
+}
+
+// Age history scores (called periodically to decay old information)
+age_history :: proc() {
+	for i in 0 ..< 12 {
+		for j in 0 ..< 64 {
+			// Reduce by 10% to favor recent information
+			history_table[i][j] = history_table[i][j] * 9 / 10
+		}
 	}
 }
 
@@ -158,6 +174,73 @@ clear_counter_moves :: proc() {
 	}
 }
 
+// Continuation History - 1-ply
+// Tracks score for move pairs: [prev_piece_type][prev_to][curr_piece_type][curr_to]
+// Using heap allocation for safety
+continuation_history: ^[6][64][6][64]int
+
+// Initialize continuation history
+init_continuation_history :: proc() {
+	if continuation_history == nil {
+		continuation_history = new([6][64][6][64]int)
+	}
+	// Zero-initialize
+	for i in 0 ..< 6 {
+		for j in 0 ..< 64 {
+			for k in 0 ..< 6 {
+				for l in 0 ..< 64 {
+					continuation_history[i][j][k][l] = 0
+				}
+			}
+		}
+	}
+}
+
+// Store continuation history score
+store_continuation :: proc(prev_move: moves.Move, curr_move: moves.Move, depth: int, good: bool) {
+	// CRITICAL: Extensive bounds checking
+	if continuation_history == nil {return}
+	if prev_move.piece < 0 || prev_move.piece >= 12 {return}
+	if curr_move.piece < 0 || curr_move.piece >= 12 {return}
+	if prev_move.target < 0 || prev_move.target >= 64 {return}
+	if curr_move.target < 0 || curr_move.target >= 64 {return}
+
+	// Get piece types (strip color)
+	prev_type := prev_move.piece % 6
+	curr_type := curr_move.piece % 6
+
+	// Bonus based on depth
+	bonus := depth * depth
+	if !good {
+		bonus = -bonus
+	}
+
+	// Update with clamping
+	old_val := continuation_history[prev_type][prev_move.target][curr_type][curr_move.target]
+	new_val := old_val + bonus
+
+	// Clamp to prevent overflow
+	if new_val > 10000 {new_val = 10000}
+	if new_val < -10000 {new_val = -10000}
+
+	continuation_history[prev_type][prev_move.target][curr_type][curr_move.target] = new_val
+}
+
+// Get continuation history score
+get_continuation_score :: proc(prev_move: moves.Move, curr_move: moves.Move) -> int {
+	// CRITICAL: Extensive bounds checking
+	if continuation_history == nil {return 0}
+	if prev_move.piece < 0 || prev_move.piece >= 12 {return 0}
+	if curr_move.piece < 0 || curr_move.piece >= 12 {return 0}
+	if prev_move.target < 0 || prev_move.target >= 64 {return 0}
+	if curr_move.target < 0 || curr_move.target >= 64 {return 0}
+
+	prev_type := prev_move.piece % 6
+	curr_type := curr_move.piece % 6
+
+	return continuation_history[prev_type][prev_move.target][curr_type][curr_move.target]
+}
+
 // Negamax Alpha-Beta Search
 negamax :: proc(
 	b: ^board.Board,
@@ -200,9 +283,10 @@ negamax :: proc(
 	in_check := board.is_square_attacked(b, king_sq, 1 - b.side)
 
 	// Check Extension - extend if in check at frontier
+	// Limited to prevent excessive searching
 	effective_depth := depth
 	if depth == 0 {
-		if in_check {
+		if in_check && ply < 40 { 	// Don't extend too deep in search
 			effective_depth = 1 // Extend by 1 ply when in check
 		} else {
 			return quiescence(b, alpha, beta)
@@ -486,11 +570,14 @@ negamax :: proc(
 				// Beta Cutoff - store killer, history, and counter move for quiet moves
 				if !move.capture && move.promoted == -1 {
 					store_killer(move, ply)
-					update_history(move, effective_depth)
+					update_history(move, effective_depth, true)
 
 					// Store as counter move if we have a previous move
 					if prev_move.source != 0 {
 						store_counter_move(prev_move, move)
+
+						// Continuation history - DISABLED (caused regression)
+						// store_continuation(prev_move, move, effective_depth, true)
 					}
 				}
 				break
@@ -524,6 +611,36 @@ negamax :: proc(
 	return best_score
 }
 
+// Simplified Static Exchange Evaluation
+// Returns estimated material balance for a capture
+// Negative = losing capture, Positive = winning capture
+see_capture :: proc(b: ^board.Board, move: moves.Move) -> int {
+	// Get victim value
+	victim_value := 0
+	if move.en_passant {
+		victim_value = constants.PIECE_VALUES[constants.PAWN]
+	} else {
+		// Find captured piece
+		victim_idx := b.mailbox[move.target]
+		if victim_idx != -1 {
+			victim_piece := victim_idx % 6
+			victim_value = constants.PIECE_VALUES[victim_piece]
+		}
+	}
+
+	// Get attacker value
+	attacker_piece := move.piece % 6
+	attacker_value := constants.PIECE_VALUES[attacker_piece]
+
+	// Simple SEE: If target is defended, assume we lose our attacker
+	if board.is_square_attacked(b, move.target, 1 - b.side) {
+		return victim_value - attacker_value
+	}
+
+	// Free capture
+	return victim_value
+}
+
 // Quiescence Search
 quiescence :: proc(b: ^board.Board, alpha: int, beta: int) -> int {
 	nodes += 1
@@ -547,6 +664,13 @@ quiescence :: proc(b: ^board.Board, alpha: int, beta: int) -> int {
 
 	for move in move_list {
 		if move.capture {
+			// SEE Pruning - skip obviously losing captures
+			// Conservative threshold: only skip if we lose more than a pawn
+			see_score := see_capture(b, move)
+			if see_score < -100 {
+				continue // Skip this losing capture
+			}
+
 			next_board := b^
 			if board.make_move(&next_board, move, b.side) {
 				nnue.update_accumulators(b, &next_board, move)
@@ -577,6 +701,7 @@ search_position :: proc(
 	clear_killers() // Clear killer moves for new search
 	clear_history() // Clear history table for new search
 	clear_counter_moves() // Clear counter moves for new search
+	init_continuation_history() // Initialize continuation history
 	// fmt.printf("DEBUG: NNUE Initialized: %v\n", nnue.is_initialized)
 	// os.flush(os.stdout)
 	best_move: moves.Move
