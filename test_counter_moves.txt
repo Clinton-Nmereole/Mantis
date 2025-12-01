@@ -1,0 +1,5 @@
+ucinewgame
+setoption name Hash value 128
+position startpos
+go depth 20
+quit

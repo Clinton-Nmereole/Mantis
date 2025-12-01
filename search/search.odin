@@ -127,6 +127,37 @@ clear_history :: proc() {
 	}
 }
 
+// Counter Moves Heuristic - track refutation moves
+// counter_moves[piece][to_square] = the move that refutes this move
+counter_moves: [12][64]moves.Move
+
+// Store a counter move (the refutation to the previous move)
+store_counter_move :: proc(prev_move: moves.Move, refutation: moves.Move) {
+	// Bounds checking
+	if prev_move.piece < 0 || prev_move.piece >= 12 {return}
+	if prev_move.target < 0 || prev_move.target >= 64 {return}
+
+	counter_moves[prev_move.piece][prev_move.target] = refutation
+}
+
+// Get the counter move for a given move
+get_counter_move :: proc(prev_move: moves.Move) -> moves.Move {
+	// Bounds checking
+	if prev_move.piece < 0 || prev_move.piece >= 12 {return moves.Move{}}
+	if prev_move.target < 0 || prev_move.target >= 64 {return moves.Move{}}
+
+	return counter_moves[prev_move.piece][prev_move.target]
+}
+
+// Clear all counter moves
+clear_counter_moves :: proc() {
+	for i in 0 ..< 12 {
+		for j in 0 ..< 64 {
+			counter_moves[i][j] = moves.Move{}
+		}
+	}
+}
+
 // Negamax Alpha-Beta Search
 negamax :: proc(
 	b: ^board.Board,
@@ -137,6 +168,7 @@ negamax :: proc(
 	pv_line: ^PV_Line,
 	excluded_move: moves.Move = moves.Move{}, // For singular extensions
 	is_pv: bool = true, // Is this a PV node?
+	prev_move: moves.Move = moves.Move{}, // Previous move for counter-moves
 ) -> int {
 	nodes += 1
 
@@ -192,7 +224,6 @@ negamax :: proc(
 
 	// Null Move Pruning
 	NMP_MIN_DEPTH :: 3
-	NMP_REDUCTION :: 2
 
 	// Apply null move if:
 	// 1. Not in PV node (use is_pv flag)
@@ -212,13 +243,16 @@ negamax :: proc(
 		}
 		null_board.en_passant = -1
 
+		// Adaptive reduction - more aggressive at deeper depths
+		nmp_reduction := 2 + effective_depth / 6
+
 		// Search null move at reduced depth
 		null_pv: PV_Line
 		null_score := -negamax(
 			&null_board,
 			-beta,
 			-beta + 1,
-			effective_depth - 1 - NMP_REDUCTION,
+			effective_depth - 1 - nmp_reduction,
 			ply + 1,
 			&null_pv,
 			{}, // no excluded move
@@ -231,6 +265,20 @@ negamax :: proc(
 		}
 	}
 
+	// Reverse Futility Pruning (RFP) / Static Null Move Pruning
+	// If position is so good that even with a margin, we're above beta, prune
+	RFP_DEPTH :: 7
+	if !is_pv && !in_check && effective_depth <= RFP_DEPTH && excluded_move.source == 0 {
+		evaluation := eval.evaluate(b)
+
+		// Margin based on depth (90 centipawns per ply - tuned for aggression)
+		rfp_margin := 90 * effective_depth
+
+		if evaluation - rfp_margin >= beta {
+			return evaluation - rfp_margin
+		}
+	}
+
 	// Move Generation
 	move_list := make([dynamic]moves.Move)
 	defer delete(move_list)
@@ -240,8 +288,15 @@ negamax :: proc(
 	// TT Move (Hash Move)
 	tt_move := get_tt_move(b.hash)
 
+	// Internal Iterative Reduction (IIR)
+	// If we have no hash move and this is a PV node, reduce depth
+	// We don't know what's good here, so search shallower first
+	if tt_move.source == 0 && is_pv && effective_depth >= 4 {
+		effective_depth -= 1
+	}
+
 	// Move Ordering
-	sort_moves(&move_list, b, tt_move, ply)
+	sort_moves(&move_list, b, tt_move, ply, prev_move)
 
 	// Singular Extensions
 	// Test if TT move is "singularly" better than all alternatives
@@ -292,7 +347,7 @@ negamax :: proc(
 	do_futility := false
 	futility_value := 0
 	if !is_pv && !in_check && depth <= 3 {
-		futility_margin := 200 * depth
+		futility_margin := 250 * depth // Tuned for more aggressive pruning
 		futility_value = eval.evaluate(b) + futility_margin
 		if futility_value < alpha {
 			do_futility = true
@@ -337,6 +392,9 @@ negamax :: proc(
 					combined_depth - 1,
 					ply + 1,
 					&child_pv,
+					{}, // no excluded move
+					true, // is PV
+					move, // prev_move for counter-moves
 				)
 			} else {
 				// Subsequent moves: PVS with LMR
@@ -373,6 +431,7 @@ negamax :: proc(
 					&child_pv,
 					{}, // no excluded move
 					false, // not PV (null window)
+					move, // prev_move for counter-moves
 				)
 
 				// Re-search if reduced search raised alpha
@@ -387,6 +446,7 @@ negamax :: proc(
 						&child_pv,
 						{}, // no excluded move
 						false, // not PV (null window)
+						move, // prev_move for counter-moves
 					)
 				}
 
@@ -399,6 +459,9 @@ negamax :: proc(
 						combined_depth - 1,
 						ply + 1,
 						&child_pv,
+						{}, // no excluded move
+						true, // is PV
+						move, // prev_move for counter-moves
 					)
 				}
 			}
@@ -420,10 +483,15 @@ negamax :: proc(
 			}
 
 			if current_alpha >= beta {
-				// Beta Cutoff - store killer and update history for quiet moves
+				// Beta Cutoff - store killer, history, and counter move for quiet moves
 				if !move.capture && move.promoted == -1 {
 					store_killer(move, ply)
 					update_history(move, effective_depth)
+
+					// Store as counter move if we have a previous move
+					if prev_move.source != 0 {
+						store_counter_move(prev_move, move)
+					}
 				}
 				break
 			}
@@ -508,6 +576,7 @@ search_position :: proc(
 	nodes = 0
 	clear_killers() // Clear killer moves for new search
 	clear_history() // Clear history table for new search
+	clear_counter_moves() // Clear counter moves for new search
 	// fmt.printf("DEBUG: NNUE Initialized: %v\n", nnue.is_initialized)
 	// os.flush(os.stdout)
 	best_move: moves.Move
@@ -516,7 +585,7 @@ search_position :: proc(
 	start_time := time.now()
 
 	// Aspiration Windows - narrower for faster convergence
-	ASPIRATION_WINDOW :: 25 // Reduced from 50
+	ASPIRATION_WINDOW :: 25 // Sweet spot for performance
 	prev_score := 0
 
 	// MultiPV storage - track best N moves

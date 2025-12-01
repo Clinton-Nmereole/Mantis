@@ -6,12 +6,26 @@ import "../moves"
 
 // Score a move for sorting
 // Score a move for sorting
-score_move :: proc(move: moves.Move, b: ^board.Board, tt_move: moves.Move, ply: int = 0) -> int {
+score_move :: proc(
+	move: moves.Move,
+	b: ^board.Board,
+	tt_move: moves.Move,
+	ply: int = 0,
+	prev_move: moves.Move = moves.Move{},
+) -> int {
 	// 1. Hash Move (Highest Priority)
 	if move.source == tt_move.source &&
 	   move.target == tt_move.target &&
 	   move.promoted == tt_move.promoted {
 		return 20000
+	}
+
+	// 2. Counter Move (between TT and killers)
+	if prev_move.source != 0 {
+		counter := get_counter_move(prev_move)
+		if counter.source != 0 && move.source == counter.source && move.target == counter.target {
+			return 15000
+		}
 	}
 
 	score := 0
@@ -79,6 +93,7 @@ sort_moves :: proc(
 	b: ^board.Board,
 	tt_move: moves.Move = moves.Move{},
 	ply: int = 0,
+	prev_move: moves.Move = moves.Move{}, // For counter moves
 ) {
 	if len(move_list) < 2 {return}
 
@@ -86,7 +101,7 @@ sort_moves :: proc(
 	defer delete(scores)
 
 	for i in 0 ..< len(move_list) {
-		scores[i] = score_move(move_list[i], b, tt_move, ply)
+		scores[i] = score_move(move_list[i], b, tt_move, ply, prev_move)
 	}
 
 	// Insertion Sort (Descending)
