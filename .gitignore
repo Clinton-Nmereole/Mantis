@@ -19,3 +19,7 @@ build_output.txt
 
 # OS files
 .DS_Store
+
+# Editor / tool artifacts
+.pi-lens/
+=
