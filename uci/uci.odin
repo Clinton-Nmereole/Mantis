@@ -233,6 +233,13 @@ parse_go :: proc(command: string, b: ^board.Board) {
 				val, ok := strconv.parse_int(parts[i + 1])
 				if ok {tc.movestogo = val}
 			}
+		} else if parts[i] == "movetime" {
+			if i + 1 < len(parts) {
+				val, ok := strconv.parse_int(parts[i + 1])
+				if ok {tc.movetime = val}
+			}
+		} else if parts[i] == "infinite" {
+			tc.infinite = true
 		}
 	}
 
@@ -260,8 +267,8 @@ parse_go :: proc(command: string, b: ^board.Board) {
 	// Regular search (non-ponder)
 	search.reset_search_control()
 
-	// If time control specified, use time management
-	if tc.wtime > 0 || tc.btime > 0 {
+	// If time control, movetime, or infinite specified, use time management
+	if tc.wtime > 0 || tc.btime > 0 || tc.movetime > 0 || tc.infinite {
 		limits := search.calculate_time(tc, b.side, move_overhead)
 		search.search_limits = limits
 		search.use_time_management = true

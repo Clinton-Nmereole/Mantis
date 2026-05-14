@@ -313,6 +313,8 @@ negamax :: proc(
 	// Periodic time check (every 1024 nodes)
 	if use_time_management && st.nodes % 1024 == 0 {
 		if should_stop(search_limits) {
+			// Signal all threads to stop immediately
+			sync.atomic_store(&search_control.should_stop, i32(1))
 			return alpha // Exit early with fail-low
 		}
 	}
@@ -875,6 +877,11 @@ search_position :: proc(
 	// Aspiration Windows - narrower for faster convergence
 	prev_score := 0
 
+	// Dynamic time-scaling state
+	time_factor: f64 = 1.0
+	best_move_stable_count: int = 0
+	prev_best_move: moves.Move
+
 	// MultiPV storage - track best N moves
 	multi_pv_results: [dynamic]MultiPV_Result
 	defer delete(multi_pv_results)
@@ -943,6 +950,11 @@ search_position :: proc(
 			current_alpha := alpha
 
 			for i in 0 ..< move_list.count {
+				// Abort root move loop if search was stopped (time limit or external stop)
+				if should_stop_search() {
+					break
+				}
+
 				state: board.StateInfo
 				board.make_move_fast(b, move_list.moves[i], &state)
 
@@ -995,6 +1007,10 @@ search_position :: proc(
 					current_alpha = alpha
 
 					for i in 0 ..< move_list.count {
+						if should_stop_search() {
+							break
+						}
+
 						state: board.StateInfo
 						board.make_move_fast(b, move_list.moves[i], &state)
 
@@ -1042,6 +1058,10 @@ search_position :: proc(
 					current_alpha = alpha
 
 					for i in 0 ..< move_list.count {
+						if should_stop_search() {
+							break
+						}
+
 						state: board.StateInfo
 						board.make_move_fast(b, move_list.moves[i], &state)
 
@@ -1172,11 +1192,28 @@ search_position :: proc(
 			sync.atomic_store(&search_control.ponder_mode, i32(0))
 		}
 
+		// Dynamic time scaling based on best-move stability
+		if use_time_management {
+			if best_move.source == prev_best_move.source &&
+			   best_move.target == prev_best_move.target {
+				best_move_stable_count += 1
+				// Best move stable → reduce time factor (stop earlier)
+				time_factor -= 0.15
+				if time_factor < 0.5 { time_factor = 0.5 }
+			} else {
+				// Best move changed → increase time factor (search longer)
+				best_move_stable_count = 0
+				time_factor += 0.4
+				if time_factor > 2.0 { time_factor = 2.0 }
+			}
+			prev_best_move = best_move
+		}
+
 		// Check if we should stop iterative deepening
 		// Skip time check if still in ponder mode (infinite search)
 		is_pondering := sync.atomic_load(&search_control.ponder_mode)
-		if is_pondering == 0 && use_time_management && exceeded_optimal(search_limits) {
-			break // Stop if we've used our optimal time
+		if is_pondering == 0 && use_time_management && exceeded_scaled_optimal(search_limits, time_factor) {
+			break // Stop if we've used our scaled optimal time
 		}
 	}
 

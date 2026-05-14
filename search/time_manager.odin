@@ -8,10 +8,12 @@ TimeControl :: struct {
 	winc:      int, // White increment (ms)
 	binc:      int, // Black increment (ms)
 	movestogo: int, // Moves to next time control (0 = sudden death)
+	movetime:  int, // Exact time per move (ms), overrides normal calculation
+	infinite:  bool, // Search until "stop" command
 }
 
 SearchLimits :: struct {
-	max_time:     int, // Hard limit (ms)
+	max_time:     int, // Hard abort limit (ms)
 	optimal_time: int, // Target time (ms)
 	start_time:   time.Time,
 }
@@ -20,88 +22,132 @@ SearchLimits :: struct {
 search_limits: SearchLimits
 use_time_management := false
 
-// Calculate time allocation for this move
+// Calculate time allocation for this move.
+// Heavily influenced by how modern engines (Stockfish, Ethereal, etc.)
+// allocate time for blitz/rapid/classical.
 calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> SearchLimits {
-	my_time := side == 0 ? tc.wtime : tc.btime
-	my_inc := side == 0 ? tc.winc : tc.binc
-
-	// Conservative time management formula
-	// Key principle: Always leave a time cushion to avoid flagging
-
-	// Account for overhead first
-	available_time := my_time - overhead
-	if available_time < 1 {
-		available_time = 1
-	}
-
-	// Determine moves to horizon based on time control
-	moves_to_horizon := 50 // Default: assume 50 more moves
-
-	if tc.movestogo > 0 {
-		// Tournament time control with moves/time
-		moves_to_horizon = tc.movestogo
-	} else {
-		// Sudden death - estimate remaining moves based on time
-		if my_time >= 180000 { 	// >= 3 minutes
-			moves_to_horizon = 50
-		} else if my_time >= 60000 { 	// >= 1 minute
-			moves_to_horizon = 40
-		} else if my_time >= 30000 { 	// >= 30 seconds
-			moves_to_horizon = 30
-		} else if my_time >= 10000 { 	// >= 10 seconds
-			moves_to_horizon = 20
-		} else {
-			moves_to_horizon = 15
+	// movetime overrides everything
+	if tc.movetime > 0 {
+		mt := tc.movetime - overhead
+		if mt < 1 { mt = 1 }
+		return SearchLimits{
+			max_time     = mt,
+			optimal_time = mt,
+			start_time   = time.now(),
 		}
 	}
 
-	// Calculate base time allocation (conservative)
-	// Use only a fraction of time/moves to maintain cushion
-	base_time := available_time / moves_to_horizon
-
-	// Only use a fraction of increment to build time bank
-	// In blitz/rapid with increment, save some increment for later
-	inc_fraction := my_inc
-	if my_inc > 0 && my_time < 60000 { 	// In time pressure with increment
-		inc_fraction = (my_inc * 2) / 3 // Use only 2/3 of increment
+	// infinite search
+	if tc.infinite {
+		return SearchLimits{
+			max_time     = 999_999_999,
+			optimal_time = 999_999_999,
+			start_time   = time.now(),
+		}
 	}
 
-	// Optimal time = conservative base + fraction of increment
-	optimal := base_time + inc_fraction
+	my_time := side == 0 ? tc.wtime : tc.btime
+	my_inc  := side == 0 ? tc.winc  : tc.binc
 
-	// Ensure minimum thinking time
-	if optimal < 50 && my_time > 1000 {
-		optimal = 50 // At least 50ms unless in severe time trouble
+	available := my_time - overhead
+	if available < 1 { available = 1 }
+
+	mtg := tc.movestogo
+
+	// Tournament time control with moves-to-go
+	if mtg > 0 {
+		base := available / mtg
+		// Use most of the increment every move
+		optimal := base + my_inc * 3 / 4
+		// Hard limit: time / 3 or 3x optimal, whichever is smaller
+		max_limit := available / 3
+		if max_limit > optimal * 3 { max_limit = optimal * 3 }
+		if max_limit > available / 2 { max_limit = available / 2 }
+		return SearchLimits{
+			max_time     = max_limit,
+			optimal_time = optimal,
+			start_time   = time.now(),
+		}
 	}
 
-	// Hard limit (absolute maximum)
-	// Use at most 1/10 of remaining time or 5x optimal, whichever is smaller
-	max_tenth := available_time / 10
-	max_5x := optimal * 5
-	max := max_tenth < max_5x ? max_tenth : max_5x
-
-	// In extreme time pressure, be even more conservative
-	if my_time < 5000 { 	// Less than 5 seconds
-		max = optimal * 2 // Only allow 2x optimal in time scramble
+	// Sudden death / blitz / rapid
+	// Estimate moves-to-horizon based on remaining time.
+	// Lower values = more aggressive time usage.
+	moves_to_horizon: int
+	switch {
+	case my_time >= 300_000: moves_to_horizon = 40 // >= 5 min
+	case my_time >= 120_000: moves_to_horizon = 35 // >= 2 min
+	case my_time >= 60_000:  moves_to_horizon = 30 // >= 1 min
+	case my_time >= 30_000:  moves_to_horizon = 25 // >= 30 s
+	case my_time >= 10_000:  moves_to_horizon = 20 // >= 10 s
+	case my_time >= 5_000:   moves_to_horizon = 15 // >= 5 s
+	case:                    moves_to_horizon = 10 // < 5 s
 	}
 
-	// Safety: never exceed 1/3 of total time
-	max_third := available_time / 3
-	if max > max_third {
-		max = max_third
+	base := available / moves_to_horizon
+
+	// Increment bonus: use more in blitz, less in classical
+	inc_bonus: int
+	if my_inc > 0 {
+		if my_time < 60_000 {
+			// Blitz / rapid: use 70 % of increment
+			inc_bonus = my_inc * 7 / 10
+		} else {
+			// Classical: use 60 % of increment
+			inc_bonus = my_inc * 3 / 5
+		}
 	}
 
-	return SearchLimits{max_time = max, optimal_time = optimal, start_time = time.now()}
+	optimal := base + inc_bonus
+
+	// Minimum thinking time
+	if optimal < 30 && my_time > 500 {
+		optimal = 30
+	}
+
+	// Hard limit depends on time pressure
+	max_limit: int
+	if my_time < 5_000 {
+		// Time scramble: very conservative
+		max_limit = optimal * 15 / 10 // 1.5x
+		if max_limit > available / 4 { max_limit = available / 4 }
+	} else if my_time < 20_000 {
+		// Moderate pressure
+		max_limit = optimal * 25 / 10 // 2.5x
+		if max_limit > available / 4 { max_limit = available / 4 }
+	} else {
+		// Normal: up to 3x optimal, but never more than 1/4 of clock
+		max_limit = optimal * 3
+		if max_limit > available / 4 { max_limit = available / 4 }
+	}
+
+	return SearchLimits{
+		max_time     = max_limit,
+		optimal_time = optimal,
+		start_time   = time.now(),
+	}
+}
+
+// Return elapsed milliseconds since search started
+elapsed_ms :: proc(limits: SearchLimits) -> int {
+	return int(time.duration_milliseconds(time.since(limits.start_time)))
 }
 
 // Check if we should stop searching (hard limit)
 should_stop :: proc(limits: SearchLimits) -> bool {
-	elapsed := time.duration_milliseconds(time.since(limits.start_time))
-	return int(elapsed) >= limits.max_time
+	return elapsed_ms(limits) >= limits.max_time
 }
 
-// Check if we've exceeded optimal time
+// Check if we've exceeded the base optimal time.
+// The caller scales optimal_time dynamically, so this is the
+// *unscaled* baseline.  Use exceeded_scaled_optimal for the
+// dynamically-adjusted target.
 exceeded_optimal :: proc(limits: SearchLimits) -> bool {
-	elapsed := time.duration_milliseconds(time.since(limits.start_time))
-	return int(elapsed) >= limits.optimal_time
+	return elapsed_ms(limits) >= limits.optimal_time
+}
+
+// Check against a scaled optimal time (for dynamic scaling)
+exceeded_scaled_optimal :: proc(limits: SearchLimits, factor: f64) -> bool {
+	scaled := int(f64(limits.optimal_time) * factor)
+	return elapsed_ms(limits) >= scaled
 }
