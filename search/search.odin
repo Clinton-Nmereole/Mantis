@@ -789,10 +789,11 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int) ->
 	}
 
 	// Delta Pruning
-	// If even capturing a queen won't raise alpha, stop searching.
-	// Delta = maximum material gain from a single capture.
-	if current_alpha + params.delta_pruning_margin < alpha {
-		return current_alpha
+	// If even capturing the most valuable piece won't raise alpha,
+	// stop searching captures.  Delta is the maximum material swing
+	// from a single capture (typically queen value + small margin).
+	if evaluation + params.delta_pruning_margin < alpha {
+		return evaluation
 	}
 
 	move_list: moves.MoveList
