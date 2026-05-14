@@ -878,7 +878,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
             engine = white if is_white_turn else black
 
             # Set position and search
-            engine.set_position(moves)
+            engine.set_position(moves, opening_fen)
 
             # Build go command arguments from time_control
             tc_args = {}
