@@ -9,7 +9,7 @@ get_king_moves :: proc(
 	own_pieces: u64,
 	castling_rights: int,
 	side: int,
-	move_list: ^[dynamic]Move,
+	move_list: ^MoveList,
 ) {
 	bitboard := king
 	source, target: int
@@ -48,7 +48,7 @@ get_king_moves :: proc(
 		for attacks != 0 {
 			target = utils.pop_lsb(&attacks)
 			is_capture := (occupancy & (1 << u64(target))) != 0
-			append(move_list, create_move(source, target, constants.KING, is_capture))
+			append_move(move_list, create_move(source, target, constants.KING, is_capture))
 		}
 
 		// Castling Moves
@@ -65,7 +65,7 @@ get_king_moves :: proc(
 						// We don't check attacks here (handled in make_move/is_legal)
 						move := create_move(4, 6, constants.KING, false)
 						move.castling = true
-						append(move_list, move)
+						append_move(move_list, move)
 					}
 				}
 				// Queen Side (C1) - Requires WQ (2)
@@ -74,7 +74,7 @@ get_king_moves :: proc(
 					if (occupancy & ((1 << 1) | (1 << 2) | (1 << 3))) == 0 {
 						move := create_move(4, 2, constants.KING, false)
 						move.castling = true
-						append(move_list, move)
+						append_move(move_list, move)
 					}
 				}
 			}
@@ -86,7 +86,7 @@ get_king_moves :: proc(
 					if (occupancy & ((1 << 61) | (1 << 62))) == 0 {
 						move := create_move(60, 62, constants.KING, false)
 						move.castling = true
-						append(move_list, move)
+						append_move(move_list, move)
 					}
 				}
 				// Queen Side (C8) - Requires BQ (8)
@@ -95,7 +95,7 @@ get_king_moves :: proc(
 					if (occupancy & ((1 << 57) | (1 << 58) | (1 << 59))) == 0 {
 						move := create_move(60, 58, constants.KING, false)
 						move.castling = true
-						append(move_list, move)
+						append_move(move_list, move)
 					}
 				}
 			}

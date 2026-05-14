@@ -5,6 +5,7 @@ import "../constants"
 import "../moves"
 import "../nnue"
 import "../search"
+import "../tb"
 import "core:bufio"
 import "core:fmt"
 import "core:os"
@@ -34,7 +35,7 @@ ponder_state: Ponder_State
 uci_loop :: proc() {
 	reader: bufio.Reader
 	buffer: [4096]byte
-	bufio.reader_init(&reader, os.stream_from_handle(os.stdin))
+	bufio.reader_init(&reader, os.to_stream(os.stdin))
 	defer bufio.reader_destroy(&reader)
 
 	game_board := board.parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
@@ -44,6 +45,12 @@ uci_loop :: proc() {
 
 	// Initialize thread pool
 	search.init_thread_pool(thread_count)
+
+	// Initialize LMR reduction table
+	search.init_lmr_table()
+
+	// Initialize tunable search parameters
+	search.init_search_params()
 
 	// Load Default NNUE (silently)
 	default_nnue := "nn-c0ae49f08b40.nnue"
@@ -76,6 +83,8 @@ uci_loop :: proc() {
 			fmt.println("option name Move Overhead type spin default 10 min 0 max 5000")
 			fmt.println("option name MultiPV type spin default 1 min 1 max 500")
 			fmt.println("option name Ponder type check default false")
+			fmt.println("option name SyzygyPath type string default <empty>")
+			fmt.println("option name SyzygyProbeLimit type spin default 6 min 0 max 7")
 			fmt.println("option name Threads type spin default 1 min 1 max 512")
 			fmt.println("uciok")
 			os.flush(os.stdout)
@@ -172,7 +181,8 @@ parse_position :: proc(command: string, b: ^board.Board) {
 				move_str := parts[i]
 				move := parse_move(b, move_str)
 				if move.source != 0 || move.target != 0 { 	// Valid move?
-					board.make_move(b, move, b.side)
+					state: board.StateInfo
+					board.make_move(b, move, &state)
 				}
 			}
 		}
@@ -260,7 +270,10 @@ parse_go :: proc(command: string, b: ^board.Board) {
 		if thread_count > 1 {
 			search.parallel_search(b, depth, multi_pv)
 		} else {
-			search.search_position(b, depth, multi_pv)
+			st: search.SearchThread
+			search.init_search_thread(&st, 0)
+			defer free(st.continuation_history)
+			search.search_position(&st, b, depth, multi_pv)
 		}
 
 		search.use_time_management = false
@@ -269,7 +282,10 @@ parse_go :: proc(command: string, b: ^board.Board) {
 		if thread_count > 1 {
 			search.parallel_search(b, depth, multi_pv)
 		} else {
-			search.search_position(b, depth, multi_pv)
+			st: search.SearchThread
+			search.init_search_thread(&st, 0)
+			defer free(st.continuation_history)
+			search.search_position(&st, b, depth, multi_pv)
 		}
 	}
 }
@@ -332,6 +348,22 @@ parse_setoption :: proc(command: string) {
 				// Reinitialize thread pool with new count
 				search.init_thread_pool(val)
 			}
+		} else if name == "SyzygyPath" {
+			// Reconstruct path (may contain spaces)
+			path_parts := parts[4:]
+			path := strings.join(path_parts, " ")
+			defer delete(path)
+
+			if tb.init_syzygy(path) {
+				fmt.printf("Syzygy: loaded %d-man tablebases from %s\n", tb.TB_LARGEST, path)
+			} else {
+				fmt.println("Syzygy: failed to load tablebases")
+			}
+		} else if name == "SyzygyProbeLimit" {
+			val, ok := strconv.parse_int(parts[4])
+			if ok && val >= 0 && val <= 7 {
+				tb.syzygy_probe_limit = val
+			}
 		}
 	}
 }
@@ -366,16 +398,16 @@ parse_move :: proc(b: ^board.Board, move_str: string) -> moves.Move {
 	}
 
 	// We need to find the move in the move list to get full details (capture, flags)
-	move_list := make([dynamic]moves.Move)
-	defer delete(move_list)
+	move_list: moves.MoveList
+	// deferred delete removed: MoveList is stack-allocated
 	board.generate_all_moves(b, &move_list)
 
-	for m in move_list {
-		if m.source == source && m.target == target {
+	for i in 0 ..< move_list.count {
+		if move_list.moves[i].source == source && move_list.moves[i].target == target {
 			if promoted != -1 {
-				if m.promoted == promoted {return m}
+				if move_list.moves[i].promoted == promoted {return move_list.moves[i]}
 			} else {
-				return m
+				return move_list.moves[i]
 			}
 		}
 	}
@@ -392,7 +424,10 @@ ponder_search_thread :: proc(t: ^thread.Thread) {
 	sync.atomic_store(&search.search_control.ponder_mode, i32(1))
 
 	// Run search with ponder mode (infinite until ponderhit or stop)
-	search.search_position(&state.board, state.depth, multi_pv)
+	st: search.SearchThread
+	search.init_search_thread(&st, 0)
+	defer free(st.continuation_history)
+	search.search_position(&st, &state.board, state.depth, multi_pv)
 
 	// Mark ponder as inactive when done
 	sync.atomic_store(&ponder_state.is_active, i32(0))

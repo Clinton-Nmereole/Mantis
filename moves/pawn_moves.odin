@@ -13,7 +13,7 @@ get_pawn_moves :: proc(
 	occupancy: u64,
 	enemy_pieces: u64,
 	en_passant_target: u64,
-	move_list: ^[dynamic]Move,
+	move_list: ^MoveList,
 ) {
 	empty := ~occupancy
 
@@ -34,7 +34,7 @@ get_pawn_moves :: proc(
 			// Check Promotion (Rank 8 is 56-63)
 			if target >= 56 {
 				// Add promotion moves
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -47,7 +47,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -60,7 +60,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -73,7 +73,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -87,7 +87,7 @@ get_pawn_moves :: proc(
 					},
 				)
 			} else {
-				append(move_list, create_move(source, target, constants.PAWN))
+				append_move(move_list, create_move(source, target, constants.PAWN))
 			}
 		}
 
@@ -101,7 +101,7 @@ get_pawn_moves :: proc(
 		for bitboard != 0 {
 			target = utils.pop_lsb(&bitboard)
 			source = target - 16
-			append(move_list, Move{source, target, constants.PAWN, -1, false, true, false, false})
+			append_move(move_list, Move{source, target, constants.PAWN, -1, false, true, false, false})
 		}
 
 		// 3. Captures
@@ -115,7 +115,7 @@ get_pawn_moves :: proc(
 			source = target - 7
 
 			if target >= 56 { 	// Capture Promotion
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -128,7 +128,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -141,7 +141,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -154,7 +154,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -168,7 +168,7 @@ get_pawn_moves :: proc(
 					},
 				)
 			} else {
-				append(move_list, create_move(source, target, constants.PAWN, true))
+				append_move(move_list, create_move(source, target, constants.PAWN, true))
 			}
 		}
 
@@ -178,7 +178,7 @@ get_pawn_moves :: proc(
 			for bitboard != 0 {
 				target = utils.pop_lsb(&bitboard)
 				source = target - 7
-				append(
+				append_move(
 					move_list,
 					Move{source, target, constants.PAWN, -1, true, false, true, false},
 				)
@@ -195,7 +195,7 @@ get_pawn_moves :: proc(
 			source = target - 9
 
 			if target >= 56 { 	// Capture Promotion
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -208,7 +208,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -221,7 +221,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -234,7 +234,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -248,7 +248,7 @@ get_pawn_moves :: proc(
 					},
 				)
 			} else {
-				append(move_list, create_move(source, target, constants.PAWN, true))
+				append_move(move_list, create_move(source, target, constants.PAWN, true))
 			}
 		}
 
@@ -258,7 +258,7 @@ get_pawn_moves :: proc(
 			for bitboard != 0 {
 				target = utils.pop_lsb(&bitboard)
 				source = target - 9
-				append(
+				append_move(
 					move_list,
 					Move{source, target, constants.PAWN, -1, true, false, true, false},
 				)
@@ -276,7 +276,7 @@ get_pawn_moves :: proc(
 
 			// Check Promotion (Rank 1 is 0-7)
 			if target <= 7 {
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -289,7 +289,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -302,7 +302,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -315,7 +315,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -329,7 +329,7 @@ get_pawn_moves :: proc(
 					},
 				)
 			} else {
-				append(move_list, create_move(source, target, constants.PAWN))
+				append_move(move_list, create_move(source, target, constants.PAWN))
 			}
 		}
 
@@ -339,7 +339,7 @@ get_pawn_moves :: proc(
 		for bitboard != 0 {
 			target = utils.pop_lsb(&bitboard)
 			source = target + 16
-			append(move_list, Move{source, target, constants.PAWN, -1, false, true, false, false})
+			append_move(move_list, Move{source, target, constants.PAWN, -1, false, true, false, false})
 		}
 
 		// 3. Captures
@@ -353,7 +353,7 @@ get_pawn_moves :: proc(
 			source = target + 7
 
 			if target <= 7 { 	// Capture Promotion
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -366,7 +366,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -379,7 +379,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -392,7 +392,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -406,7 +406,7 @@ get_pawn_moves :: proc(
 					},
 				)
 			} else {
-				append(move_list, create_move(source, target, constants.PAWN, true))
+				append_move(move_list, create_move(source, target, constants.PAWN, true))
 			}
 		}
 
@@ -416,7 +416,7 @@ get_pawn_moves :: proc(
 			for bitboard != 0 {
 				target = utils.pop_lsb(&bitboard)
 				source = target + 7
-				append(
+				append_move(
 					move_list,
 					Move{source, target, constants.PAWN, -1, true, false, true, false},
 				)
@@ -433,7 +433,7 @@ get_pawn_moves :: proc(
 			source = target + 9
 
 			if target <= 7 { 	// Capture Promotion
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -446,7 +446,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -459,7 +459,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -472,7 +472,7 @@ get_pawn_moves :: proc(
 						false,
 					},
 				)
-				append(
+				append_move(
 					move_list,
 					Move {
 						source,
@@ -486,7 +486,7 @@ get_pawn_moves :: proc(
 					},
 				)
 			} else {
-				append(move_list, create_move(source, target, constants.PAWN, true))
+				append_move(move_list, create_move(source, target, constants.PAWN, true))
 			}
 		}
 
@@ -496,7 +496,7 @@ get_pawn_moves :: proc(
 			for bitboard != 0 {
 				target = utils.pop_lsb(&bitboard)
 				source = target + 9
-				append(
+				append_move(
 					move_list,
 					Move{source, target, constants.PAWN, -1, true, false, true, false},
 				)

@@ -5,8 +5,8 @@ import "../constants"
 import "../moves"
 
 // Score a move for sorting
-// Score a move for sorting
 score_move :: proc(
+	st: ^SearchThread,
 	move: moves.Move,
 	b: ^board.Board,
 	tt_move: moves.Move,
@@ -17,14 +17,14 @@ score_move :: proc(
 	if move.source == tt_move.source &&
 	   move.target == tt_move.target &&
 	   move.promoted == tt_move.promoted {
-		return 20000
+		return params.hash_move_score
 	}
 
 	// 2. Counter Move (between TT and killers)
 	if prev_move.source != 0 {
-		counter := get_counter_move(prev_move)
+		counter := get_counter_move(st, prev_move)
 		if counter.source != 0 && move.source == counter.source && move.target == counter.target {
-			return 15000
+			return params.counter_move_score
 		}
 	}
 
@@ -40,9 +40,6 @@ score_move :: proc(
 			victim_value = constants.PIECE_VALUES[constants.PAWN]
 		} else {
 			// Find piece at target
-			// We iterate through all piece bitboards to find the victim
-			// Optimization: Start from P (0) to K (5) + offset
-			// Victim is opposite color
 			start_piece := 0
 			end_piece := 6
 			if b.side == constants.WHITE {
@@ -63,7 +60,7 @@ score_move :: proc(
 		attacker_value := constants.PIECE_VALUES[attacker_piece]
 
 		if victim_piece != -1 {
-			score = 10000 + victim_value - attacker_value
+			score = params.capture_base_score + victim_value - attacker_value
 		}
 	}
 
@@ -73,15 +70,15 @@ score_move :: proc(
 
 	// 3. Killer moves (for quiet moves)
 	if !move.capture && move.promoted == -1 {
-		killer_type := is_killer(move, ply)
+		killer_type := is_killer(st, move, ply)
 		if killer_type == 1 {
-			return 9000 // Primary killer
+			return params.killer1_score // Primary killer
 		} else if killer_type == 2 {
-			return 8000 // Secondary killer
+			return params.killer2_score // Secondary killer
 		}
 
 		// 4. History score (for non-killer quiet moves)
-		return get_history_score(move)
+		return get_history_score(st, move)
 	}
 
 	return score
@@ -89,24 +86,24 @@ score_move :: proc(
 
 // Sort moves in descending order of score
 sort_moves :: proc(
-	move_list: ^[dynamic]moves.Move,
+	st: ^SearchThread,
+	move_list: ^moves.MoveList,
 	b: ^board.Board,
 	tt_move: moves.Move = moves.Move{},
 	ply: int = 0,
-	prev_move: moves.Move = moves.Move{}, // For counter moves
+	prev_move: moves.Move = moves.Move{},
 ) {
-	if len(move_list) < 2 {return}
+	if move_list.count < 2 {return}
 
-	scores := make([dynamic]int, len(move_list))
-	defer delete(scores)
+	scores: [256]int
 
-	for i in 0 ..< len(move_list) {
-		scores[i] = score_move(move_list[i], b, tt_move, ply, prev_move)
+	for i in 0 ..< move_list.count {
+		scores[i] = score_move(st, move_list.moves[i], b, tt_move, ply, prev_move)
 	}
 
 	// Insertion Sort (Descending)
-	for i in 0 ..< len(move_list) {
-		for j in i + 1 ..< len(move_list) {
+	for i in 0 ..< move_list.count {
+		for j in i + 1 ..< move_list.count {
 			if scores[j] > scores[i] {
 				// Swap scores
 				temp_score := scores[i]
@@ -114,9 +111,9 @@ sort_moves :: proc(
 				scores[j] = temp_score
 
 				// Swap moves
-				temp_move := move_list[i]
-				move_list[i] = move_list[j]
-				move_list[j] = temp_move
+				temp_move := move_list.moves[i]
+				move_list.moves[i] = move_list.moves[j]
+				move_list.moves[j] = temp_move
 			}
 		}
 	}

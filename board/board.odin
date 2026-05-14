@@ -39,9 +39,13 @@ Board :: struct {
 	accumulators:    [2]Accumulator,
 }
 
-// NNUE Accumulator (256x2)
+// StateInfo stores a complete board snapshot for make/unmove.
+// Using a type alias lets us save/restore with a single struct copy.
+StateInfo :: Board
+
+// NNUE Accumulator
 Accumulator :: struct {
-	values: [2048]i16, // Matches NNUE HIDDEN_SIZE
+	values: [constants.NNUE_HIDDEN_SIZE]i16,
 }
 
 // Castling Rights Bits

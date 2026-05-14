@@ -7,146 +7,160 @@ import "../zobrist"
 import "core:fmt"
 import "core:time"
 
-// Make Move
-// Returns false if the move is illegal (leaves king in check)
-// Make Move
-// Returns false if the move is illegal (leaves king in check)
-make_move :: proc(board: ^Board, move: moves.Move, side: int) -> bool {
+// apply_move_to_board performs the actual move application WITHOUT saving state
+// or checking legality. Used internally by make_move_fast.
+apply_move_to_board :: proc(b: ^Board, move: moves.Move) {
+	side := b.side
+
 	// Update Hash: Side
-	board.hash ~= zobrist.side_key
+	b.hash ~= zobrist.side_key
 
 	// Update Hash: Castling Rights (Remove old)
-	board.hash ~= zobrist.castling_keys[board.castle]
+	b.hash ~= zobrist.castling_keys[b.castle]
 
 	// Update Hash: En Passant (Remove old)
-	if board.en_passant != -1 {
-		board.hash ~= zobrist.en_passant_keys[board.en_passant]
+	if b.en_passant != -1 {
+		b.hash ~= zobrist.en_passant_keys[b.en_passant]
 	}
 
 	piece_idx := move.piece + (side == constants.WHITE ? 0 : 6)
 
 	// 1. Remove piece from source
-	board.bitboards[piece_idx] &= ~(u64(1) << u64(move.source))
-	board.mailbox[move.source] = -1 // Clear source square
-	board.hash ~= zobrist.piece_keys[piece_idx][move.source]
+	b.bitboards[piece_idx] &= ~(u64(1) << u64(move.source))
+	b.mailbox[move.source] = -1
+	b.hash ~= zobrist.piece_keys[piece_idx][move.source]
 
 	// 2. Add piece to target (Handle Promotion)
 	if move.promoted == -1 {
-		board.bitboards[piece_idx] |= (u64(1) << u64(move.target))
-		board.mailbox[move.target] = i8(piece_idx) // Update mailbox
-		board.hash ~= zobrist.piece_keys[piece_idx][move.target]
+		b.bitboards[piece_idx] |= (u64(1) << u64(move.target))
+		b.mailbox[move.target] = i8(piece_idx)
+		b.hash ~= zobrist.piece_keys[piece_idx][move.target]
 	} else {
-		// Promotion: add promoted piece to target
 		promoted_index := move.promoted + (side == constants.WHITE ? 0 : 6)
-		board.bitboards[promoted_index] |= (u64(1) << u64(move.target))
-		board.mailbox[move.target] = i8(promoted_index) // Update mailbox with promoted piece
-		board.hash ~= zobrist.piece_keys[promoted_index][move.target]
+		b.bitboards[promoted_index] |= (u64(1) << u64(move.target))
+		b.mailbox[move.target] = i8(promoted_index)
+		b.hash ~= zobrist.piece_keys[promoted_index][move.target]
 	}
 
 	// 3. Captures
 	if move.capture {
-		// We need to find which enemy piece was at target and remove it
 		start_piece := (side == constants.WHITE) ? 6 : 0
 		end_piece := (side == constants.WHITE) ? 12 : 6
 
 		for i in start_piece ..< end_piece {
-			if (board.bitboards[i] & (u64(1) << u64(move.target))) != 0 {
-				board.bitboards[i] &= ~(u64(1) << u64(move.target))
-				board.hash ~= zobrist.piece_keys[i][move.target]
+			if (b.bitboards[i] & (u64(1) << u64(move.target))) != 0 {
+				b.bitboards[i] &= ~(u64(1) << u64(move.target))
+				b.hash ~= zobrist.piece_keys[i][move.target]
 				break
 			}
 		}
 	}
 
-	// 5. En Passant Capture
+	// 4. En Passant Capture
 	if move.en_passant {
-		// The captured pawn is not at target, but behind it.
 		capture_square := (side == constants.WHITE) ? move.target - 8 : move.target + 8
 		enemy_pawn := (side == constants.WHITE) ? constants.PAWN + 6 : constants.PAWN
-		board.bitboards[enemy_pawn] &= ~(u64(1) << u64(capture_square))
-		board.mailbox[capture_square] = -1 // Clear captured pawn
-		board.hash ~= zobrist.piece_keys[enemy_pawn][capture_square]
+		b.bitboards[enemy_pawn] &= ~(u64(1) << u64(capture_square))
+		b.mailbox[capture_square] = -1
+		b.hash ~= zobrist.piece_keys[enemy_pawn][capture_square]
 	}
 
-	// 6. Castling
+	// 5. Castling
 	if move.piece == constants.KING || move.piece == (constants.KING + 6) {
-		// Castling Logic
 		if abs(move.target - move.source) == 2 {
-			// White King Side
-			if move.target == 6 { 	// G1
-				// Move Rook H1 (7) -> F1 (5)
-				board.bitboards[constants.ROOK] &= ~(u64(1) << 7)
-				board.bitboards[constants.ROOK] |= (u64(1) << 5)
-				board.mailbox[7] = -1
-				board.mailbox[5] = i8(constants.ROOK)
-				board.hash ~= zobrist.piece_keys[constants.ROOK][7]
-				board.hash ~= zobrist.piece_keys[constants.ROOK][5]
-			} else if move.target == 2 { 	// C1
-				// Move Rook A1 (0) -> D1 (3)
-				board.bitboards[constants.ROOK] &= ~(u64(1) << 0)
-				board.bitboards[constants.ROOK] |= (u64(1) << 3)
-				board.mailbox[0] = -1
-				board.mailbox[3] = i8(constants.ROOK)
-				board.hash ~= zobrist.piece_keys[constants.ROOK][0]
-				board.hash ~= zobrist.piece_keys[constants.ROOK][3]
-			} else if move.target == 62 { 	// G8
-				// Move Rook H8 (63) -> F8 (61)
-				board.bitboards[constants.ROOK + 6] &= ~(u64(1) << 63)
-				board.bitboards[constants.ROOK + 6] |= (u64(1) << 61)
-				board.mailbox[63] = -1
-				board.mailbox[61] = i8(constants.ROOK + 6)
-				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][63]
-				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][61]
-			} else if move.target == 58 { 	// C8
-				// Move Rook A8 (56) -> D8 (59)
-				board.bitboards[constants.ROOK + 6] &= ~(u64(1) << 56)
-				board.bitboards[constants.ROOK + 6] |= (u64(1) << 59)
-				board.mailbox[56] = -1
-				board.mailbox[59] = i8(constants.ROOK + 6)
-				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][56]
-				board.hash ~= zobrist.piece_keys[constants.ROOK + 6][59]
+			if move.target == 6 {		// G1
+				b.bitboards[constants.ROOK] &= ~(u64(1) << 7)
+				b.bitboards[constants.ROOK] |= (u64(1) << 5)
+				b.mailbox[7] = -1
+				b.mailbox[5] = i8(constants.ROOK)
+				b.hash ~= zobrist.piece_keys[constants.ROOK][7]
+				b.hash ~= zobrist.piece_keys[constants.ROOK][5]
+			} else if move.target == 2 {	// C1
+				b.bitboards[constants.ROOK] &= ~(u64(1) << 0)
+				b.bitboards[constants.ROOK] |= (u64(1) << 3)
+				b.mailbox[0] = -1
+				b.mailbox[3] = i8(constants.ROOK)
+				b.hash ~= zobrist.piece_keys[constants.ROOK][0]
+				b.hash ~= zobrist.piece_keys[constants.ROOK][3]
+			} else if move.target == 62 {	// G8
+				b.bitboards[constants.ROOK + 6] &= ~(u64(1) << 63)
+				b.bitboards[constants.ROOK + 6] |= (u64(1) << 61)
+				b.mailbox[63] = -1
+				b.mailbox[61] = i8(constants.ROOK + 6)
+				b.hash ~= zobrist.piece_keys[constants.ROOK + 6][63]
+				b.hash ~= zobrist.piece_keys[constants.ROOK + 6][61]
+			} else if move.target == 58 {	// C8
+				b.bitboards[constants.ROOK + 6] &= ~(u64(1) << 56)
+				b.bitboards[constants.ROOK + 6] |= (u64(1) << 59)
+				b.mailbox[56] = -1
+				b.mailbox[59] = i8(constants.ROOK + 6)
+				b.hash ~= zobrist.piece_keys[constants.ROOK + 6][56]
+				b.hash ~= zobrist.piece_keys[constants.ROOK + 6][59]
 			}
 		}
 	}
 
 	// Update Occupancies
-	update_occupancies(board)
-
-	// Check for legality (King in Check)
-	if is_square_attacked(board, get_king_square(board, side), 1 - side) {
-		return false
-	}
-
-	// Castling Legality: Cannot castle out of or through check
-	if move.castling {
-		row := (side == constants.WHITE) ? 0 : 56
-		// King Side (Target G1/G8)
-		if move.target == (row + 6) {
-			// Check E1/E8 (Source) and F1/F8 (Crossing)
-			if is_square_attacked(board, row + 4, 1 - side) {return false}
-			if is_square_attacked(board, row + 5, 1 - side) {return false}
-		} else if move.target == (row + 2) { 	// Queen Side (Target C1/C8)
-			// Check E1/E8 (Source) and D1/D8 (Crossing)
-			if is_square_attacked(board, row + 4, 1 - side) {return false}
-			if is_square_attacked(board, row + 3, 1 - side) {return false}
-		}
-	}
+	update_occupancies(b)
 
 	// Update State
-	board.side = 1 - side
+	b.side = 1 - side
 
 	// Update En Passant Target
 	if move.double_push {
-		board.en_passant = (side == constants.WHITE) ? move.target - 8 : move.target + 8
-		board.hash ~= zobrist.en_passant_keys[board.en_passant] // Add new
+		b.en_passant = (side == constants.WHITE) ? move.target - 8 : move.target + 8
+		b.hash ~= zobrist.en_passant_keys[b.en_passant]
 	} else {
-		board.en_passant = -1
+		b.en_passant = -1
 	}
 
 	// Update Castling Rights
-	board.castle &= castling_rights_mask[move.source]
-	board.castle &= castling_rights_mask[move.target]
-	board.hash ~= zobrist.castling_keys[board.castle] // Add new
+	b.castle &= castling_rights_mask[move.source]
+	b.castle &= castling_rights_mask[move.target]
+	b.hash ~= zobrist.castling_keys[b.castle]
+}
+
+// make_move_fast: save state, apply move, NO legality check.
+// This is the hot-path function used during search.
+make_move_fast :: proc(b: ^Board, move: moves.Move, state: ^StateInfo) {
+	state^ = StateInfo(b^)
+	apply_move_to_board(b, move)
+}
+
+// unmake_move: restore board to previously saved state.
+unmake_move :: proc(b: ^Board, state: ^StateInfo) {
+	b^ = Board(state^)
+}
+
+// make_move: full legal move application. Saves state, applies move,
+// checks legality, and auto-restores if the move is illegal.
+// Returns true if the move was legal and applied.
+make_move :: proc(b: ^Board, move: moves.Move, state: ^StateInfo) -> bool {
+	make_move_fast(b, move, state)
+
+	// Check if the king of the side that just moved is in check.
+	// b.side has already flipped, so the mover is (1 - b.side).
+	king_sq := get_king_square(b, 1 - b.side)
+	if is_square_attacked(b, king_sq, b.side) {
+		unmake_move(b, state)
+		return false
+	}
+
+	// Castling legality: cannot castle out of or through check.
+	if move.castling {
+		row := (1 - b.side == constants.WHITE) ? 0 : 56
+		if move.target == (row + 6) {		// King side
+			if is_square_attacked(b, row + 4, b.side) || is_square_attacked(b, row + 5, b.side) {
+				unmake_move(b, state)
+				return false
+			}
+		} else if move.target == (row + 2) {	// Queen side
+			if is_square_attacked(b, row + 4, b.side) || is_square_attacked(b, row + 3, b.side) {
+				unmake_move(b, state)
+				return false
+			}
+		}
+	}
 
 	return true
 }
@@ -232,65 +246,12 @@ get_king_square :: proc(board: ^Board, side: int) -> int {
 is_square_attacked :: proc(board: ^Board, square: int, attacker_side: int) -> bool {
 	// Check Pawn Attacks
 	if attacker_side == constants.WHITE {
-		// Attacked by White Pawn?
-		// Check if a White Pawn is at (square - 7) or (square - 9)
-		// (Reverse of pawn capture logic)
-		// If we are at 'square', a white pawn at 'square-9' attacks us (North-East).
-		// Wait. White pawn at B2 attacks C3.
-		// If we are at C3. B2 is (C3 - 9).
-		// So yes.
-		if (board.bitboards[constants.PAWN] & ((1 << u64(square)) >> 9)) != 0 {return true} 	// Check wrapping?
-		// Actually, simpler: Generate attacks FROM square as if it was a pawn of OPPOSITE color, AND with enemy pawns.
-		// If we are a Black King at square.
-		// Attacks from square (as Black Pawn) -> South-East/South-West.
-		// If those hit a White Pawn, then the White Pawn attacks us.
-
-		// Let's use the "Super Piece" method or just reverse lookups.
-
-		// 1. Pawn Attacks
-		// White pawns attack 'square' from South-West/South-East.
-		// So check square-9 and square-7.
-		// Must handle file wrapping.
-		// (1 << square) >> 9. If square is H3 (23). >> 9 is G2 (14). Correct.
-		// If square is A3 (16). >> 9 is 7 (H1). WRAP!
-		// So we must mask.
-
-		// Let's use pre-computed pawn tables later. For now, manual.
-
-		// Attacked by White Pawn from South-West (index - 9)?
-		// Only if square is not on File H? No.
-		// If square is on A3 (16). Source would be 7 (H1).
-		// 7 (H1) attacks 16 (A2)? No. 7 attacks 14, 16?
-		// H1 attacks G2 (14).
-		// So 16 is NOT attacked by 7.
-		// So (1 << 16) >> 9 = 7.
-		// We need to check if 7 is a pawn AND if 7->16 is valid.
-
-		// Let's use the `get_pawn_moves` logic in reverse or just re-use `get_pawn_moves` for the enemy?
-		// No, `get_pawn_moves` generates moves for ALL pawns.
-
-		// Let's use:
-		// attacks_to_square = pawn_attacks(side^1, square)
-		// if (attacks_to_square & enemy_pawns) return true
-
-		// White Pawn Attacks from 'sq':
-		// (1<<sq) << 9 (NE), (1<<sq) << 7 (NW)
-		// Black Pawn Attacks from 'sq':
-		// (1<<sq) >> 9 (SW), (1<<sq) >> 7 (SE)
-
-		// If we want to know if 'sq' is attacked by White Pawn:
-		// Imagine a Black Pawn at 'sq'. Where does it attack?
-		// It attacks SW (>>9) and SE (>>7).
-		// If there is a White Pawn at those squares, then 'sq' is attacked.
-
 		attacks := u64(1) << u64(square)
 		if ((attacks >> 9) & ~constants.FILE_H & board.bitboards[constants.PAWN]) !=
 		   0 {return true}
 		if ((attacks >> 7) & ~constants.FILE_A & board.bitboards[constants.PAWN]) !=
 		   0 {return true}
-
 	} else {
-		// Attacked by Black Pawn?
 		attacks := u64(1) << u64(square)
 		if ((attacks << 9) & ~constants.FILE_A & board.bitboards[constants.PAWN + 6]) !=
 		   0 {return true}
@@ -331,7 +292,7 @@ is_square_attacked :: proc(board: ^Board, square: int, attacker_side: int) -> bo
 }
 
 // Move Generation Wrapper
-generate_all_moves :: proc(board: ^Board, move_list: ^[dynamic]moves.Move) {
+generate_all_moves :: proc(board: ^Board, move_list: ^moves.MoveList) {
 	// Generate all moves for the current side
 	side := board.side
 	occupancy := board.occupancies[constants.BOTH]
@@ -369,27 +330,20 @@ generate_all_moves :: proc(board: ^Board, move_list: ^[dynamic]moves.Move) {
 }
 
 // Perft Function
-perft :: proc(board: Board, depth: int) -> u64 {
+perft :: proc(b: ^Board, depth: int) -> u64 {
 	if depth == 0 {return 1}
 
 	nodes: u64 = 0
-	move_list := make([dynamic]moves.Move)
-	defer delete(move_list)
+	move_list: moves.MoveList
+	// deferred delete removed: MoveList is stack-allocated
 
-	// We need to pass a pointer to generate_all_moves, but we have a value 'board'.
-	// Make a copy on stack/heap to pass pointer.
-	// Actually, 'board' argument is a copy. We can take its address.
-	// But Odin parameters are immutable by default unless 'var' or '^'.
-	// So we need a mutable copy.
-	temp_board := board
-	generate_all_moves(&temp_board, &move_list)
+	generate_all_moves(b, &move_list)
 
-	for move in move_list {
-		// Copy board state
-		next_board := temp_board
-
-		if make_move(&next_board, move, temp_board.side) {
-			nodes += perft(next_board, depth - 1)
+	for i in 0 ..< move_list.count {
+		state: StateInfo
+		if make_move(b, move_list.moves[i], &state) {
+			nodes += perft(b, depth - 1)
+			unmake_move(b, &state)
 		}
 	}
 
@@ -407,23 +361,22 @@ perft_test :: proc(fen: string, depth: int) {
 
 	// Run Perft Divide
 	total_nodes: u64 = 0
-	move_list := make([dynamic]moves.Move)
-	defer delete(move_list)
+	move_list: moves.MoveList
+	// deferred delete removed: MoveList is stack-allocated
 
-	temp_board := game_board
-	generate_all_moves(&temp_board, &move_list)
+	generate_all_moves(&game_board, &move_list)
 
-	for move in move_list {
-		next_board := temp_board
-		if make_move(&next_board, move, temp_board.side) {
-			nodes := perft(next_board, depth - 1)
+	for i in 0 ..< move_list.count {
+		state: StateInfo
+		if make_move(&game_board, move_list.moves[i], &state) {
+			nodes := perft(&game_board, depth - 1)
 
 			// Print Move (e.g. "e2e4: 20")
-			// We need a helper to print move in algebraic notation
-			print_move(move)
+			print_move(move_list.moves[i])
 			fmt.printf(": %d\n", nodes)
 
 			total_nodes += nodes
+			unmake_move(&game_board, &state)
 		}
 	}
 
@@ -451,8 +404,6 @@ print_move :: proc(move: moves.Move) {
 	fmt.printf("%c%c%c%c", files[sf], ranks[sr], files[tf], ranks[tr])
 
 	if move.promoted != -1 {
-		// p, n, b, r, q, k
-		// promoted is 0-5. usually we promote to n, b, r, q (1, 2, 3, 4)
 		switch move.promoted {
 		case constants.KNIGHT:
 			fmt.printf("n")

@@ -3,34 +3,36 @@ package nnue
 import "../board"
 import "../constants"
 import "../moves"
+import "base:intrinsics"
 import "core:fmt"
 import "core:os"
 
-
 // NNUE Constants (HalfKAv2_hm)
 // Input: 45056 (HalfKAv2)
-// Hidden: 1024 (likely for this file size)
+// Hidden: 1024 (per perspective accumulator)
 INPUT_SIZE :: 45056
-HIDDEN_SIZE :: 2048
+HIDDEN_SIZE :: constants.NNUE_HIDDEN_SIZE
 
 // Quantization
 QA :: 255
 QB :: 64
 QO :: 127 // Output quantization
 
+// ---------------------------------------------------------------------------
 // Network Weights Structure
-//Arrays will be manually aligned during allocation for SIMD performance
+// ---------------------------------------------------------------------------
+
 Network :: struct {
 	// Feature Transformer (Input -> Hidden)
 	feature_weights: [INPUT_SIZE * HIDDEN_SIZE]i16,
 	feature_biases:  [HIDDEN_SIZE]i16,
 
 	// Hidden Layers (Hidden -> Output)
-	// Layer 1: 1024 (2x512) -> 32 ? Or 1024 -> 32?
-	// Usually: (Accumulator 2x512) -> Layer1 (32) -> Layer2 (32) -> Output (1)
-	// Wait, if Hidden is 1024, is it 2x512? Yes.
-	// Layer 1: 1024 -> 32
-	l1_weights:      [1024 * 32]i8,
+	// Layer 1: HIDDEN_SIZE -> 32
+	// l1_weights is stored input-major (c*32+r) for compatibility.
+	// l1_weights_t is transposed output-major (r*HIDDEN_SIZE+c) for SIMD.
+	l1_weights:      [HIDDEN_SIZE * 32]i8,
+	l1_weights_t:    [32 * HIDDEN_SIZE]i8,
 	l1_biases:       [32]i32,
 
 	// Layer 2: 32 -> 32
@@ -111,8 +113,8 @@ init_nnue :: proc(filename: string) -> bool {
 	}
 	// Get file size
 	file_size, _ := os.file_size(handle)
-	data, read_success := os.read_entire_file(filename)
-	if !read_success {
+	data, read_err := os.read_entire_file_from_path(filename, context.allocator)
+	if read_err != os.ERROR_NONE {
 		return false
 	}
 	// defer delete(data) // Removed for debug
@@ -153,8 +155,8 @@ init_nnue :: proc(filename: string) -> bool {
 	// 1. Feature Transformer Biases
 	_, l_type := read_layer_header(data, &offset)
 	if l_type == "COMPRESSED_LEB128" {
-		// Read only 1024 biases (File has 1024 biases but 2048 weights)
-		for i in 0 ..< 1024 {
+		// Read HIDDEN_SIZE biases (1024 for standard networks)
+		for i in 0 ..< HIDDEN_SIZE {
 			current_network.feature_biases[i] = i16(read_sleb128(data, &offset))
 		}
 	} else {
@@ -164,8 +166,8 @@ init_nnue :: proc(filename: string) -> bool {
 	// 2. Feature Transformer Weights
 	_, l_type = read_layer_header(data, &offset)
 	if l_type == "COMPRESSED_LEB128" {
-		// Read 2048 * INPUT_SIZE weights
-		for i in 0 ..< INPUT_SIZE * 2048 {
+		// Read INPUT_SIZE * HIDDEN_SIZE weights
+		for i in 0 ..< INPUT_SIZE * HIDDEN_SIZE {
 			current_network.feature_weights[i] = i16(read_sleb128(data, &offset))
 		}
 	} else {
@@ -189,6 +191,7 @@ init_nnue :: proc(filename: string) -> bool {
 			for c in 0 ..< HIDDEN_SIZE {
 				val := i8(read_sleb128(data, &offset))
 				current_network.l1_weights[c * 32 + r] = val
+				current_network.l1_weights_t[r * HIDDEN_SIZE + c] = val
 			}
 		}
 	}
@@ -237,33 +240,30 @@ evaluate :: proc(b: ^board.Board) -> int {
 	}
 
 	// Use the incrementally updated accumulators from the board
-	// (These are updated by update_accumulators in search)
 	white_acc := b.accumulators[constants.WHITE]
 	black_acc := b.accumulators[constants.BLACK]
-
-	// 2. Forward Pass
-	// Perspective: Side to move
 
 	stm := b.side
 
 	input: [HIDDEN_SIZE]i16
-
-	// Use Accumulator directly (2048 size)
 	if stm == constants.WHITE {
-		for i in 0 ..< HIDDEN_SIZE {input[i] = white_acc.values[i]}
+		for i in 0 ..< HIDDEN_SIZE { input[i] = white_acc.values[i] }
 	} else {
-		for i in 0 ..< HIDDEN_SIZE {input[i] = black_acc.values[i]}
+		for i in 0 ..< HIDDEN_SIZE { input[i] = black_acc.values[i] }
 	}
 
-	// Layer 1
+	// Layer 1: HIDDEN_SIZE -> 32
 	l1_out: [32]i32
-	for i in 0 ..< 32 {l1_out[i] = current_network.l1_biases[i]}
+	for i in 0 ..< 32 {
+		l1_out[i] = current_network.l1_biases[i]
+	}
 
+	// Layer 1 forward pass — scalar, cache-friendly with input-major weights.
 	for i in 0 ..< HIDDEN_SIZE {
 		val := input[i]
 		// Activation: Clipped ReLU (0..QA)
-		if val < 0 {val = 0}
-		if val > QA {val = QA}
+		if val < 0 { val = 0 }
+		if val > QA { val = QA }
 
 		if val != 0 {
 			for j in 0 ..< 32 {
@@ -272,15 +272,16 @@ evaluate :: proc(b: ^board.Board) -> int {
 		}
 	}
 
-	// Layer 2
+	// Layer 2: 32 -> 32  (small enough to keep scalar)
 	l2_out: [32]i32
-	for i in 0 ..< 32 {l2_out[i] = current_network.l2_biases[i]}
+	for i in 0 ..< 32 {
+		l2_out[i] = current_network.l2_biases[i]
+	}
 
 	for i in 0 ..< 32 {
 		val := l1_out[i]
-		// Activation
-		if val < 0 {val = 0}
-		if val > QA {val = QA}
+		if val < 0 { val = 0 }
+		if val > QA { val = QA }
 
 		if val != 0 {
 			for j in 0 ..< 32 {
@@ -289,12 +290,12 @@ evaluate :: proc(b: ^board.Board) -> int {
 		}
 	}
 
-	// Output
+	// Output: 32 -> 1
 	output := current_network.output_bias
 	for i in 0 ..< 32 {
 		val := l2_out[i]
-		if val < 0 {val = 0}
-		if val > QO {val = QO}
+		if val < 0 { val = 0 }
+		if val > QO { val = QO }
 
 		output += val * i32(current_network.output_weights[i])
 	}
@@ -310,40 +311,20 @@ compute_accumulator :: proc(b: ^board.Board, side: int) -> board.Accumulator {
 	// Init with biases
 	acc.values = current_network.feature_biases
 
-	// Add active features
-	// Feature Index: HalfKP
-	// King Square (0-63)
 	king_sq := board.get_king_square(b, side)
 
-	// Iterate all pieces (of both sides)
-	// Pieces are indexed 0-11.
-	// 0-5: White P,N,B,R,Q,K
-	// 6-11: Black P,N,B,R,Q,K
-
-	// For HalfKP:
-	// We need to map pieces relative to the King's perspective.
-	// If side is White, King is White King.
-	//   White Pieces: 0-4 (P-Q). Index = PieceType * 64 + Square.
-	//   Black Pieces: 0-4 (P-Q). Index = (PieceType + 5) * 64 + Square.
-	//   (King is excluded from features usually, as it defines the bucket)
-
-	// If side is Black, King is Black King.
-	//   We mirror the board vertically?
-	//   Usually HalfKP mirrors the board so the King is always "White" effectively, or uses separate weights.
-	//   Standard: orient everything to White perspective, but for Black, we flip ranks.
-
-	// Let's implement a simple feature mapper.
-
-	// Iterate all squares
+	// Add active features using SIMD vector add
 	for sq in 0 ..< 64 {
 		piece := get_piece_at(b, sq)
 		if piece != -1 && piece != constants.KING && piece != (constants.KING + 6) {
-			// Calculate Feature Index
 			feature_idx := get_feature_index(king_sq, sq, piece, side)
+			weights := current_network.feature_weights[feature_idx * HIDDEN_SIZE : (feature_idx + 1) * HIDDEN_SIZE]
 
-			// Add weights
-			for i in 0 ..< HIDDEN_SIZE {
-				acc.values[i] += current_network.feature_weights[feature_idx * HIDDEN_SIZE + i]
+			for i := 0; i < HIDDEN_SIZE; i += 16 {
+				acc_vec := (^#simd[16]i16)(&acc.values[i])^
+				w_vec   := (^#simd[16]i16)(&weights[i])^
+				acc_vec  = intrinsics.simd_add(acc_vec, w_vec)
+				(^#simd[16]i16)(&acc.values[i])^ = acc_vec
 			}
 		}
 	}
@@ -358,7 +339,6 @@ get_piece_at :: proc(b: ^board.Board, sq: int) -> int {
 
 // Helper: Get Feature Index
 get_feature_index :: proc(king_sq: int, sq: int, piece: int, side: int) -> int {
-	// Orient to perspective
 	k_sq := king_sq
 	p_sq := sq
 	p_type := piece // 0-11
@@ -368,15 +348,10 @@ get_feature_index :: proc(king_sq: int, sq: int, piece: int, side: int) -> int {
 		p_sq = p_sq ~ 56 // Flip Rank
 
 		// Flip Colors in Piece Type
-		// 0-5 (White) -> 6-11 (Black)
-		// 6-11 (Black) -> 0-5 (White)
-		if p_type < 6 {p_type += 6} else {p_type -= 6}
+		if p_type < 6 { p_type += 6 } else { p_type -= 6 }
 	}
 
 	// Map Piece Type to 0-10
-	// Own: P(0), N(1), B(2), R(3), Q(4), K(5 - skipped for own)
-	// Enemy: p(6)->5, n(7)->6, b(8)->7, r(9)->8, q(10)->9, k(11)->10
-
 	idx := 0
 	if p_type < 5 {
 		idx = p_type
@@ -396,7 +371,7 @@ update_accumulators :: proc(old_board: ^board.Board, new_board: ^board.Board, mo
 	// Copy old accumulators to new board
 	new_board.accumulators = old_board.accumulators
 
-	if !is_initialized {return}
+	if !is_initialized { return }
 
 	side := old_board.side
 	piece_type := move.piece
@@ -404,7 +379,6 @@ update_accumulators :: proc(old_board: ^board.Board, new_board: ^board.Board, mo
 	// 1. Check for King Move (Refresh own accumulator)
 	if piece_type == constants.KING {
 		// Refresh the accumulator for the side that moved the King
-		// We use the NEW board state for this
 		new_board.accumulators[side] = compute_accumulator(new_board, side)
 
 		// For the other side, it's just a piece move (Enemy King moved)
@@ -432,7 +406,7 @@ update_accumulators :: proc(old_board: ^board.Board, new_board: ^board.Board, mo
 
 		if captured_piece != -1 {
 			if piece_type == constants.KING {
-				// If King moved, we already refreshed its accumulator (which accounts for the capture).
+				// If King moved, we already refreshed its accumulator.
 				// We only need to update the OTHER side.
 				remove_feature(
 					&new_board.accumulators[1 - side],
@@ -483,8 +457,12 @@ update_single_accumulator :: proc(
 		piece,
 		perspective,
 	)
-	for i in 0 ..< HIDDEN_SIZE {
-		acc.values[i] -= current_network.feature_weights[idx_rem * HIDDEN_SIZE + i]
+	weights_rem := current_network.feature_weights[idx_rem * HIDDEN_SIZE : (idx_rem + 1) * HIDDEN_SIZE]
+	for i := 0; i < HIDDEN_SIZE; i += 16 {
+		acc_vec := (^#simd[16]i16)(&acc.values[i])^
+		w_vec   := (^#simd[16]i16)(&weights_rem[i])^
+		acc_vec  = intrinsics.simd_sub(acc_vec, w_vec)
+		(^#simd[16]i16)(&acc.values[i])^ = acc_vec
 	}
 
 	// Add to Target (Handle Promotion)
@@ -502,8 +480,12 @@ update_single_accumulator :: proc(
 		final_piece,
 		perspective,
 	)
-	for i in 0 ..< HIDDEN_SIZE {
-		acc.values[i] += current_network.feature_weights[idx_add * HIDDEN_SIZE + i]
+	weights_add := current_network.feature_weights[idx_add * HIDDEN_SIZE : (idx_add + 1) * HIDDEN_SIZE]
+	for i := 0; i < HIDDEN_SIZE; i += 16 {
+		acc_vec := (^#simd[16]i16)(&acc.values[i])^
+		w_vec   := (^#simd[16]i16)(&weights_add[i])^
+		acc_vec  = intrinsics.simd_add(acc_vec, w_vec)
+		(^#simd[16]i16)(&acc.values[i])^ = acc_vec
 	}
 }
 
@@ -516,7 +498,11 @@ remove_feature :: proc(
 	perspective: int,
 ) {
 	idx := get_feature_index(board.get_king_square(b, perspective), sq, piece, perspective)
-	for i in 0 ..< HIDDEN_SIZE {
-		acc.values[i] -= current_network.feature_weights[idx * HIDDEN_SIZE + i]
+	weights := current_network.feature_weights[idx * HIDDEN_SIZE : (idx + 1) * HIDDEN_SIZE]
+	for i := 0; i < HIDDEN_SIZE; i += 16 {
+		acc_vec := (^#simd[16]i16)(&acc.values[i])^
+		w_vec   := (^#simd[16]i16)(&weights[i])^
+		acc_vec  = intrinsics.simd_sub(acc_vec, w_vec)
+		(^#simd[16]i16)(&acc.values[i])^ = acc_vec
 	}
 }

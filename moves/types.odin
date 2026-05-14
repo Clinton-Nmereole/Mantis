@@ -26,3 +26,21 @@ create_move :: proc(source, target, piece: int, capture: bool = false) -> Move {
 		castling    = false,
 	}
 }
+
+// MoveList: fixed-size stack-allocated move buffer.
+// Chess has at most 218 legal moves in any position, so 256 is plenty.
+MoveList :: struct {
+	moves: [256]Move,
+	count: int,
+}
+
+// Append a move to the list
+append_move :: proc(list: ^MoveList, move: Move) {
+	list.moves[list.count] = move
+	list.count += 1
+}
+
+// Clear the list
+ clear_move_list :: proc(list: ^MoveList) {
+	list.count = 0
+}

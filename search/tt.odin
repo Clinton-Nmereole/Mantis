@@ -10,60 +10,116 @@ TT_FLAG_EXACT :: 0
 TT_FLAG_ALPHA :: 1 // Upper Bound (Fail Low) - Score <= Alpha
 TT_FLAG_BETA :: 2 // Lower Bound (Fail High) - Score >= Beta
 
+// TT Entry
+// Each bucket holds 2 entries.  The key is written atomically last so that
+// a matching key read by another thread implies the rest of the fields are
+// valid (they were written before the key was published).
 TTEntry :: struct {
-	key:   u64, // Atomic read/write for thread safety
+	key:   u64,        // Atomic read/write for thread safety
 	move:  moves.Move,
 	score: int,
 	depth: int,
 	flag:  u8,
+	age:   u8,         // Search generation — helps replacement pick stale entries
+}
+
+// TT Bucket — 2 entries per hash slot.
+// Entry 0: depth-preferred slot
+// Entry 1: always-replace slot (filled only when 0 is occupied by deeper data)
+// In practice the replacement algorithm below treats both symmetrically.
+TTBucket :: struct {
+	entries: [2]TTEntry,
 }
 
 // Global Transposition Table
-tt: []TTEntry
+tt: []TTBucket
+
+// Current search generation (age).  Incremented on ucinewgame.
+tt_age: u8 = 0
+
+// Increment age so that entries from previous games are considered stale.
+// Called by ucinewgame (and optionally after very long searches to freshen the table).
+increment_tt_age :: proc() {
+	tt_age += 1
+	if tt_age == 0 {
+		// Wrap-around: if we ever hit 0 again, everything would look fresh.
+		// In practice 255 games between clears is enough, but be safe and
+		// clear the table on wrap.
+		clear_tt()
+		tt_age = 1
+	}
+}
 
 // Initialize TT
 init_tt :: proc(size_mb: int) {
-	// Calculate number of entries
-	entry_size := size_of(TTEntry)
-	count := (size_mb * 1024 * 1024) / entry_size
+	bucket_size := size_of(TTBucket)
+	count := (size_mb * 1024 * 1024) / bucket_size
+
+	if count < 1 { count = 1 }
 
 	if len(tt) > 0 {
 		delete(tt)
 	}
 
-	tt = make([]TTEntry, count)
+	tt = make([]TTBucket, count)
 	clear_tt()
-	fmt.printf("Transposition Table Initialized: %d MB, %d Entries\n", size_mb, count)
+	fmt.printf("Transposition Table Initialized: %d MB, %d Buckets (%d Entries)\n",
+		   size_mb, count, count * 2)
 }
 
 // Clear TT
 clear_tt :: proc() {
 	for i in 0 ..< len(tt) {
-		tt[i] = TTEntry{}
+		tt[i] = TTBucket{}
 	}
+}
+
+// Mate-score helpers — adjust mate distance for the ply we are at.
+// A mate score stored at ply 5 must be shifted when read at ply 2.
+score_to_tt :: proc(score: int, ply: int) -> int {
+	if score >= eval.MATE - MAX_PLY {
+		return score + ply
+	}
+	if score <= -eval.MATE + MAX_PLY {
+		return score - ply
+	}
+	return score
+}
+
+score_from_tt :: proc(score: int, ply: int) -> int {
+	if score >= eval.MATE - MAX_PLY {
+		return score - ply
+	}
+	if score <= -eval.MATE + MAX_PLY {
+		return score + ply
+	}
+	return score
 }
 
 // Probe TT
 // Returns: score, found
-probe_tt :: proc(key: u64, alpha: int, beta: int, depth: int) -> (int, bool) {
-	if len(tt) == 0 {return 0, false}
+probe_tt :: proc(key: u64, alpha: int, beta: int, depth: int, ply: int) -> (int, bool) {
+	if len(tt) == 0 { return 0, false }
 
 	index := key % u64(len(tt))
-	entry := &tt[index]
+	bucket := &tt[index]
 
-	// Atomic key read for thread safety
-	entry_key := sync.atomic_load(&entry.key)
+	for i in 0 ..< 2 {
+		entry := &bucket.entries[i]
+		entry_key := sync.atomic_load(&entry.key)
 
-	if entry_key == key {
-		if entry.depth >= depth {
-			if entry.flag == TT_FLAG_EXACT {
-				return entry.score, true
-			}
-			if entry.flag == TT_FLAG_ALPHA && entry.score <= alpha {
-				return alpha, true
-			}
-			if entry.flag == TT_FLAG_BETA && entry.score >= beta {
-				return beta, true
+		if entry_key == key && entry.depth >= depth {
+			score := score_from_tt(entry.score, ply)
+			#no_bounds_check {
+				if entry.flag == TT_FLAG_EXACT {
+					return score, true
+				}
+				if entry.flag == TT_FLAG_ALPHA && score <= alpha {
+					return alpha, true
+				}
+				if entry.flag == TT_FLAG_BETA && score >= beta {
+					return beta, true
+				}
 			}
 		}
 	}
@@ -72,43 +128,95 @@ probe_tt :: proc(key: u64, alpha: int, beta: int, depth: int) -> (int, bool) {
 }
 
 // Get TT Move (for move ordering)
+// Scans both entries and returns the move from the deeper one when both match.
 get_tt_move :: proc(key: u64) -> moves.Move {
-	if len(tt) == 0 {return moves.Move{}}
+	if len(tt) == 0 { return moves.Move{} }
 
 	index := key % u64(len(tt))
-	entry := &tt[index]
+	bucket := &tt[index]
 
-	// Atomic key read for thread safety
-	entry_key := sync.atomic_load(&entry.key)
+	best_move := moves.Move{}
+	best_depth := -1
 
-	if entry_key == key {
-		return entry.move
+	for i in 0 ..< 2 {
+		entry := &bucket.entries[i]
+		entry_key := sync.atomic_load(&entry.key)
+
+		if entry_key == key && entry.depth > best_depth {
+			best_depth = entry.depth
+			best_move = entry.move
+		}
 	}
 
-	return moves.Move{} // Empty move
+	return best_move
 }
 
 // Store TT
-store_tt :: proc(key: u64, move: moves.Move, score: int, depth: int, flag: u8) {
-	if len(tt) == 0 {return}
+// Replacement strategy:
+//  1. If key matches an existing entry, overwrite that entry (preserves the slot).
+//  2. Otherwise pick the entry that is easiest to replace:
+//     - Prefer stale age (entry.age != tt_age)
+//     - Within same age, prefer lower depth
+//     - If still tied, prefer entry[1] (always-replace slot)
+store_tt :: proc(key: u64, move: moves.Move, score: int, depth: int, flag: u8, ply: int) {
+	if len(tt) == 0 { return }
 
 	index := key % u64(len(tt))
-	entry := &tt[index]
+	bucket := &tt[index]
 
-	// Replacement Scheme: Don't replace much deeper entries
-	// Atomic key read to check existing entry
-	old_key := sync.atomic_load(&entry.key)
-	if old_key != 0 && old_key != key && entry.depth > depth + 2 {
-		return // Keep deeper entry
+	// Convert mate score for storage
+	tt_score := score_to_tt(score, ply)
+
+	// First: try to overwrite an entry with the same key
+	for i in 0 ..< 2 {
+		entry := &bucket.entries[i]
+		old_key := sync.atomic_load(&entry.key)
+		if old_key == key {
+			// Overwrite same-key entry.  Keep the existing move if the new
+			// move is empty and the old one isn't — this is common when we
+			// re-store a position after a fail-high with no best move yet.
+			best_move := move
+			if best_move.source == 0 && entry.move.source != 0 {
+				best_move = entry.move
+			}
+
+			entry.move  = best_move
+			entry.score = tt_score
+			entry.depth = depth
+			entry.flag  = flag
+			entry.age   = tt_age
+			sync.atomic_store(&entry.key, key)
+			return
+		}
 	}
 
-	// Write entry data first
-	entry.move = move
-	entry.score = score
-	entry.depth = depth
-	entry.flag = flag
+	// No key match — pick the replacement target
+	replace_idx := 0
+	for i in 1 ..< 2 {
+		entry      := &bucket.entries[i]
+		candidate  := &bucket.entries[replace_idx]
 
-	// Write key atomically last - this "publishes" the entry
-	// Other threads checking the key will see complete data
+		// Prefer stale age
+		if entry.age != tt_age && candidate.age == tt_age {
+			replace_idx = i
+			continue
+		}
+		if candidate.age != tt_age && entry.age == tt_age {
+			continue
+		}
+
+		// Same age (or both stale): prefer lower depth
+		if entry.depth < candidate.depth {
+			replace_idx = i
+		}
+	}
+
+	// Write the chosen entry (data first, key last)
+	entry := &bucket.entries[replace_idx]
+	entry.move  = move
+	entry.score = tt_score
+	entry.depth = depth
+	entry.flag  = flag
+	entry.age   = tt_age
 	sync.atomic_store(&entry.key, key)
 }

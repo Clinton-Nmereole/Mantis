@@ -40,7 +40,7 @@ get_knight_moves :: proc(
 	knights: u64,
 	occupancy: u64,
 	own_pieces: u64,
-	move_list: ^[dynamic]Move,
+	move_list: ^MoveList,
 ) {
 	bitboard := knights
 	source, target: int
@@ -59,7 +59,7 @@ get_knight_moves :: proc(
 		for attacks != 0 {
 			target = utils.pop_lsb(&attacks)
 			is_capture := (occupancy & (1 << u64(target))) != 0
-			append(move_list, create_move(source, target, constants.KNIGHT, is_capture))
+			append_move(move_list, create_move(source, target, constants.KNIGHT, is_capture))
 		}
 	}
 }

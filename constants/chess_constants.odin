@@ -56,3 +56,7 @@ PIECE_VALUES := [6]int {
 	900, // Queen
 	10000, // King
 }
+
+// NNUE Architecture Constants
+// Shared between board (accumulators) and nnue (network)
+NNUE_HIDDEN_SIZE :: 1024

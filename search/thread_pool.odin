@@ -55,6 +55,11 @@ Thread_Worker_Data :: struct {
 search_worker :: proc(t: ^thread.Thread) {
 	data := cast(^Thread_Worker_Data)t.data
 
+	// Create thread-local search state
+	st: SearchThread
+	init_search_thread(&st, data.thread_id)
+	defer free(st.continuation_history)
+
 	// Add search diversity: each thread searches at slightly different depth
 	// This reduces duplicate work across threads
 	adjusted_depth := data.depth
@@ -63,8 +68,7 @@ search_worker :: proc(t: ^thread.Thread) {
 	}
 
 	// Search the position (suppress bestmove output for workers)
-	// Each thread has its own killer/history tables (thread-local globals in Odin)
-	search_position(&data.board, adjusted_depth, data.multi_pv, output_bestmove = false)
+	search_position(&st, &data.board, adjusted_depth, data.multi_pv, output_bestmove = false)
 
 	// Clean up worker data
 	free(data)
@@ -74,16 +78,21 @@ search_worker :: proc(t: ^thread.Thread) {
 parallel_search :: proc(b: ^board.Board, depth: int, multi_pv: int) {
 	if global_thread_pool == nil || global_thread_pool.thread_count <= 1 {
 		// Fall back to single-threaded search
-		search_position(b, depth, multi_pv)
+		st: SearchThread
+		init_search_thread(&st, 0)
+		search_position(&st, b, depth, multi_pv)
 		return
 	}
+
+	// Reset global node counter before search
+	sync.atomic_store(&total_nodes, u64(0))
 
 	// Clear previous threads
 	for t in global_thread_pool.threads {
 		if t != nil {
 			thread.join(t)
 			thread.destroy(t)
-			free(t.data)
+			// Note: data already freed by worker
 		}
 	}
 	clear(&global_thread_pool.threads)
@@ -104,7 +113,10 @@ parallel_search :: proc(b: ^board.Board, depth: int, multi_pv: int) {
 	}
 
 	// Main thread (thread 0) also searches
-	search_position(b, depth, multi_pv)
+	st: SearchThread
+	init_search_thread(&st, 0)
+	defer free(st.continuation_history)
+	search_position(&st, b, depth, multi_pv)
 
 	// Wait for all helper threads to complete
 	for t in global_thread_pool.threads {

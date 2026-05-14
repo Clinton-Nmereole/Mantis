@@ -175,10 +175,8 @@ Mantis/
 - `NEXT_STEPS.md` - Future optimization roadmap
 - `FINAL_SUMMARY.md` - Comprehensive feature summary
 
-## License
 
-MIT
-
-## Author
+## Author 
 
 Built with Odin
+

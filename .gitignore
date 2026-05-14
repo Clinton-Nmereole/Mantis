@@ -1,0 +1,21 @@
+# Build artifacts
+*.ll
+mantis
+mantis_perft
+mantis_test
+mantis_nmp
+Mantis
+
+# Neural network weights (large binary files)
+*.nnue
+
+# Object files and static libraries
+*.o
+*.a
+
+# Test output files
+1
+build_output.txt
+
+# OS files
+.DS_Store

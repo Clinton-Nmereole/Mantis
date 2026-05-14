@@ -417,7 +417,7 @@ get_queen_attacks :: proc(square: int, occupancy: u64) -> u64 {
 
 // Move Generation Wrappers (Same as before, but now using fast lookups)
 
-get_rook_moves :: proc(rooks: u64, occupancy: u64, own_pieces: u64, move_list: ^[dynamic]Move) {
+get_rook_moves :: proc(rooks: u64, occupancy: u64, own_pieces: u64, move_list: ^MoveList) {
 	bitboard := rooks
 	for bitboard != 0 {
 		source := utils.pop_lsb(&bitboard)
@@ -425,7 +425,7 @@ get_rook_moves :: proc(rooks: u64, occupancy: u64, own_pieces: u64, move_list: ^
 		for attacks != 0 {
 			target := utils.pop_lsb(&attacks)
 			is_capture := (occupancy & (1 << u64(target))) != 0
-			append(move_list, create_move(source, target, constants.ROOK, is_capture))
+			append_move(move_list, create_move(source, target, constants.ROOK, is_capture))
 		}
 	}
 }
@@ -434,7 +434,7 @@ get_bishop_moves :: proc(
 	bishops: u64,
 	occupancy: u64,
 	own_pieces: u64,
-	move_list: ^[dynamic]Move,
+	move_list: ^MoveList,
 ) {
 	bitboard := bishops
 	for bitboard != 0 {
@@ -443,12 +443,12 @@ get_bishop_moves :: proc(
 		for attacks != 0 {
 			target := utils.pop_lsb(&attacks)
 			is_capture := (occupancy & (1 << u64(target))) != 0
-			append(move_list, create_move(source, target, constants.BISHOP, is_capture))
+			append_move(move_list, create_move(source, target, constants.BISHOP, is_capture))
 		}
 	}
 }
 
-get_queen_moves :: proc(queens: u64, occupancy: u64, own_pieces: u64, move_list: ^[dynamic]Move) {
+get_queen_moves :: proc(queens: u64, occupancy: u64, own_pieces: u64, move_list: ^MoveList) {
 	bitboard := queens
 	for bitboard != 0 {
 		source := utils.pop_lsb(&bitboard)
@@ -456,7 +456,7 @@ get_queen_moves :: proc(queens: u64, occupancy: u64, own_pieces: u64, move_list:
 		for attacks != 0 {
 			target := utils.pop_lsb(&attacks)
 			is_capture := (occupancy & (1 << u64(target))) != 0
-			append(move_list, create_move(source, target, constants.QUEEN, is_capture))
+			append_move(move_list, create_move(source, target, constants.QUEEN, is_capture))
 		}
 	}
 }
