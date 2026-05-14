@@ -1107,10 +1107,14 @@ search_position :: proc(
 			}
 
 			if found_move {
+				// Apply contempt from the engine's perspective at the root
+				// (score is always from the side-to-move's perspective at root)
+				contempt_score := best_score + params.contempt
+
 				// Store this PV result
 				result: MultiPV_Result
 				result.move = current_best_move
-				result.score = best_score
+				result.score = contempt_score
 				result.pv = best_pv
 				append(&multi_pv_results, result)
 
@@ -1119,7 +1123,7 @@ search_position :: proc(
 
 				// Update prev_score from first PV
 				if pv_index == 0 {
-					prev_score = best_score
+					prev_score = contempt_score
 					best_move = current_best_move
 				}
 			}

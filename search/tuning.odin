@@ -72,6 +72,9 @@ SearchParams :: struct {
 
 	// Check extension
 	check_ext_max_ply: int,
+
+	// Contempt ( discourages draws by biasing root eval)
+	contempt: int,
 }
 
 // Global parameter set — initialized to defaults.
@@ -119,6 +122,7 @@ init_search_params :: proc() {
 		killer1_score          = 9000,
 		killer2_score          = 8000,
 		check_ext_max_ply      = 40,
+		contempt               = 24,
 	}
 }
 
@@ -138,7 +142,7 @@ SPSA :: struct {
 }
 
 // Number of scalar fields in SearchParams
-NUM_PARAMS :: 34
+NUM_PARAMS :: 35
 
 // Flatten SearchParams into a float slice for SPSA
 params_to_slice :: proc(p: ^SearchParams, out: []f64) {
@@ -176,6 +180,7 @@ params_to_slice :: proc(p: ^SearchParams, out: []f64) {
 	out[31] = f64(p.capture_base_score)
 	out[32] = f64(p.killer1_score)
 	out[33] = f64(p.killer2_score)
+	out[34] = f64(p.contempt)
 	// see_prune_threshold omitted — tends to be binary (skip/keep)
 	// history_max/min omitted — prevent overflow only
 	// check_ext_max_ply omitted — structural safety limit
@@ -217,6 +222,7 @@ slice_to_params :: proc(slice: []f64, p: ^SearchParams) {
 	p.capture_base_score      = int(slice[31])
 	p.killer1_score           = int(slice[32])
 	p.killer2_score           = int(slice[33])
+	p.contempt                = int(slice[34])
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +283,7 @@ coordinate_descent :: proc(eval_fn: EvalFn, steps: int = 3, games_per_eval: int 
 		0.15, // capture_base_score
 		0.15, // killer1_score
 		0.15, // killer2_score
+		0.25, // contempt
 	}
 
 	for step in 0 ..< steps {
