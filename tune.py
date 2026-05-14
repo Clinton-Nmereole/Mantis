@@ -191,7 +191,8 @@ def build_engine() -> bool:
 
 
 def evaluate_params(games: int, tc_args: List[str], concurrency: int,
-                    baseline: str = BASELINE_ENGINE) -> Optional[float]:
+                    baseline: str = BASELINE_ENGINE,
+                    openings_file: Optional[str] = None) -> Optional[float]:
     """
     Run a self-play tournament and return the win percentage.
     Returns None if the tournament fails.
@@ -213,6 +214,8 @@ def evaluate_params(games: int, tc_args: List[str], concurrency: int,
         "--games", str(games),
         "--concurrency", str(concurrency),
     ] + tc_args
+    if openings_file:
+        cmd += ["--openings", openings_file]
 
     print(f"[EVAL] Running: {' '.join(cmd)}")
     start = time.time()
@@ -254,6 +257,7 @@ def coordinate_descent(
     steps: int,
     baseline: str,
     rel_steps: Optional[Dict[str, float]] = None,
+    openings_file: Optional[str] = None,
 ) -> Tuple[Dict[str, int], float]:
     """
     Run coordinate descent: tweak one parameter at a time, keep improvements.
@@ -307,7 +311,7 @@ def coordinate_descent(
     print("=" * 60)
     print("BASELINE EVALUATION")
     print("=" * 60)
-    best_score = evaluate_params(games, tc_args, concurrency, baseline)
+    best_score = evaluate_params(games, tc_args, concurrency, baseline, openings_file)
     if best_score is None:
         print("[FATAL] Baseline evaluation failed.")
         return best_params, 0.0
@@ -355,7 +359,7 @@ def coordinate_descent(
                 if not build_engine():
                     continue
 
-                score = evaluate_params(games, tc_args, concurrency, baseline)
+                score = evaluate_params(games, tc_args, concurrency, baseline, openings_file)
                 if score is None:
                     continue
 
@@ -509,6 +513,8 @@ Examples:
                         help="Fixed depth")
     parser.add_argument("--baseline-engine", default=BASELINE_ENGINE,
                         help=f"Path to baseline engine (default: {BASELINE_ENGINE})")
+    parser.add_argument("--openings", default=None,
+                        help="Path to opening positions file (EPD/FEN)")
 
     args = parser.parse_args()
 
@@ -547,6 +553,7 @@ Examples:
             best_params, best_score = coordinate_descent(
                 initial, args.games, tc_args, args.concurrency,
                 args.steps, args.baseline_engine,
+                openings_file=args.openings,
             )
             print()
             print("=" * 60)
