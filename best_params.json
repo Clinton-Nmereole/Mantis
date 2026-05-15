@@ -4,7 +4,7 @@
   "nmp_reduction_base": 1,
   "nmp_reduction_div": 6,
   "rfp_depth": 7,
-  "rfp_margin": 90,
+  "rfp_margin": 72,
   "probcut_depth": 5,
   "probcut_margin": 100,
   "probcut_reduce": 4,
