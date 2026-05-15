@@ -46,6 +46,7 @@ import argparse
 import sys
 import os
 import re
+import math
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -951,6 +952,111 @@ def play_game(engine_a_path: str, engine_b_path: str,
 
 
 # ---------------------------------------------------------------------------
+# SPRT (Sequential Probability Ratio Test)
+# ---------------------------------------------------------------------------
+# SPRT allows early stopping when the result is statistically clear.
+# Used by Stockfish Fishtest and all serious engine development.
+# ---------------------------------------------------------------------------
+
+class SPRT:
+    """
+    Sequential Probability Ratio Test for chess engine self-play.
+
+    Tests H0: elo = elo0  vs  H1: elo = elo1
+    Stop early if the evidence is conclusive.
+    """
+
+    def __init__(self, elo0: float = 0.0, elo1: float = 2.0,
+                 alpha: float = 0.05, beta: float = 0.05):
+        self.elo0 = elo0
+        self.elo1 = elo1
+        self.alpha = alpha
+        self.beta = beta
+        self.lower_bound = math.log(beta / (1.0 - alpha))
+        self.upper_bound = math.log((1.0 - beta) / alpha)
+        self.wins = 0
+        self.losses = 0
+        self.draws = 0
+
+    def update(self, result: str, a_is_white: bool):
+        """Update counts with a single game result."""
+        if result == '1-0':
+            if a_is_white:
+                self.wins += 1
+            else:
+                self.losses += 1
+        elif result == '0-1':
+            if a_is_white:
+                self.losses += 1
+            else:
+                self.wins += 1
+        else:
+            self.draws += 1
+
+    def llr(self) -> float:
+        """Compute log-likelihood ratio."""
+        n = self.wins + self.losses + self.draws
+        if n == 0:
+            return 0.0
+
+        p_w = self.wins / n
+        p_l = self.losses / n
+        p_d = self.draws / n
+
+        # Expected score under each hypothesis
+        s0 = 1.0 / (1.0 + 10.0 ** (-self.elo0 / 400.0))
+        s1 = 1.0 / (1.0 + 10.0 ** (-self.elo1 / 400.0))
+
+        # Trinomial probabilities under H0 and H1
+        # Assume draw rate stays fixed, win/loss ratio shifts
+        p0_w = max(0.001, min(0.998, s0 - 0.5 * p_d))
+        p0_l = max(0.001, min(0.998, 1.0 - p0_w - p_d))
+        p0_d = 1.0 - p0_w - p0_l
+
+        p1_w = max(0.001, min(0.998, s1 - 0.5 * p_d))
+        p1_l = max(0.001, min(0.998, 1.0 - p1_w - p_d))
+        p1_d = 1.0 - p1_w - p1_l
+
+        # Normalize
+        t0 = p0_w + p0_l + p0_d
+        t1 = p1_w + p1_l + p1_d
+        p0_w /= t0; p0_l /= t0; p0_d /= t0
+        p1_w /= t1; p1_l /= t1; p1_d /= t1
+
+        llr_val = 0.0
+        if self.wins > 0:
+            llr_val += self.wins * math.log(p1_w / p0_w)
+        if self.losses > 0:
+            llr_val += self.losses * math.log(p1_l / p0_l)
+        if self.draws > 0:
+            llr_val += self.draws * math.log(p1_d / p0_d)
+
+        return llr_val
+
+    def status(self) -> Tuple[str, float]:
+        """
+        Return (decision, llr) where decision is one of:
+        'continue', 'accept' (H1: engine is better), 'reject' (H0: no improvement)
+        """
+        llr_val = self.llr()
+        if llr_val > self.upper_bound:
+            return 'accept', llr_val
+        if llr_val < self.lower_bound:
+            return 'reject', llr_val
+        return 'continue', llr_val
+
+    def __str__(self) -> str:
+        n = self.wins + self.losses + self.draws
+        if n == 0:
+            return "SPRT: 0 games"
+        llr_val = self.llr()
+        status, _ = self.status()
+        win_pct = (self.wins + 0.5 * self.draws) / n * 100
+        return (f"SPRT[{n}] W:{self.wins} L:{self.losses} D:{self.draws} "
+                f"Win%:{win_pct:.1f} LLR:{llr_val:.3f} [{status}]")
+
+
+# ---------------------------------------------------------------------------
 # TOURNAMENT / BATCH RUNNER
 # ---------------------------------------------------------------------------
 
@@ -958,26 +1064,30 @@ def run_tournament(engine_a: str, engine_b: str,
                    games: int, time_control: dict,
                    concurrency: int = 1,
                    openings: Optional[List[str]] = None,
-                   verbose: bool = False) -> dict:
+                   verbose: bool = False,
+                   sprt: Optional[SPRT] = None) -> dict:
     """
     Run a multi-game tournament between two engines.
     Engines swap colors every game (A plays White in even games, Black in odd).
 
     Parameters:
         engine_a, engine_b: Paths to engine binaries.
-        games: Total games to play.
+        games: Total games to play (max if SPRT is enabled).
         time_control: Passed directly to play_game().
         concurrency: Number of games to run in parallel.
         openings: List of opening FENs or move sequences.
         verbose: Print per-game results.
+        sprt: Optional SPRT object for early stopping.
 
     Returns:
-        Dict with 'wins', 'losses', 'draws', 'win_pct', and 'results' list.
+        Dict with 'wins', 'losses', 'draws', 'win_pct', 'results', and 'sprt_status'.
     """
     results = []
     stats = {'wins': 0, 'losses': 0, 'draws': 0}
+    should_stop = False
+    sprt_lock = threading.Lock()
 
-    def play_one(game_idx: int) -> GameResult:
+    def play_one(game_idx: int) -> Tuple[int, GameResult]:
         # Swap colors: even indices → A=White, odd → A=Black
         if game_idx % 2 == 0:
             white_path, black_path = engine_a, engine_b
@@ -997,48 +1107,68 @@ def run_tournament(engine_a: str, engine_b: str,
             else:
                 opening_moves = opening.split()  # Space-separated moves
 
-        return play_game(
+        result = play_game(
             white_path, black_path,
             time_control=time_control,
             opening_moves=opening_moves,
             opening_fen=opening_fen,
             verbose=verbose,
         )
+        return game_idx, result
+
+    def process_result(game_idx: int, result: GameResult):
+        nonlocal should_stop
+        results.append(result)
+        _update_stats(result, engine_a, stats, game_idx)
+        total_done = stats['wins'] + stats['losses'] + stats['draws']
+        win_pct = (stats['wins'] + 0.5 * stats['draws']) / total_done * 100 if total_done > 0 else 0
+        print(f"[Game {game_idx+1}/{games}] {result.result} ({result.reason})  "
+              f"W:{stats['wins']} L:{stats['losses']} D:{stats['draws']}  "
+              f"Win%:{win_pct:.1f}")
+        if verbose:
+            print(f"Game {game_idx+1}/{games}: {result.result} ({result.reason})")
+
+        # SPRT check
+        if sprt and not should_stop:
+            with sprt_lock:
+                a_is_white = (game_idx % 2 == 0)
+                sprt.update(result.result, a_is_white)
+                status, llr = sprt.status()
+                if status != 'continue':
+                    should_stop = True
+                    print(f"\n*** SPRT STOP: {status.upper()} ***")
+                    print(f"    {sprt}")
+                    print(f"    Stopping early after {total_done} games.\n")
 
     if concurrency == 1:
         for i in range(games):
-            result = play_one(i)
-            results.append(result)
-            _update_stats(result, engine_a, stats, i)
-            total_done = stats['wins'] + stats['losses'] + stats['draws']
-            win_pct = (stats['wins'] + 0.5 * stats['draws']) / total_done * 100 if total_done > 0 else 0
-            print(f"[Game {i+1}/{games}] {result.result} ({result.reason})  "
-                  f"W:{stats['wins']} L:{stats['losses']} D:{stats['draws']}  "
-                  f"Win%:{win_pct:.1f}")
-            if verbose:
-                print(f"Game {i+1}/{games}: {result.result} ({result.reason})")
+            if should_stop:
+                break
+            _, result = play_one(i)
+            process_result(i, result)
     else:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = {executor.submit(play_one, i): i for i in range(games)}
             for future in as_completed(futures):
+                if should_stop:
+                    # Cancel remaining futures
+                    for f in futures:
+                        f.cancel()
+                    break
                 game_idx = futures[future]
                 try:
-                    result = future.result()
-                    results.append(result)
-                    _update_stats(result, engine_a, stats, game_idx)
-                    total_done = stats['wins'] + stats['losses'] + stats['draws']
-                    win_pct = (stats['wins'] + 0.5 * stats['draws']) / total_done * 100 if total_done > 0 else 0
-                    print(f"[Game {game_idx+1}/{games}] {result.result} ({result.reason})  "
-                          f"W:{stats['wins']} L:{stats['losses']} D:{stats['draws']}  "
-                          f"Win%:{win_pct:.1f}")
-                    if verbose:
-                        print(f"Game {game_idx+1}/{games}: {result.result} ({result.reason})")
+                    _, result = future.result()
+                    process_result(game_idx, result)
                 except Exception as e:
                     print(f"Game {game_idx+1} failed: {e}")
 
     total = stats['wins'] + stats['losses'] + stats['draws']
     stats['win_pct'] = (stats['wins'] + 0.5 * stats['draws']) / total * 100 if total > 0 else 0
     stats['results'] = results
+    if sprt:
+        status, _ = sprt.status()
+        stats['sprt_status'] = status
+        stats['sprt_llr'] = sprt.llr()
     return stats
 
 
@@ -1181,24 +1311,69 @@ Examples:
     parser.add_argument("--tune", action="store_true",
                         help="Run coordinate descent tuning mode")
 
+    # Quick / Verify presets
+    parser.add_argument("--quick", action="store_true",
+                        help="Quick screen: 10 games at 100ms with SPRT")
+    parser.add_argument("--verify", action="store_true",
+                        help="Verify mode: 100 games at 3+0 with SPRT")
+
+    # SPRT options
+    parser.add_argument("--sprt", action="store_true",
+                        help="Enable SPRT early stopping")
+    parser.add_argument("--sprt-elo0", type=float, default=0.0,
+                        help="SPRT lower Elo bound (default: 0)")
+    parser.add_argument("--sprt-elo1", type=float, default=2.0,
+                        help="SPRT upper Elo bound (default: 2)")
+    parser.add_argument("--sprt-alpha", type=float, default=0.05,
+                        help="SPRT false positive rate (default: 0.05)")
+    parser.add_argument("--sprt-beta", type=float, default=0.05,
+                        help="SPRT false negative rate (default: 0.05)")
+
     args = parser.parse_args()
 
-    # Build time control dict
+    # Initialize time control
     tc = {}
-    if args.movetime:
-        tc['movetime'] = args.movetime
-    if args.wtime:
-        tc['wtime'] = args.wtime
-    if args.btime:
-        tc['btime'] = args.btime
-    if args.winc:
-        tc['winc'] = args.winc
-    if args.binc:
-        tc['binc'] = args.binc
-    if args.depth:
-        tc['depth'] = args.depth
-    if not tc:
-        tc['movetime'] = 100  # Default fallback
+
+    # Apply quick / verify presets
+    if args.quick:
+        if args.games == 10:  # Only override if user didn't specify
+            args.games = 10
+        if not args.movetime and not args.wtime:
+            tc = {'movetime': 100}
+        args.sprt = True
+        args.sprt_elo0 = -2.0
+        args.sprt_elo1 = 4.0
+        args.sprt_alpha = 0.10
+        args.sprt_beta = 0.10
+        print("[PRESET] Quick mode: 10 games, 100ms, SPRT(-2, 4)")
+    elif args.verify:
+        if args.games == 10:
+            args.games = 100
+        if not args.movetime and not args.wtime:
+            tc = {'wtime': 180000, 'btime': 180000}
+        args.sprt = True
+        args.sprt_elo0 = 0.0
+        args.sprt_elo1 = 2.0
+        args.sprt_alpha = 0.05
+        args.sprt_beta = 0.05
+        print("[PRESET] Verify mode: 100 games, 3+0, SPRT(0, 2)")
+    else:
+        # Build time control dict from individual args
+        tc = {}
+        if args.movetime:
+            tc['movetime'] = args.movetime
+        if args.wtime:
+            tc['wtime'] = args.wtime
+        if args.btime:
+            tc['btime'] = args.btime
+        if args.winc:
+            tc['winc'] = args.winc
+        if args.binc:
+            tc['binc'] = args.binc
+        if args.depth:
+            tc['depth'] = args.depth
+        if not tc:
+            tc['movetime'] = 100  # Default fallback
 
     # Load openings if provided
     openings = None
@@ -1217,12 +1392,24 @@ Examples:
         )
         return
 
+    # Build SPRT object if requested
+    sprt_obj = None
+    if args.sprt:
+        sprt_obj = SPRT(
+            elo0=args.sprt_elo0,
+            elo1=args.sprt_elo1,
+            alpha=args.sprt_alpha,
+            beta=args.sprt_beta,
+        )
+        print(f"[SPRT] H0: elo={args.sprt_elo0}, H1: elo={args.sprt_elo1}, "
+              f"alpha={args.sprt_alpha}, beta={args.sprt_beta}")
+
     print("=" * 60)
     print("SELF-PLAY TOURNAMENT")
     print("=" * 60)
     print(f"Engine A (White on even games): {args.engine_a}")
     print(f"Engine B (White on odd games):  {args.engine_b}")
-    print(f"Games: {args.games}")
+    print(f"Games: {args.games} (max)")
     print(f"Time control: {tc}")
     print(f"Concurrency: {args.concurrency}")
     print()
@@ -1233,6 +1420,7 @@ Examples:
         concurrency=args.concurrency,
         openings=openings,
         verbose=args.verbose,
+        sprt=sprt_obj,
     )
 
     print()
@@ -1244,6 +1432,8 @@ Examples:
     print(f"Draws:  {stats['draws']}")
     print(f"Total:  {stats['wins'] + stats['losses'] + stats['draws']}")
     print(f"Win %:  {stats['win_pct']:.2f}%")
+    if 'sprt_status' in stats:
+        print(f"SPRT:   {stats['sprt_status']} (LLR={stats['sprt_llr']:.3f})")
     print()
 
     # Per-game summary

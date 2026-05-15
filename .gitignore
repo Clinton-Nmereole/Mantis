@@ -5,6 +5,7 @@ mantis_perft
 mantis_test
 mantis_nmp
 Mantis
+mantis_baseline
 
 # Neural network weights (large binary files)
 *.nnue
@@ -30,4 +31,6 @@ __pycache__/
 
 # Tuning artifacts
 best_params.json
+tuning_progress.json
+verification_test.log
 openings.epd
