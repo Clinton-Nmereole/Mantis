@@ -1010,6 +1010,11 @@ def run_tournament(engine_a: str, engine_b: str,
             result = play_one(i)
             results.append(result)
             _update_stats(result, engine_a, stats, i)
+            total_done = stats['wins'] + stats['losses'] + stats['draws']
+            win_pct = (stats['wins'] + 0.5 * stats['draws']) / total_done * 100 if total_done > 0 else 0
+            print(f"[Game {i+1}/{games}] {result.result} ({result.reason})  "
+                  f"W:{stats['wins']} L:{stats['losses']} D:{stats['draws']}  "
+                  f"Win%:{win_pct:.1f}")
             if verbose:
                 print(f"Game {i+1}/{games}: {result.result} ({result.reason})")
     else:
@@ -1021,6 +1026,11 @@ def run_tournament(engine_a: str, engine_b: str,
                     result = future.result()
                     results.append(result)
                     _update_stats(result, engine_a, stats, game_idx)
+                    total_done = stats['wins'] + stats['losses'] + stats['draws']
+                    win_pct = (stats['wins'] + 0.5 * stats['draws']) / total_done * 100 if total_done > 0 else 0
+                    print(f"[Game {game_idx+1}/{games}] {result.result} ({result.reason})  "
+                          f"W:{stats['wins']} L:{stats['losses']} D:{stats['draws']}  "
+                          f"Win%:{win_pct:.1f}")
                     if verbose:
                         print(f"Game {game_idx+1}/{games}: {result.result} ({result.reason})")
                 except Exception as e:
