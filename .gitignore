@@ -23,3 +23,11 @@ build_output.txt
 # Editor / tool artifacts
 .pi-lens/
 =
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Tuning artifacts
+best_params.json
+openings.epd
