@@ -1227,6 +1227,26 @@ search_position :: proc(
 
 	// Only output bestmove if requested (main thread only)
 	if output_bestmove {
+		if best_move.source == 0 && best_move.target == 0 {
+			fmt.printf("info string WARNING: best_move is zero, side=%d, regenerating fallback\n", b.side)
+			// Fallback: regenerate legal moves and pick the first one
+			fallback_list: moves.MoveList
+			board.generate_all_moves(b, &fallback_list)
+			for i in 0 ..< fallback_list.count {
+				state: board.StateInfo
+				board.make_move_fast(b, fallback_list.moves[i], &state)
+				king_sq := board.get_king_square(b, 1 - b.side)
+				if !board.is_square_attacked(b, king_sq, b.side) {
+					best_move = fallback_list.moves[i]
+					board.unmake_move(b, &state)
+					break
+				}
+				board.unmake_move(b, &state)
+			}
+			if best_move.source == 0 && best_move.target == 0 {
+				fmt.printf("info string CRITICAL: no legal moves found!\n")
+			}
+		}
 		fmt.printf("bestmove ")
 		board.print_move(best_move)
 		fmt.printf("\n")

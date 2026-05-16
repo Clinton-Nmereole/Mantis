@@ -772,8 +772,18 @@ class Engine:
         score = None
         start = time.time()
 
+        # Compute adaptive timeout based on time control
+        if movetime is not None:
+            max_wait = movetime / 1000.0 + 30.0
+        elif wtime is not None and btime is not None:
+            max_wait = max(wtime, btime) / 1000.0 + 30.0
+        else:
+            max_wait = 60.0
+        # Cap at 10 minutes to avoid hanging forever
+        max_wait = min(max_wait, 600.0)
+
         # Read output until bestmove is found or timeout
-        while time.time() - start < 60.0:  # Absolute max wait
+        while time.time() - start < max_wait:
             line = self._readline(timeout=1.0)
             if line is None:
                 continue
@@ -902,10 +912,13 @@ def play_game(engine_a_path: str, engine_b_path: str,
             success = board.apply_uci_move(bestmove)
             if not success:
                 # Engine returned an illegal move — forfeit
+                print(f"  [ILLEGAL MOVE] {bestmove} in position {board.fen()}")
+                print(f"  [ILLEGAL MOVE] Moves so far: {' '.join(moves)}")
+                print(f"  [ILLEGAL MOVE] Engine: {engine.name}")
                 result = '0-1' if is_white_turn else '1-0'
                 return GameResult(
                     result=result, moves=moves[:], scores=scores[:],
-                    reason="illegal move",
+                    reason=f"illegal move ({bestmove})",
                     white_engine=engine_a_path, black_engine=engine_b_path,
                 )
 

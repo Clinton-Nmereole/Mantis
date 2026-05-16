@@ -127,6 +127,14 @@ probe_tt :: proc(key: u64, alpha: int, beta: int, depth: int, ply: int) -> (int,
 	return 0, false
 }
 
+// Validate that a TT move has sensible coordinates
+is_valid_tt_move :: proc(move: moves.Move) -> bool {
+	if move.source < 0 || move.source > 63 {return false}
+	if move.target < 0 || move.target > 63 {return false}
+	if move.piece < 0 || move.piece > 11 {return false}
+	return true
+}
+
 // Get TT Move (for move ordering)
 // Scans both entries and returns the move from the deeper one when both match.
 get_tt_move :: proc(key: u64) -> moves.Move {
@@ -143,8 +151,10 @@ get_tt_move :: proc(key: u64) -> moves.Move {
 		entry_key := sync.atomic_load(&entry.key)
 
 		if entry_key == key && entry.depth > best_depth {
-			best_depth = entry.depth
-			best_move = entry.move
+			if is_valid_tt_move(entry.move) {
+				best_depth = entry.depth
+				best_move = entry.move
+			}
 		}
 	}
 

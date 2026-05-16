@@ -34,3 +34,12 @@ best_params.json
 tuning_progress.json
 verification_test.log
 openings.epd
+mantis_uci_debug.log
+single_game.log
+crash_test.log
+
+# Test scripts (temporary)
+test_crash*.py
+test_divergence.py
+test_illegal.py
+test_parse_castle.py

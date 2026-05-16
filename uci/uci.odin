@@ -14,6 +14,18 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 
+// Debug log file for tracking UCI commands and responses
+DEBUG_LOG :: "mantis_uci_debug.log"
+
+debug_log :: proc(msg: string) {
+	fd, err := os.open(DEBUG_LOG, os.O_WRONLY | os.O_CREATE | os.O_APPEND)
+	if err == os.ERROR_NONE {
+		os.write_string(fd, msg)
+		os.write_string(fd, "\n")
+		os.close(fd)
+	}
+}
+
 // UCI Configuration
 move_overhead: int = 10 // Default 10ms for network/GUI lag compensation
 multi_pv: int = 1 // Number of principal variations to display (1-500)
@@ -184,10 +196,13 @@ parse_position :: proc(command: string, b: ^board.Board) {
 				if move.source != 0 || move.target != 0 { 	// Valid move?
 					state: board.StateInfo
 					board.make_move(b, move, &state)
+				} else {
+					debug_log(fmt.tprintf("[PARSE FAIL] move='%s' not found", move_str))
 				}
 			}
 		}
 	}
+	debug_log(fmt.tprintf("[POSITION] side=%d", b.side))
 }
 
 // Parse 'go' command

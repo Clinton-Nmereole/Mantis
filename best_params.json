@@ -1,10 +1,10 @@
 {
-  "aspiration_window": 30,
+  "aspiration_window": 25,
   "nmp_min_depth": 3,
-  "nmp_reduction_base": 1,
+  "nmp_reduction_base": 2,
   "nmp_reduction_div": 6,
   "rfp_depth": 7,
-  "rfp_margin": 72,
+  "rfp_margin": 90,
   "probcut_depth": 5,
   "probcut_margin": 100,
   "probcut_reduce": 4,
@@ -33,5 +33,5 @@
   "capture_base_score": 10000,
   "killer1_score": 9000,
   "killer2_score": 8000,
-  "contempt": 0
+  "contempt": 24
 }

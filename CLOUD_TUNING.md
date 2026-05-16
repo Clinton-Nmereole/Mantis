@@ -6,12 +6,12 @@ This document explains how to run serious parameter tuning for Mantis on cloud i
 
 ## Overview
 
-| Stage | Games | TC | Purpose | Where |
-|-------|-------|-----|---------|-------|
-| Local exploration | 30–80 | 100ms | Find promising directions | Your desktop |
-| Local verify | 100 | 3+0 | Confirm candidates | Your desktop |
-| Cloud tuning | 2,000–10,000 | 3+0 or 5+0.05 | Statistically robust tuning | Cloud |
-| Final validation | 1,000+ | 10+0.1 or 60+0.6 | TCEC-like conditions | Cloud |
+| Stage             | Games        | TC               | Purpose                     | Where        |
+| ----------------- | ------------ | ---------------- | --------------------------- | ------------ |
+| Local exploration | 30–80        | 100ms            | Find promising directions   | Your desktop |
+| Local verify      | 100          | 3+0              | Confirm candidates          | Your desktop |
+| Cloud tuning      | 2,000–10,000 | 3+0 or 5+0.05    | Statistically robust tuning | Cloud        |
+| Final validation  | 1,000+       | 10+0.1 or 60+0.6 | TCEC-like conditions        | Cloud        |
 
 ---
 
@@ -78,13 +78,14 @@ python3 nevergrad_tuner.py \
 
 ### Cost Estimate
 
-| Instance | vCPUs | Cost/hr | 24hr run | 100 evals (~8hr) |
-|----------|-------|---------|----------|-----------------|
-| c2-standard-8 | 8 | $0.21 | $5.04 | $1.68 |
-| c2-standard-16 | 16 | $0.42 | $10.08 | $3.36 |
-| Preemptible (×0.3) | 8 | $0.06 | $1.44 | $0.48 |
+| Instance           | vCPUs | Cost/hr | 24hr run | 100 evals (~8hr) |
+| ------------------ | ----- | ------- | -------- | ---------------- |
+| c2-standard-8      | 8     | $0.21   | $5.04    | $1.68            |
+| c2-standard-16     | 16    | $0.42   | $10.08   | $3.36            |
+| Preemptible (×0.3) | 8     | $0.06   | $1.44    | $0.48            |
 
 **For a full 10,000-game SPRT validation at 3+0:**
+
 - 16 cores, ~20 hours, preemptible: **~$2.50**
 
 ---
@@ -105,10 +106,10 @@ aws ec2 run-instances \
 
 ### Cost
 
-| Instance | vCPUs | Spot Cost/hr | 24hr |
-|----------|-------|--------------|------|
-| c6i.2xlarge | 8 | $0.06 | $1.44 |
-| c6i.4xlarge | 16 | $0.12 | $2.88 |
+| Instance    | vCPUs | Spot Cost/hr | 24hr  |
+| ----------- | ----- | ------------ | ----- |
+| c6i.2xlarge | 8     | $0.06        | $1.44 |
+| c6i.4xlarge | 16    | $0.12        | $2.88 |
 
 ---
 
@@ -133,19 +134,19 @@ def run_tuning_iteration(params: dict) -> float:
     """Run one tuning evaluation in the cloud."""
     # Mantis source would be baked into the image or pulled from Git
     os.chdir("/mantis")
-    
+
     # Modify params, build, evaluate
     # ... (same logic as nevergrad_tuner.py)
-    
+
     return win_pct
 
 @stub.local_entrypoint
 def main():
     import nevergrad as ng
-    
+
     # Run 100 evaluations, each on its own Modal container
     optimizer = ng.optimizers.NGOpt(parametrization=..., budget=100)
-    
+
     for _ in range(100):
         candidate = optimizer.ask()
         score = run_tuning_iteration.remote(candidate.value)
@@ -155,6 +156,7 @@ def main():
 ### Cost
 
 Modal charges per CPU-second:
+
 - ~$0.0001 per CPU-second
 - 8 cores × 10 min × 100 evals = 480,000 CPU-seconds
 - **~$48** for 100 evaluations
@@ -166,6 +168,7 @@ More expensive than raw EC2/GCP but zero setup and automatic scaling.
 ## Option 4: RunPod (GPU/CPU Spot)
 
 RunPod offers very cheap CPU spot instances:
+
 - 8 vCPU, 32 GB: **$0.05/hr**
 - 16 vCPU, 64 GB: **$0.10/hr**
 
@@ -192,6 +195,7 @@ done
 ```
 
 With 5 VMs × 8 cores = 40 concurrent games:
+
 - 100 evals × 20 games at 200ms: **~2 hours**
 - Cost: 5 × $0.06 × 2 = **$0.60**
 
@@ -200,13 +204,16 @@ With 5 VMs × 8 cores = 40 concurrent games:
 ## Recommended TCEC Prep Workflow
 
 ### Phase 1: Local Screening (Your Desktop)
+
 ```bash
 # Find promising regions of parameter space
 python3 nevergrad_tuner.py --budget 30 --games 10 --movetime 100
 ```
+
 **Time:** 3–4 hours | **Cost:** $0
 
 ### Phase 2: Cloud Refinement (GCP/AWS)
+
 ```bash
 # Run 100 evaluations with more games per eval
 python3 nevergrad_tuner.py \
@@ -215,9 +222,11 @@ python3 nevergrad_tuner.py \
   --movetime 200 \
   --concurrency 8
 ```
+
 **Time:** 6–8 hours | **Cost:** ~$1–2
 
 ### Phase 3: Cloud Verification (SPRT)
+
 ```bash
 # Run SPRT at 3+0 to confirm the best candidate
 python3 selfplay.py \
@@ -227,9 +236,11 @@ python3 selfplay.py \
   --concurrency 8 \
   --openings openings.epd
 ```
+
 **Time:** Until SPRT decides (usually 50–150 games) | **Cost:** ~$0.50
 
 ### Phase 4: Large-Scale Validation (Distributed)
+
 ```bash
 # Run 1,000+ games at 10+0.1 to confirm scaling
 # Use 5+ VMs in parallel, aggregate results
@@ -239,6 +250,7 @@ cutechess-cli \
   -each tc=10+0.1 -games 1000 \
   -concurrency 8
 ```
+
 **Time:** 1–2 days | **Cost:** ~$5–10
 
 ---
@@ -289,4 +301,4 @@ gcloud compute instances delete mantis-tune-1 mantis-tune-2 ... --zone=us-centra
 
 ---
 
-*Last updated: 2026-05-15*
+_Last updated: 2026-05-15_

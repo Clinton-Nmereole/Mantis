@@ -159,7 +159,15 @@ def evaluate_params(params: Dict[str, int],
     m = re.search(r"Win %:\s+([\d.]+)%", result.stdout)
     if m:
         win_pct = float(m.group(1))
-        print(f"[EVAL OK] Win %: {win_pct:.2f}  ({elapsed:.1f}s)")
+        # Count failures
+        illegal_count = result.stdout.count("(illegal move")
+        failed_count = result.stdout.count("failed:")
+        total_games = games
+        problem_rate = (illegal_count + failed_count) / total_games * 100 if total_games > 0 else 0
+        print(f"[EVAL OK] Win %: {win_pct:.2f}  Illegal:{illegal_count} Failed:{failed_count}  ({elapsed:.1f}s)")
+        if problem_rate > 10:
+            print(f"[EVAL WARNING] Problem rate {problem_rate:.1f}% > 10%, rejecting this candidate")
+            return 0.0  # Treat as 0% win rate — reject
         return win_pct
     else:
         print("[EVAL PARSE ERROR]")
@@ -190,7 +198,9 @@ def run_nevergrad(budget: int,
     # Build parameter space (all integers)
     params = {}
     for name, (lo, hi) in PARAM_RANGES.items():
-        params[name] = ng.p.Scalar(lower=lo, upper=hi, integer=True)
+        p = ng.p.Scalar(lower=lo, upper=hi)
+        p.set_integer_casting()
+        params[name] = p
 
     instrum = ng.p.Instrumentation(**params)
 
@@ -205,9 +215,8 @@ def run_nevergrad(budget: int,
         print(f"[RESUME] Loaded {len(history)} previous evaluations")
         for entry in history:
             # Re-inject into optimizer
-            candidate = instrum.spawn_child().set_standardized_data(
-                [entry["params"][k] for k in PARAM_RANGES.keys()]
-            )
+            vals = [float(entry["params"][k]) for k in PARAM_RANGES.keys()]
+            candidate = instrum.spawn_child().set_standardized_data(vals)
             optimizer.tell(candidate, -entry["score"])  # negate for maximization
 
     best_score = -1.0
