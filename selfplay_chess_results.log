@@ -1,0 +1,65 @@
+============================================================
+SELF-PLAY TOURNAMENT
+============================================================
+Engine A (White on even games): ./mantis
+Engine B (White on odd games):  ./mantis
+Games: 40 (max)
+Time control: {'movetime': 1000}
+Concurrency: 1
+
+[Game 1/40] 1-0 (adjudication (eval >= 800))  W:1 L:0 D:0  Win%:100.0
+[Game 2/40] 0-1 (adjudication (eval <= -800))  W:2 L:0 D:0  Win%:100.0
+[Game 3/40] 1-0 (adjudication (eval >= 800))  W:3 L:0 D:0  Win%:100.0
+[Game 4/40] 0-1 (adjudication (eval <= -800))  W:4 L:0 D:0  Win%:100.0
+[Game 5/40] 0-1 (adjudication (eval <= -800))  W:4 L:1 D:0  Win%:80.0
+[Game 6/40] 0-1 (adjudication (eval <= -800))  W:5 L:1 D:0  Win%:83.3
+[Game 7/40] 0-1 (adjudication (eval <= -800))  W:5 L:2 D:0  Win%:71.4
+[Game 8/40] 1-0 (adjudication (eval >= 800))  W:5 L:3 D:0  Win%:62.5
+  [ILLEGAL MOVE] e8d7 in position 2kr1b1r/2p2P1p/2n2q2/1N6/pP4p1/P2p1N2/5P2/R1BQKB1R w KQ - 1 21
+  [ILLEGAL MOVE] Moves so far: a2a3 d7d6 e2e3 g8f6 b2b3 d6d5 c2c3 e7e5 d2d3 d5d4 e3e4 a7a6 g1f3 d4c3 b1c3 c8g4 g2g3 a6a5 h2h3 a5a4 h3g4 b8c6 b3b4 b7b6 g4g5 b6b5 g5f6 g7f6 c3b5 f6f5 d3d4 e5d4 g3g4 d4d3 e4e5 f5g4 e5e6 d8f6 e6f7 e8c8
+  [ILLEGAL MOVE] Engine: White
+[Game 9/40] 0-1 (illegal move (e8d7))  W:5 L:4 D:0  Win%:55.6
+[Game 10/40] 0-1 (adjudication (eval <= -800))  W:6 L:4 D:0  Win%:60.0
+[Game 11/40] 1-0 (adjudication (eval >= 800))  W:7 L:4 D:0  Win%:63.6
+[Game 12/40] 0-1 (adjudication (eval <= -800))  W:8 L:4 D:0  Win%:66.7
+[Game 13/40] 1-0 (adjudication (eval >= 800))  W:9 L:4 D:0  Win%:69.2
+[Game 14/40] 1-0 (adjudication (eval >= 800))  W:9 L:5 D:0  Win%:64.3
+[Game 15/40] 0-1 (adjudication (eval <= -800))  W:9 L:6 D:0  Win%:60.0
+[Game 16/40] 0-1 (adjudication (eval <= -800))  W:10 L:6 D:0  Win%:62.5
+[Game 17/40] 0-1 (adjudication (eval <= -800))  W:10 L:7 D:0  Win%:58.8
+[Game 18/40] 1-0 (adjudication (eval >= 800))  W:10 L:8 D:0  Win%:55.6
+[Game 19/40] 1-0 (adjudication (eval >= 800))  W:11 L:8 D:0  Win%:57.9
+[Game 20/40] 0-1 (adjudication (eval <= -800))  W:12 L:8 D:0  Win%:60.0
+[Game 21/40] 0-1 (adjudication (eval <= -800))  W:12 L:9 D:0  Win%:57.1
+  [ILLEGAL MOVE] e1g1 in position BQb2b1r/4kp1p/5q2/6p1/2PP4/6PP/p2BN3/R4RK1 b - - 2 24
+  [ILLEGAL MOVE] Moves so far: a2a3 d7d6 e2e3 d6d5 b2b3 e7e5 b1c3 g8f6 d2d3 d5d4 f2f3 b7b6 g2g3 e5e4 h2h3 b6b5 c3b5 a7a6 c2c3 a6b5 a3a4 d4e3 f3e4 b5a4 f1g2 e3e2 g1e2 a4a3 e4e5 c7c6 e5f6 d8f6 b3b4 a3a2 c3c4 g7g6 c1d2 c6c5 g2a8 c5b4 d3d4 b4b3 d1b3 g6g5 b3b8 e8e7 e1g1
+  [ILLEGAL MOVE] Engine: Black
+[Game 22/40] 1-0 (illegal move (e1g1))  W:12 L:10 D:0  Win%:54.5
+[Game 23/40] 0-1 (adjudication (eval <= -800))  W:12 L:11 D:0  Win%:52.2
+[Game 24/40] 0-1 (adjudication (eval <= -800))  W:13 L:11 D:0  Win%:54.2
+[Game 25/40] 1-0 (adjudication (eval >= 800))  W:14 L:11 D:0  Win%:56.0
+[Game 26/40] 0-1 (adjudication (eval <= -800))  W:15 L:11 D:0  Win%:57.7
+[Game 27/40] 0-1 (adjudication (eval <= -800))  W:15 L:12 D:0  Win%:55.6
+[Game 28/40] 1-0 (adjudication (eval >= 800))  W:15 L:13 D:0  Win%:53.6
+[Game 29/40] 1-0 (adjudication (eval >= 800))  W:16 L:13 D:0  Win%:55.2
+[Game 30/40] 0-1 (adjudication (eval <= -800))  W:17 L:13 D:0  Win%:56.7
+[Game 31/40] 1-0 (adjudication (eval >= 800))  W:18 L:13 D:0  Win%:58.1
+[Game 32/40] 0-1 (adjudication (eval <= -800))  W:19 L:13 D:0  Win%:59.4
+[Game 33/40] 1-0 (adjudication (eval >= 800))  W:20 L:13 D:0  Win%:60.6
+[Game 34/40] 0-1 (adjudication (eval <= -800))  W:21 L:13 D:0  Win%:61.8
+[Game 35/40] 0-1 (adjudication (eval <= -800))  W:21 L:14 D:0  Win%:60.0
+[Game 36/40] 0-1 (adjudication (eval <= -800))  W:22 L:14 D:0  Win%:61.1
+[Game 37/40] 1-0 (adjudication (eval >= 800))  W:23 L:14 D:0  Win%:62.2
+[Game 38/40] 1-0 (adjudication (eval >= 800))  W:23 L:15 D:0  Win%:60.5
+[Game 39/40] 1-0 (adjudication (eval >= 800))  W:24 L:15 D:0  Win%:61.5
+[Game 40/40] 1-0 (adjudication (eval >= 800))  W:24 L:16 D:0  Win%:60.0
+
+============================================================
+FINAL RESULTS
+============================================================
+Wins:   24
+Losses: 16
+Draws:  0
+Total:  40
+Win %:  60.00%
+

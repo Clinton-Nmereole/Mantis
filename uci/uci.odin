@@ -133,6 +133,10 @@ uci_loop :: proc() {
 				sync.atomic_store(&ponder_state.is_active, i32(0))
 				search.use_time_management = false
 			}
+		} else if command == "d" {
+			board.print_board(game_board)
+			fmt.printf("FEN: %s\n", board.get_fen(game_board))
+			os.flush(os.stdout)
 		} else if command == "stop" {
 			// Stop current search (including pondering)
 			if sync.atomic_load(&ponder_state.is_active) != 0 {

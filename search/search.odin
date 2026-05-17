@@ -429,6 +429,10 @@ negamax :: proc(
 					continue
 				}
 
+				if !board.is_castling_legal_now(b, tactical_list.moves[j]) {
+					continue
+				}
+
 				t_state: board.StateInfo
 				board.make_move_fast(b, tactical_list.moves[j], &t_state)
 
@@ -543,10 +547,19 @@ negamax :: proc(
 	}
 
 	for i in 0 ..< move_list.count {
+		// Check for stop signal between moves
+		if should_stop_search() {
+			break
+		}
+
 		// Skip excluded move (for singular extensions)
 		if excluded_move.source != 0 &&
 		   move_list.moves[i].source == excluded_move.source &&
 		   move_list.moves[i].target == excluded_move.target {
+			continue
+		}
+
+		if !board.is_castling_legal_now(b, move_list.moves[i]) {
 			continue
 		}
 
@@ -777,6 +790,21 @@ see_capture :: proc(b: ^board.Board, move: moves.Move) -> int {
 quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int) -> int {
 	count_nodes(st)
 
+	// Time check: stop if hard limit exceeded
+	if use_time_management && st.nodes % 1024 == 0 {
+		if should_stop(search_limits) {
+			sync.atomic_store(&search_control.should_stop, i32(1))
+			return alpha
+		}
+	}
+
+	// Also check for external stop signal
+	if st.nodes % 1024 == 0 {
+		if should_stop_search() {
+			return alpha
+		}
+	}
+
 	evaluation := eval.evaluate(b)
 
 	if evaluation >= beta {
@@ -810,6 +838,10 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int) ->
 			see_score := see_capture(b, move_list.moves[i])
 			if see_score < params.see_prune_threshold {
 				continue // Skip this losing capture
+			}
+
+			if !board.is_castling_legal_now(b, move_list.moves[i]) {
+				continue
 			}
 
 			state: board.StateInfo
@@ -956,6 +988,10 @@ search_position :: proc(
 					break
 				}
 
+				if !board.is_castling_legal_now(b, move_list.moves[i]) {
+					continue
+				}
+
 				state: board.StateInfo
 				board.make_move_fast(b, move_list.moves[i], &state)
 
@@ -1012,6 +1048,10 @@ search_position :: proc(
 							break
 						}
 
+						if !board.is_castling_legal_now(b, move_list.moves[i]) {
+							continue
+						}
+
 						state: board.StateInfo
 						board.make_move_fast(b, move_list.moves[i], &state)
 
@@ -1061,6 +1101,10 @@ search_position :: proc(
 					for i in 0 ..< move_list.count {
 						if should_stop_search() {
 							break
+						}
+
+						if !board.is_castling_legal_now(b, move_list.moves[i]) {
+							continue
 						}
 
 						state: board.StateInfo
@@ -1233,6 +1277,9 @@ search_position :: proc(
 			fallback_list: moves.MoveList
 			board.generate_all_moves(b, &fallback_list)
 			for i in 0 ..< fallback_list.count {
+				if !board.is_castling_legal_now(b, fallback_list.moves[i]) {
+					continue
+				}
 				state: board.StateInfo
 				board.make_move_fast(b, fallback_list.moves[i], &state)
 				king_sq := board.get_king_square(b, 1 - b.side)

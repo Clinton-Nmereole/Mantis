@@ -273,6 +273,75 @@ print_board :: proc(board: Board) {
 	fmt.printf("Castling: %04b\n", board.castle)
 }
 
+// Convert Board to FEN String
+get_fen :: proc(board: Board) -> string {
+	b: strings.Builder
+	strings.builder_init(&b)
+	defer strings.builder_destroy(&b)
+
+	// Piece chars indexed by piece type (0-11)
+	piece_chars := [12]rune{'P', 'N', 'B', 'R', 'Q', 'K', 'p', 'n', 'b', 'r', 'q', 'k'}
+
+	// 1. Piece placement
+	for r := 7; r >= 0; r -= 1 {
+		empty: int = 0
+		for f := 0; f < 8; f += 1 {
+			square := r * 8 + f
+			piece := -1
+			for i in 0 ..< 12 {
+				if (board.bitboards[i] & (1 << u64(square))) != 0 {
+					piece = i
+					break
+				}
+			}
+			if piece == -1 {
+				empty += 1
+			} else {
+				if empty > 0 {
+					fmt.sbprintf(&b, "%d", empty)
+					empty = 0
+				}
+				fmt.sbprintf(&b, "%c", piece_chars[piece])
+			}
+		}
+		if empty > 0 {
+			fmt.sbprintf(&b, "%d", empty)
+		}
+		if r > 0 {
+			strings.write_byte(&b, '/')
+		}
+	}
+
+	// 2. Side to move
+	fmt.sbprintf(&b, " %s", board.side == constants.WHITE ? "w" : "b")
+
+	// 3. Castling rights
+	strings.write_byte(&b, ' ')
+	wrote_castling := false
+	if board.castle & WK != 0 {strings.write_byte(&b, 'K'); wrote_castling = true}
+	if board.castle & WQ != 0 {strings.write_byte(&b, 'Q'); wrote_castling = true}
+	if board.castle & BK != 0 {strings.write_byte(&b, 'k'); wrote_castling = true}
+	if board.castle & BQ != 0 {strings.write_byte(&b, 'q'); wrote_castling = true}
+	if !wrote_castling {strings.write_byte(&b, '-')}
+
+	// 4. En passant
+	if board.en_passant == -1 {
+		fmt.sbprintf(&b, " -")
+	} else {
+		ep_file := board.en_passant % 8
+		ep_rank := board.en_passant / 8
+		fmt.sbprintf(&b, " %c%c", 'a' + rune(ep_file), '1' + rune(ep_rank))
+	}
+
+	// 5. Halfmove clock
+	fmt.sbprintf(&b, " %d", board.halfmove_clock)
+
+	// 6. Fullmove number
+	fmt.sbprintf(&b, " %d", board.fullmove_number)
+
+	return strings.clone(strings.to_string(b))
+}
+
 // Generate Hash from Board
 generate_hash :: proc(board: ^Board) -> u64 {
 	final_hash: u64 = 0

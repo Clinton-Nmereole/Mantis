@@ -136,6 +136,26 @@ unmake_move :: proc(b: ^Board, state: ^StateInfo) {
 // checks legality, and auto-restores if the move is illegal.
 // Returns true if the move was legal and applied.
 make_move :: proc(b: ^Board, move: moves.Move, state: ^StateInfo) -> bool {
+	// Castling legality: must check BEFORE applying move, because
+	// after the move the king has left the starting square.
+	if move.castling {
+		row := (b.side == constants.WHITE) ? 0 : 56
+		// King cannot be in check now
+		if is_square_attacked(b, row + 4, 1 - b.side) {
+			return false
+		}
+		// King cannot pass through check
+		if move.target == (row + 6) { // Kingside
+			if is_square_attacked(b, row + 5, 1 - b.side) {
+				return false
+			}
+		} else if move.target == (row + 2) { // Queenside
+			if is_square_attacked(b, row + 3, 1 - b.side) {
+				return false
+			}
+		}
+	}
+
 	make_move_fast(b, move, state)
 
 	// Check if the king of the side that just moved is in check.
@@ -146,22 +166,30 @@ make_move :: proc(b: ^Board, move: moves.Move, state: ^StateInfo) -> bool {
 		return false
 	}
 
-	// Castling legality: cannot castle out of or through check.
-	if move.castling {
-		row := (1 - b.side == constants.WHITE) ? 0 : 56
-		if move.target == (row + 6) {		// King side
-			if is_square_attacked(b, row + 4, b.side) || is_square_attacked(b, row + 5, b.side) {
-				unmake_move(b, state)
-				return false
-			}
-		} else if move.target == (row + 2) {	// Queen side
-			if is_square_attacked(b, row + 4, b.side) || is_square_attacked(b, row + 3, b.side) {
-				unmake_move(b, state)
-				return false
-			}
+	return true
+}
+
+// is_castling_legal_now checks if a castling move is legal BEFORE it is made.
+// Must be called BEFORE make_move_fast. Returns true for non-castling moves.
+is_castling_legal_now :: proc(b: ^Board, move: moves.Move) -> bool {
+	if !move.castling {
+		return true
+	}
+	row := (b.side == constants.WHITE) ? 0 : 56
+	// King cannot be in check now
+	if is_square_attacked(b, row + 4, 1 - b.side) {
+		return false
+	}
+	// King cannot pass through check
+	if move.target == (row + 6) { // Kingside
+		if is_square_attacked(b, row + 5, 1 - b.side) {
+			return false
+		}
+	} else if move.target == (row + 2) { // Queenside
+		if is_square_attacked(b, row + 3, 1 - b.side) {
+			return false
 		}
 	}
-
 	return true
 }
 

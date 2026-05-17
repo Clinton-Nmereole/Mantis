@@ -1,0 +1,19 @@
+Started game 1 of 20 (Mantis vs Mantis)
+Started game 2 of 20 (Mantis vs Mantis)
+Terminating process of engine Mantis(1)
+Finished game 1 (Mantis vs Mantis): 1-0 {Black's connection stalls}
+Score of Mantis vs Mantis: 1 - 0 - 0  [1.000] 1
+Finished game 2 (Mantis vs Mantis): * {No result}
+Score of Mantis vs Mantis: 1 - 0 - 0  [1.000] 1
+...      Mantis playing White: 1 - 0 - 0  [1.000] 1
+...      White vs Black: 1 - 0 - 0  [1.000] 1
+Elo difference: inf +/- nan, LOS: 84.1 %, DrawRatio: 0.0 %
+SPRT: llr 0 (0.0%), lbound -inf, ubound inf
+
+Player: Mantis
+   "No result": 1
+   "Win: Black's connection stalls": 1
+Player: Mantis
+   "Loss: Black's connection stalls": 1
+   "No result": 1
+Finished match

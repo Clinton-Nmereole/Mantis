@@ -1,0 +1,71 @@
+============================================================
+SELF-PLAY TOURNAMENT
+============================================================
+Engine A (White on even games): ./mantis
+Engine B (White on odd games):  ./mantis
+Games: 40 (max)
+Time control: {'movetime': 200}
+Concurrency: 1
+
+[Game 1/40] 1-0 (adjudication (eval >= 800))  W:1 L:0 D:0  Win%:100.0
+[Game 2/40] 0-1 (adjudication (eval <= -800))  W:2 L:0 D:0  Win%:100.0
+[Game 3/40] 1/2-1/2 (checkmate/stalemate/draw rule)  W:2 L:0 D:1  Win%:83.3
+[Game 4/40] 1-0 (checkmate/stalemate/draw rule)  W:2 L:1 D:1  Win%:62.5
+[Game 5/40] 1-0 (adjudication (eval >= 800))  W:3 L:1 D:1  Win%:70.0
+[Game 6/40] 0-1 (adjudication (eval <= -800))  W:4 L:1 D:1  Win%:75.0
+[Game 7/40] 0-1 (adjudication (eval <= -800))  W:4 L:2 D:1  Win%:64.3
+[Game 8/40] 0-1 (adjudication (eval <= -800))  W:5 L:2 D:1  Win%:68.8
+[Game 9/40] 1-0 (adjudication (eval >= 800))  W:6 L:2 D:1  Win%:72.2
+[Game 10/40] 1-0 (adjudication (eval >= 800))  W:6 L:3 D:1  Win%:65.0
+[Game 11/40] 0-1 (adjudication (eval <= -800))  W:6 L:4 D:1  Win%:59.1
+[Game 12/40] 0-1 (adjudication (eval <= -800))  W:7 L:4 D:1  Win%:62.5
+[Game 13/40] 1-0 (adjudication (eval >= 800))  W:8 L:4 D:1  Win%:65.4
+[Game 14/40] 0-1 (adjudication (eval <= -800))  W:9 L:4 D:1  Win%:67.9
+[Game 15/40] 1-0 (adjudication (eval >= 800))  W:10 L:4 D:1  Win%:70.0
+[Game 16/40] 0-1 (adjudication (eval <= -800))  W:11 L:4 D:1  Win%:71.9
+[Game 17/40] 0-1 (adjudication (eval <= -800))  W:11 L:5 D:1  Win%:67.6
+[Game 18/40] 0-1 (adjudication (eval <= -800))  W:12 L:5 D:1  Win%:69.4
+[Game 19/40] 0-1 (adjudication (eval <= -800))  W:12 L:6 D:1  Win%:65.8
+  [ILLEGAL MOVE] c5c4 in position r4rk1/7p/1P2P1pP/n1pb2P1/P2q4/8/3N1Rp1/1Q4K1 w - - 1 35
+  [ILLEGAL MOVE] Moves so far: d2d4 a7a6 b1c3 a6a5 a2a3 a5a4 b2b3 a4b3 c2b3 d7d5 g1f3 c7c6 e2e3 c6c5 a3a4 e7e6 g2g3 c5d4 h2h3 d4d3 e3e4 d3d2 c1d2 b8c6 e4d5 e6d5 b3b4 d5d4 g3g4 d4c3 h3h4 c3d2 f3d2 b7b6 f1g2 c8b7 b4b5 c6a5 f2f3 f7f6 e1g1 g8e7 a1c1 e7g6 h4h5 g6e5 f3f4 f6f5 f4e5 f5f4 e5e6 f4f3 g4g5 f3g2 f1f2 g7g6 h5h6 f8a3 c1c2 a3c5 c2c5 b6c5 d1a1 d8d4 a1b1 b7d5 b5b6 e8g8
+  [ILLEGAL MOVE] Engine: White
+[Game 20/40] 0-1 (illegal move (c5c4))  W:13 L:6 D:1  Win%:67.5
+[Game 21/40] 1-0 (adjudication (eval >= 800))  W:14 L:6 D:1  Win%:69.0
+  [ILLEGAL MOVE] e1g1 in position r1bqk2r/2p2ppp/2n1pn2/3P4/Pb1PP1P1/1p3N1P/1B2BP2/RN1Q1RK1 b kq - 2 16
+  [ILLEGAL MOVE] Moves so far: d2d4 a7a6 g1f3 d7d6 a2a3 g8f6 e2e3 a6a5 f1e2 a5a4 b2b3 d6d5 c2c3 a4b3 a3a4 b3b2 c1b2 b7b6 g2g3 b6b5 h2h3 b5b4 c3c4 b8c6 e3e4 e7e6 c4d5 b4b3 g3g4 f8b4 e1g1
+  [ILLEGAL MOVE] Engine: Black
+[Game 22/40] 1-0 (illegal move (e1g1))  W:14 L:7 D:1  Win%:65.9
+[Game 23/40] 1-0 (adjudication (eval >= 800))  W:15 L:7 D:1  Win%:67.4
+[Game 24/40] 1-0 (adjudication (eval >= 800))  W:15 L:8 D:1  Win%:64.6
+  [ILLEGAL MOVE] e1g1 in position 3k1bnr/6p1/r3b1B1/2Pq2P1/p2NQP2/P3B2P/8/q4RK1 b - - 1 30
+  [ILLEGAL MOVE] Moves so far: d2d4 a7a6 g1f3 e7e6 a2a3 a6a5 b2b3 b8c6 c2c3 d7d5 e2e3 a5a4 g2g3 e6e5 f3e5 b7b6 c3c4 c6e5 h2h3 f7f6 d4e5 d5c4 b3b4 c4c3 f1g2 c3c2 g2c6 c8d7 d1c2 b6b5 f2f3 a8a6 c6e4 f6f5 e5e6 f5f4 g3g4 d7e6 g4g5 f4e3 c1e3 c7c6 f3f4 c6c5 b4c5 b5b4 e4h7 b4b3 h7g6 e8e7 c2e4 d8d5 b1d2 e7d8 d2f3 b3b2 f3d4 b2a1q e1g1
+  [ILLEGAL MOVE] Engine: Black
+[Game 25/40] 1-0 (illegal move (e1g1))  W:16 L:8 D:1  Win%:66.0
+[Game 26/40] 0-1 (adjudication (eval <= -800))  W:17 L:8 D:1  Win%:67.3
+[Game 27/40] 0-1 (adjudication (eval <= -800))  W:17 L:9 D:1  Win%:64.8
+[Game 28/40] 1-0 (adjudication (eval >= 800))  W:17 L:10 D:1  Win%:62.5
+[Game 29/40] 1-0 (adjudication (eval >= 800))  W:18 L:10 D:1  Win%:63.8
+[Game 30/40] 0-1 (adjudication (eval <= -800))  W:19 L:10 D:1  Win%:65.0
+[Game 31/40] 0-1 (adjudication (eval <= -800))  W:19 L:11 D:1  Win%:62.9
+[Game 32/40] 0-1 (adjudication (eval <= -800))  W:20 L:11 D:1  Win%:64.1
+  [ILLEGAL MOVE] e8c8 in position 2kr1bnr/6pp/1q2b3/pB1p1p2/PNpPPPP1/1PN4P/2P5/R1BQK2R w KQ - 1 19
+  [ILLEGAL MOVE] Moves so far: d2d4 a7a6 g1f3 e7e6 a2a3 d7d6 a3a4 a6a5 e2e3 d6d5 f1d3 e6e5 f3e5 c8e6 e3e4 b7b6 b1c3 c7c6 f2f3 b6b5 g2g3 b5b4 b2b3 c6c5 d3b5 b8c6 h2h3 f7f6 e5c6 d8b6 f3f4 f6f5 g3g4 c5c4 c6b4 e8c8
+  [ILLEGAL MOVE] Engine: White
+[Game 33/40] 0-1 (illegal move (e8c8))  W:20 L:12 D:1  Win%:62.1
+[Game 34/40] 1-0 (adjudication (eval >= 800))  W:20 L:13 D:1  Win%:60.3
+[Game 35/40] 0-1 (adjudication (eval <= -800))  W:20 L:14 D:1  Win%:58.6
+[Game 36/40] 0-1 (adjudication (eval <= -800))  W:21 L:14 D:1  Win%:59.7
+[Game 37/40] 0-1 (adjudication (eval <= -800))  W:21 L:15 D:1  Win%:58.1
+[Game 38/40] 1-0 (adjudication (eval >= 800))  W:21 L:16 D:1  Win%:56.6
+[Game 39/40] 1-0 (adjudication (eval >= 800))  W:22 L:16 D:1  Win%:57.7
+[Game 40/40] 0-1 (adjudication (eval <= -800))  W:23 L:16 D:1  Win%:58.8
+
+============================================================
+FINAL RESULTS
+============================================================
+Wins:   23
+Losses: 16
+Draws:  1
+Total:  40
+Win %:  58.75%
+
