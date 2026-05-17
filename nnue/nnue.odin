@@ -48,6 +48,9 @@ Network :: struct {
 current_network: Network
 is_initialized: bool = false
 
+// SFNNv14 active flag — set when an SFNNv14 network is loaded
+sfnnv14_active: bool = false
+
 // Helper to read LEB128
 read_uleb128 :: proc(data: []byte, offset: ^int) -> u32 {
 	result: u32 = 0
@@ -233,8 +236,15 @@ init_nnue :: proc(filename: string) -> bool {
 	return true
 }
 
-// Evaluate using NNUE
+// Evaluate using NNUE — dispatches to SFNNv14 or legacy based on active flag
 evaluate :: proc(b: ^board.Board) -> int {
+	// SFNNv14 path
+	if sfnnv14_active {
+		acc, psqt, bucket := prepare_sfnnv14_evaluation(b)
+		return evaluate_sfnnv14(acc, psqt, bucket, b.side)
+	}
+
+	// Legacy path
 	if !is_initialized {
 		return 0 // Should fallback to HCE
 	}
@@ -368,9 +378,17 @@ get_feature_index :: proc(king_sq: int, sq: int, piece: int, side: int) -> int {
 
 // Update Accumulators Incrementally
 update_accumulators :: proc(old_board: ^board.Board, new_board: ^board.Board, move: moves.Move) {
-	// Copy old accumulators to new board
+	// Always copy both accumulator types for consistency
 	new_board.accumulators = old_board.accumulators
+	new_board.sfnnv14_accumulators = old_board.sfnnv14_accumulators
 
+	// SFNNv14 path
+	if sfnnv14_active {
+		update_sfnnv14_accumulators(old_board, new_board, move)
+		return
+	}
+
+	// Legacy path
 	if !is_initialized { return }
 
 	side := old_board.side

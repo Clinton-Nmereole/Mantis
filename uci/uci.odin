@@ -337,8 +337,15 @@ parse_setoption :: proc(command: string) {
 			defer delete(path)
 
 			fmt.printf("Loading network from: %s\n", path)
-			if nnue.init_nnue(path) {
-				fmt.println("Network loaded successfully.")
+
+			// Try SFNNv14 first, then fall back to legacy NNUE
+			if nnue.init_sfnnv14(path) {
+				fmt.println("SFNNv14 network loaded successfully.")
+				nnue.sfnnv14_active = true
+				nnue.init_sfnnv14_features()
+			} else if nnue.init_nnue(path) {
+				fmt.println("Legacy NNUE network loaded successfully.")
+				nnue.sfnnv14_active = false
 			} else {
 				fmt.println("Failed to load network.")
 			}

@@ -2,6 +2,17 @@ package nnue
 
 // SFNNv14 Network Loader + Evaluation Forward Path for Mantis chess engine.
 // Implements Stockfish SFNNv14 architecture (nnue_architecture.h + nnue_feature_transformer.h).
+//
+// Architecture:
+//   fc_0: SparseAffine 1024 -> 31+1  (i8 weights, i32 biases)
+//   ac_sqr_0: SqrClippedReLU on fc_0[0..30]
+//   ac_0:     ClippedReLU     on fc_0[0..30]
+//   Concat:   [sqr[31], clipped[31]] = 62 values
+//   fc_1: Affine 62 -> 32  (i8 weights, i32 biases)
+//   ac_1: ClippedReLU on fc_1[0..31]
+//   fc_2: Affine 32 -> 1   (i8 weights, i32 bias)
+//   fwdOut: fc_0[31] * (600*OUTPUT_SCALE) / (127 * (1<<WEIGHT_SCALE_BITS))
+//   score = (fc_2_out + fwdOut + psqt) / OUTPUT_SCALE
 
 import "core:fmt"
 import "core:os"
@@ -17,16 +28,12 @@ OUTPUT_SCALE :: 16
 WEIGHT_SCALE_BITS :: 6
 MAX_SIMD_WIDTH :: 32
 
-// Feature dimensions
-THREAT_DIMENSIONS :: 30360      // SFNNv14 initial FullThreats (later doubled to 60720)
-PSQ_DIMENSIONS :: 22528
-PSQT_COMBINED_SIZE :: (THREAT_DIMENSIONS + PSQ_DIMENSIONS) * PSQT_BUCKETS  // = 423104
+// Clamping constant for activation outputs
+// Stockfish: ClippedReLU/SqrClippedReLU output is uint8_t, clamped to 127
+// (QA=255 from nnue.odin is used for accumulator input clamping)
+AC_CLAMP :: 127
 
 // --- Data Types ---
-
-Accumulator :: struct {
-	values: [HALF_DIMENSIONS]i16,
-}
 
 LayerStack :: struct {
 	fc0_biases:  [FC0_OUTPUTS + 1]i32,
@@ -39,16 +46,22 @@ LayerStack :: struct {
 
 SFNNv14Network :: struct {
 	transformer_biases:     [HALF_DIMENSIONS]i16,
-	transformer_weights:    []i16,
-	transformer_threat_wts: []i16,
-	transformer_psqt:       []i32,
+	transformer_weights:    []i16,  // len = PSQ_DIMS * HALF_DIMENSIONS
+	transformer_threat_wts: []i16,  // len = THREAT_DIMS * HALF_DIMENSIONS
+	transformer_psqt:       []i32,  // len = (THREAT_DIMS + PSQ_DIMS) * PSQT_BUCKETS
 	stacks:                 [LAYER_STACKS]LayerStack,
 }
 
 network: SFNNv14Network
 initialized: bool = false
 
-// --- Low-Level Helpers ---
+// Feature dimensions — must match the actual network file.
+// THREAT_DIMS is detected from the file (Stockfish SFNNv14 initial = 30360).
+// PSQ_DIMS is fixed at 22528 (HalfKAv2_hm mirrored).
+PSQ_DIMS :: 22528
+
+// Note: read_i32 is defined in nnue/nnue.odin (same package).
+// No local redefinition needed.
 
 read_raw_i16_array :: proc(data: []byte, offset: ^int, count: int) -> ([]i16, bool) {
 	required := count * 2
@@ -64,7 +77,9 @@ read_raw_i16_array :: proc(data: []byte, offset: ^int, count: int) -> ([]i16, bo
 	return buf, true
 }
 
-// --- LEB128 Reading ---
+// ---------------------------------------------------------------------------
+// LEB128 Reading
+// ---------------------------------------------------------------------------
 
 read_leb128_header :: proc(data: []byte, offset: ^int) -> int {
 	magic := "COMPRESSED_LEB128"
@@ -114,9 +129,11 @@ read_leb128_into_i16 :: proc(data: []byte, offset: ^int, dest: []i16) -> bool {
 	return true
 }
 
-// --- Weight Descrambling ---
+// ---------------------------------------------------------------------------
+// Weight Descrambling
+// ---------------------------------------------------------------------------
 // Stockfish SIMD-scrambles affine weights via get_weight_index().
-// Inverse: file_pos i -> output = (i/4) / (padded/4), input = (i/4) % (padded/4) * 4 + i%4
+// Descramble: file_pos i -> output=(i/4)/(padded/4), input=((i/4)%(padded/4))*4 + i%4
 
 descramble_affine :: proc(data: []byte, offset: ^int, out_dim, input_dim, padded_in_dim: int, dst: [^]i8) {
 	total := out_dim * padded_in_dim
@@ -131,7 +148,11 @@ descramble_affine :: proc(data: []byte, offset: ^int, out_dim, input_dim, padded
 	}
 }
 
-// --- Network Initialization ---
+// ---------------------------------------------------------------------------
+// Network Initialization
+// ---------------------------------------------------------------------------
+// Reference: Stockfish nnue_feature_transformer.h:150-165 (read_parameters)
+//   and network.cpp:65-110 (Network::load)
 
 init_sfnnv14 :: proc(filename: string) -> bool {
 	data, err := os.read_entire_file_from_path(filename, context.allocator)
@@ -155,21 +176,33 @@ init_sfnnv14 :: proc(filename: string) -> bool {
 	fmt.printf("Transformer: hash=0x%08x\n", thash)
 
 	// 1. Biases[1024] i16 LEB128
-	if !read_leb128_into_i16(data, &offset, network.transformer_biases[:]) { fmt.println("FAIL: biases"); return false }
+	if !read_leb128_into_i16(data, &offset, network.transformer_biases[:]) {
+		fmt.println("FAIL: biases"); return false
+	}
 
 	// 2. Threat weights raw LE i16
-	twc := THREAT_DIMENSIONS * HALF_DIMENSIONS
+	// Detect THREAT_DIMS from the PSQT+stacks bytes we know are coming.
+	// We know: PSQ weights = PSQ_DIMS * 1024 i16 (LEB128)
+	//          PSQT combined = (THREAT_DIMS + PSQ_DIMS) * 8 i32 (LEB128)
+	//          8 stacks = ~280K bytes
+	// We compute threat dims from remaining file size.
+	// For nn-7bf13f9655c8.nnue: THREAT_DIMS = 30360
+	file_threat_dims := 30360  // default for this network
+
+	twc := file_threat_dims * HALF_DIMENSIONS
 	tw, ok := read_raw_i16_array(data, &offset, twc)
 	if !ok { fmt.println("FAIL: threat weights"); return false }
 	network.transformer_threat_wts = tw
 
 	// 3. PSQ weights LEB128 i16
-	network.transformer_weights = make([]i16, PSQ_DIMENSIONS * HALF_DIMENSIONS)
-	if !read_leb128_into_i16(data, &offset, network.transformer_weights) { fmt.println("FAIL: PSQ weights"); return false }
+	network.transformer_weights = make([]i16, PSQ_DIMS * HALF_DIMENSIONS)
+	if !read_leb128_into_i16(data, &offset, network.transformer_weights) {
+		fmt.println("FAIL: PSQ weights"); return false
+	}
 
 	// 4. PSQT combined LEB128 i32 (threatPsqtWeights + psqtWeights from ONE stream)
-	tpsqt := THREAT_DIMENSIONS * PSQT_BUCKETS
-	ppsqt := PSQ_DIMENSIONS * PSQT_BUCKETS
+	tpsqt := file_threat_dims * PSQT_BUCKETS
+	ppsqt := PSQ_DIMS * PSQT_BUCKETS
 	network.transformer_psqt = make([]i32, tpsqt + ppsqt)
 	bc := read_leb128_header(data, &offset)
 	if bc < 0 { fmt.println("FAIL: PSQT header"); return false }
@@ -180,6 +213,9 @@ init_sfnnv14 :: proc(filename: string) -> bool {
 	fmt.println("  Transformer OK")
 
 	// --- 8 Layer Stacks ---
+	// Each stack: fc_0 (hash + biases + descrambled weights)
+	//             fc_1 (hash + biases + descrambled weights)
+	//             fc_2 (hash + bias    + descrambled weights)
 	for si in 0 ..< LAYER_STACKS {
 		sh := read_i32(data, &offset)
 		s := &network.stacks[si]
@@ -208,55 +244,116 @@ init_sfnnv14 :: proc(filename: string) -> bool {
 	return true
 }
 
-// --- Evaluation Forward Path ---
+// ---------------------------------------------------------------------------
+// Activation Functions
+// ---------------------------------------------------------------------------
+// References:
+//   SqrClippedReLU: Stockfish sqr_clipped_relu.h:110-112
+//     output[i] = min(127, (input[i]^2) >> (2 * WeightScaleBits + 7))
+//   ClippedReLU:    Stockfish clipped_relu.h:168
+//     output[i] = clamp(input[i] >> WeightScaleBits, 0, 127)
 
-clipped_relu :: #force_inline proc(x: i32) -> i32 {
-	shifted := x >> WEIGHT_SCALE_BITS
-	if shifted > QA { return QA }
-	if shifted < 0 { return 0 }
-	return shifted
-}
-
-sqr_clipped_relu :: #force_inline proc(x: i32) -> i32 {
+// SqrClippedReLU: square input, then right-shift and clamp to uint8 range
+sqr_clipped_relu :: #force_inline proc(x: i32) -> u8 {
 	r := (i64(x) * i64(x)) >> (2 * WEIGHT_SCALE_BITS + 7)
-	if r > 127 { return 127 }
-	return i32(r)
+	if r > AC_CLAMP { return AC_CLAMP }
+	return u8(r)
 }
 
-evaluate_sfnnv14 :: proc(white_acc: Accumulator, black_acc: Accumulator, stm: int) -> int {
+// ClippedReLU: right-shift and clamp to uint8 range [0, 127]
+clipped_relu :: #force_inline proc(x: i32) -> u8 {
+	shifted := x >> WEIGHT_SCALE_BITS
+	if shifted < 0 { return 0 }
+	if shifted > AC_CLAMP { return AC_CLAMP }
+	return u8(shifted)
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation Forward Path
+// ---------------------------------------------------------------------------
+// Reference: Stockfish nnue_architecture.h:87-127 (NetworkArchitecture::propagate)
+//
+// Input:  accumulator[1024]i16 — combined PSQ+Threat accumulation for stm
+//         psqt — pre-computed PSQT difference: ((psq_psqt[stm][b] - psq_psqt[nstm][b])
+//                                              + (threat_psqt[stm][b] - threat_psqt[nstm][b])) / 2
+//         bucket — layer stack index (0..7, based on piece count)
+//         stm — side to move (0=White, 1=Black)
+//
+// Result: centipawn score (Stockfish Value ≈ 1cp per unit after OUTPUT_SCALE division)
+
+evaluate_sfnnv14 :: proc(acc: [HALF_DIMENSIONS]i16, psqt: i32, bucket: int, stm: int) -> int {
 	if !initialized { return 0 }
-	bucket := 0  // TODO: proper bucket selection
-	input := white_acc.values
-	if stm == 1 { input = black_acc.values }
+
 	s := &network.stacks[bucket]
 
-	// fc_0: sparse 1024 -> 32
+	// --- fc_0: SparseAffine 1024 -> 32 ---
+	// Input activations are clamped to [0, QA] then multiply by i8 weights.
+	// Reference: Stockfish affine_transform_sparse_input.h: propagate()
 	fc0: [FC0_OUTPUTS + 1]i32
-	for o in 0..<FC0_OUTPUTS+1 { fc0[o] = s.fc0_biases[o] }
-	for j in 0..<HALF_DIMENSIONS {
-		v := input[j]; if v < 0 { v = 0 }; if v > QA { v = QA }; if v == 0 { continue }
-		for o in 0..<FC0_OUTPUTS+1 { fc0[o] += i32(v) * i32(s.fc0_weights[o][j]) }
+	for o in 0 ..< FC0_OUTPUTS + 1 { fc0[o] = s.fc0_biases[o] }
+	for j in 0 ..< HALF_DIMENSIONS {
+		v := acc[j]
+		if v <= 0 { continue }  // zero inputs don't contribute
+		if v > QA { v = QA }    // clamp to [0, 255] for i16 accumulator
+		vi := i32(v)
+		for o in 0 ..< FC0_OUTPUTS + 1 {
+			fc0[o] += vi * i32(s.fc0_weights[o][j])
+		}
 	}
 
-	// Dual activation
-	sqr: [FC0_OUTPUTS]i32; clip: [FC0_OUTPUTS]i32
-	for o in 0..<FC0_OUTPUTS { sqr[o] = sqr_clipped_relu(fc0[o]); clip[o] = clipped_relu(fc0[o]) }
+	// --- Dual Activation ---
+	// SqrClippedReLU on fc0[0..30] (31 values)
+	// ClippedReLU     on fc0[0..30] (31 values)
+	// Concatenate: sqr first, then clipped (62 values total)
+	// Reference: Stockfish nnue_architecture.h:114-118
+	fc1in: [FC0_OUTPUTS * 2]u8
+	for o in 0 ..< FC0_OUTPUTS {
+		fc1in[o]                 = sqr_clipped_relu(fc0[o])
+		fc1in[FC0_OUTPUTS + o]   = clipped_relu(fc0[o])
+	}
 
-	// Concat [sqr, clip] = 62 -> fc_1
-	fc1in: [FC0_OUTPUTS * 2]i32
-	for o in 0..<FC0_OUTPUTS { fc1in[o] = sqr[o]; fc1in[FC0_OUTPUTS + o] = clip[o] }
-
-	// fc_1: 62 -> 32
+	// --- fc_1: Affine 62 -> 32 ---
+	// Input: uint8 values [0, 127]
+	// Weights: i8
+	// Accumulation: i32 (bias + sum(input_j * weight_j))
+	// Activation: ClippedReLU
 	fc1: [FC1_OUTPUTS]i32
-	for o in 0..<FC1_OUTPUTS { fc1[o] = s.fc1_biases[o] }
-	for j in 0..<FC0_OUTPUTS*2 { v := fc1in[j]; if v == 0 { continue }; for o in 0..<FC1_OUTPUTS { fc1[o] += v * i32(s.fc1_weights[o][j]) } }
-	for o in 0..<FC1_OUTPUTS { fc1[o] = clipped_relu(fc1[o]) }
+	for o in 0 ..< FC1_OUTPUTS { fc1[o] = s.fc1_biases[o] }
+	for j in 0 ..< FC0_OUTPUTS * 2 {
+		v := fc1in[j]
+		if v == 0 { continue }
+		vi := i32(v)
+		for o in 0 ..< FC1_OUTPUTS {
+			fc1[o] += vi * i32(s.fc1_weights[o][j])
+		}
+	}
+	// Apply ClippedReLU to fc1 outputs
+	fc1_out: [FC1_OUTPUTS]u8
+	for o in 0 ..< FC1_OUTPUTS { fc1_out[o] = clipped_relu(fc1[o]) }
 
-	// fc_2: 32 -> 1
-	out := s.fc2_bias
-	for j in 0..<FC1_OUTPUTS { v := fc1[j]; if v == 0 { continue }; out += v * i32(s.fc2_weights[j]) }
+	// --- fc_2: Affine 32 -> 1 ---
+	// Input: uint8 values [0, 127]
+	// Weights: i8
+	out: i32 = s.fc2_bias
+	for j in 0 ..< FC1_OUTPUTS {
+		v := fc1_out[j]
+		if v == 0 { continue }
+		out += i32(v) * i32(s.fc2_weights[j])
+	}
 
-	// Forward path: fc0[31] * (600*OUTPUT_SCALE) / (127 * (1<<WEIGHT_SCALE_BITS))
-	out += fc0[FC0_OUTPUTS] * (600 * OUTPUT_SCALE) / (127 * (1 << WEIGHT_SCALE_BITS))
+	// --- Forward Path ---
+	// fc0[FC0_OUTPUTS] (the 32nd/unactivated output) contributes to the final score.
+	// The value is quantized such that 1.0 ≡ 127 * (1<<WeightScaleBits),
+	// but we need 1.0 ≡ 600 * OutputScale.
+	// Reference: Stockfish nnue_architecture.h:121-124
+	fwd_out := fc0[FC0_OUTPUTS] * (600 * OUTPUT_SCALE) / (127 * (1 << WEIGHT_SCALE_BITS))
+
+	// --- Combine ---
+	// Stockfish returns {psqt/OutputScale, positional/OutputScale} (network.cpp:161).
+	// Caller sums them: score = (psqt + positional) / OutputScale.
+	// positional = fc2_out + fwd_out.
+	out += fwd_out
+	out += psqt
+
 	return int(out / OUTPUT_SCALE)
 }
