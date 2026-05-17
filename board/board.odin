@@ -33,19 +33,37 @@ Board :: struct {
 	halfmove_clock:  int,
 	fullmove_number: int,
 
-	// NNUE Accumulators
+	// NNUE Accumulators (legacy format)
 	// [0]: White, [1]: Black
 	// We store them here to carry them through the search
 	accumulators:    [2]Accumulator,
+
+	// SFNNv14 Accumulators
+	// Dual accumulators for PSQ (HalfKAv2_hm) and Threat (FullThreats) features
+	sfnnv14_accumulators: SFNNv14_Accumulators,
 }
 
 // StateInfo stores a complete board snapshot for make/unmove.
 // Using a type alias lets us save/restore with a single struct copy.
 StateInfo :: Board
 
-// NNUE Accumulator
+// NNUE Accumulator (legacy format)
 Accumulator :: struct {
 	values: [constants.NNUE_HIDDEN_SIZE]i16,
+}
+
+// SFNNv14 Accumulator State (per feature set)
+// Matches Stockfish: accumulation[COLOR_NB][L1], psqtAccumulation[COLOR_NB][PSQTBuckets]
+SFNNv14_AccumulatorState :: struct {
+	accumulation:      [2][constants.NNUE_HIDDEN_SIZE]i16,
+	psqt_accumulation: [2][8]i32,
+	computed:          [2]bool,
+}
+
+// SFNNv14 Combined Accumulators (both PSQ and Threat feature sets)
+SFNNv14_Accumulators :: struct {
+	psq:    SFNNv14_AccumulatorState,
+	threat: SFNNv14_AccumulatorState,
 }
 
 // Castling Rights Bits
