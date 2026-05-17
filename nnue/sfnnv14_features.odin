@@ -1197,55 +1197,11 @@ update_sfnnv14_accumulators :: proc(old_board: ^board.Board, new_board: ^board.B
 	}
 
 	// --- Threat Accumulator Updates ---
-	// For King moves: full refresh (king bucket changes invalidate incremental).
-	// For non-king moves: compute exact threat deltas and apply incrementally.
-	// Reference: Viridithas network.rs:1565 (force function)
-	if piece_type == constants.KING {
-		refresh_threat_accumulator(new_board, constants.WHITE)
-		refresh_threat_accumulator(new_board, constants.BLACK)
-	} else {
-		// Compute threat deltas on OLD board state (before the move was applied).
-		// Use the simplified delta computation. When sfnnv14_threat_updates.odin
-		// is merged, replace with the optimized on_move/on_change/on_mutate.
-
-		// 1. Remove threats from source square (piece leaves)
-		threat_compute_change_deltas(&buf.threat, old_board, mantis_piece, move.source, false)
-
-		// 2. If capture: remove the captured piece's threats too
-		if move.capture {
-			captured_piece := int(old_board.mailbox[move.target])
-			if captured_piece != -1 && captured_piece % 6 != constants.KING {
-				threat_compute_change_deltas(&buf.threat, old_board, captured_piece, move.target, false)
-			}
-		}
-
-		// 3. Add threats from destination square (piece arrives — use old board still has piece at src)
-		threat_compute_change_deltas(&buf.threat, old_board, mantis_piece, move.target, true)
-
-		// 4. Handle promotion: remove pawn threats, add promoted piece threats
-		if move.promoted != -1 {
-			final_piece := move.promoted
-			if side == constants.BLACK {
-				final_piece += 6
-			}
-			threat_compute_change_deltas(&buf.threat, old_board, mantis_piece, move.target, false)
-			threat_compute_change_deltas(&buf.threat, old_board, final_piece, move.target, true)
-		}
-
-		// Apply threat deltas to the accumulator for both perspectives.
-		// We use the king squares from old_board (they haven't changed for non-king moves).
-		wsq := board.get_king_square(old_board, constants.WHITE)
-		bsq := board.get_king_square(old_board, constants.BLACK)
-
-		adds := buf.threat.add[:buf.threat.add_count]
-		subs := buf.threat.sub[:buf.threat.sub_count]
-
-		apply_threat_deltas_full(&new_board.sfnnv14_accumulators.threat, adds, subs, constants.WHITE, wsq)
-		apply_threat_deltas_full(&new_board.sfnnv14_accumulators.threat, adds, subs, constants.BLACK, bsq)
-
-		new_board.sfnnv14_accumulators.threat.computed[constants.WHITE] = true
-		new_board.sfnnv14_accumulators.threat.computed[constants.BLACK] = true
-	}
+	// Delegates to the Viridithas-style optimized incremental update system
+	// in nnue/sfnnv14_threat_updates.odin (same package).
+	// Handles: king moves (full refresh), captures, promotions, en passant,
+	// discovered/blocked threats, and quiet moves via exact delta computation.
+	update_threat_accumulators_incremental(old_board, new_board, move)
 }
 
 // ============================================================================

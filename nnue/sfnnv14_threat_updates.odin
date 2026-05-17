@@ -521,14 +521,14 @@ on_mutate :: proc(
 
 // Apply a threat update buffer to the accumulator for a given perspective.
 // This performs the actual add/subtract of weight rows.
+// Requires the king square for proper threat feature orientation.
 apply_threat_buffer_to_accumulator :: proc(
 	state: ^board.SFNNv14_AccumulatorState,
 	perspective: int,
 	buffer: ^SFNNv14_ThreatUpdateBuffer,
+	ksq: int,
 ) {
 	if len(sfnnv14_transformer.threat_weights) == 0 {return}
-
-	ksq := -1 // We don't need ksq here because buffer already has valid indices
 
 	// Apply SUBs
 	for i in 0 ..< buffer.sub_count {
@@ -640,7 +640,8 @@ update_threat_accumulators_incremental :: proc(
 		}
 
 		// Apply the computed delta to the accumulator
-		apply_threat_buffer_to_accumulator(&new_board.sfnnv14_accumulators.threat, perspective, &buffer)
+		ksq := board.get_king_square(old_board, perspective)
+		apply_threat_buffer_to_accumulator(&new_board.sfnnv14_accumulators.threat, perspective, &buffer, ksq)
 		new_board.sfnnv14_accumulators.threat.computed[perspective] = true
 	}
 }
