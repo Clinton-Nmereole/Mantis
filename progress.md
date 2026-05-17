@@ -1,15 +1,18 @@
 # Progress
 
 ## Status
+
 In Progress — Viridithas-style delta-based incremental threat updates
 
 ## Tasks
+
 - [x] Phase 2: Accumulator integration (delta application, buffer types, modified update_sfnnv14_accumulators)
 - [ ] Phase 1: Geometry/threat detection (other subagent — pending)
 - [ ] Phase 3: Merge both parts + test suite
 - [ ] Phase 4: Validation (cutechess self-play)
 
 ## Files Changed
+
 - `nnue/sfnnv14_features.odin` — Added ~250 lines:
   - `ThreatFeatureUpdate`, `PsqtFeatureUpdate`, buffer types
   - `apply_threat_deltas`, `apply_threat_deltas_full`, `apply_psqt_deltas`
@@ -19,6 +22,7 @@ In Progress — Viridithas-style delta-based incremental threat updates
   - Modified `update_sfnnv14_accumulators` to compute + apply threat deltas instead of marking dirty
 
 ## Notes
+
 - Build passes clean: `odin check .` and `odin build .` both succeed
 - SFNNv14 network loads and plays correctly with incremental threat updates
 - Simplified threat delta computation is O(n_pieces²) — will be replaced by optimized Viridithas geometry
