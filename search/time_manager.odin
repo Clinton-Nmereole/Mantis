@@ -72,16 +72,16 @@ calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> Search
 
 	// Sudden death / blitz / rapid
 	// Estimate moves-to-horizon based on remaining time.
-	// Lower values = more aggressive time usage.
+	// Higher values = more conservative time usage (spread thinner).
 	moves_to_horizon: int
 	switch {
-	case my_time >= 300_000: moves_to_horizon = 40 // >= 5 min
-	case my_time >= 120_000: moves_to_horizon = 35 // >= 2 min
-	case my_time >= 60_000:  moves_to_horizon = 30 // >= 1 min
-	case my_time >= 30_000:  moves_to_horizon = 25 // >= 30 s
-	case my_time >= 10_000:  moves_to_horizon = 20 // >= 10 s
-	case my_time >= 5_000:   moves_to_horizon = 15 // >= 5 s
-	case:                    moves_to_horizon = 10 // < 5 s
+	case my_time >= 300_000: moves_to_horizon = 50 // >= 5 min
+	case my_time >= 120_000: moves_to_horizon = 45 // >= 2 min
+	case my_time >= 60_000:  moves_to_horizon = 40 // >= 1 min
+	case my_time >= 30_000:  moves_to_horizon = 35 // >= 30 s
+	case my_time >= 10_000:  moves_to_horizon = 30 // >= 10 s
+	case my_time >= 5_000:   moves_to_horizon = 25 // >= 5 s
+	case:                    moves_to_horizon = 15 // < 5 s
 	}
 
 	base := available / moves_to_horizon
@@ -110,15 +110,15 @@ calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> Search
 	if my_time < 5_000 {
 		// Time scramble: very conservative
 		max_limit = optimal * 15 / 10 // 1.5x
-		if max_limit > available / 4 { max_limit = available / 4 }
+		if max_limit > available / 5 { max_limit = available / 5 }
 	} else if my_time < 20_000 {
 		// Moderate pressure
-		max_limit = optimal * 25 / 10 // 2.5x
-		if max_limit > available / 4 { max_limit = available / 4 }
+		max_limit = optimal * 2 // 2.0x
+		if max_limit > available / 5 { max_limit = available / 5 }
 	} else {
-		// Normal: up to 3x optimal, but never more than 1/4 of clock
-		max_limit = optimal * 3
-		if max_limit > available / 4 { max_limit = available / 4 }
+		// Normal: up to 2x optimal, but never more than 1/5 of clock
+		max_limit = optimal * 2
+		if max_limit > available / 5 { max_limit = available / 5 }
 	}
 
 	return SearchLimits{
