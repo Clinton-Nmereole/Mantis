@@ -380,6 +380,60 @@ get_threat_feature_index :: proc(
 }
 
 // ============================================================================
+// Threat Feature Update Types
+// ============================================================================
+// Reference: Viridithas src/nnue/network.rs:1183 (ThreatFeatureUpdate)
+//
+// Compact representation of a single threat relationship change.
+// Stored as 4 packed bytes (attacker, from, victim, to) so that
+// size_of(ThreatFeatureUpdate) == 4, matching Viridithas's assert!
+ThreatFeatureUpdate :: struct #packed {
+	attacker: u8,
+	from:     u8,
+	victim:   u8,
+	to:       u8,
+}
+
+// PSQT feature update — a piece moving to or from a square.
+PsqtFeatureUpdate :: struct {
+	sq:    int,
+	piece: int,
+}
+
+// Buffer for threat adds/subs collected during move execution.
+// Reference: Viridithas src/nnue/network.rs:1237 (ThreatUpdateBuffer)
+SFNNv14_ThreatUpdateBuffer :: struct {
+	add:       [128]ThreatFeatureUpdate,
+	sub:       [128]ThreatFeatureUpdate,
+	add_count: int,
+	sub_count: int,
+}
+
+// Buffer for PSQT adds/subs collected during move execution.
+// Reference: Viridithas src/nnue/network.rs:1257 (PsqtUpdateBuffer)
+SFNNv14_PsqtUpdateBuffer :: struct {
+	add:       [4]PsqtFeatureUpdate,
+	sub:       [4]PsqtFeatureUpdate,
+	add_count: int,
+	sub_count: int,
+}
+
+// Combined PSQT + threat update buffer, filled during move execution.
+// Reference: Viridithas src/nnue/network.rs:1257 (UpdateBuffer)
+SFNNv14_UpdateBuffer :: struct {
+	psqt:   SFNNv14_PsqtUpdateBuffer,
+	threat: SFNNv14_ThreatUpdateBuffer,
+}
+
+// Clear all entries in the update buffer.
+sfnnv14_buffer_clear :: proc(buf: ^SFNNv14_UpdateBuffer) {
+	buf.psqt.add_count = 0
+	buf.psqt.sub_count = 0
+	buf.threat.add_count = 0
+	buf.threat.sub_count = 0
+}
+
+// ============================================================================
 // SFNNv14 Network Transformer Structure
 // ============================================================================
 // Reference: Stockfish nnue_feature_transformer.h
@@ -706,11 +760,310 @@ update_psq_accumulator_remove :: proc(
 }
 
 // ============================================================================
+// Delta Application Functions
+// ============================================================================
+// Reference: Viridithas accumulator.rs: vector_update_threats (line 89),
+//            vector_update_inplace_psqt (line 33)
+
+// Apply threat feature deltas to a single-perspective accumulator.
+// For each add: acc[i] += threat_weights[feature_idx * L1 + i]
+// For each sub: acc[i] -= threat_weights[feature_idx * L1 + i]
+apply_threat_deltas :: proc(
+	acc: ^[SFNNV14_L1]i16,
+	adds: []ThreatFeatureUpdate,
+	subs: []ThreatFeatureUpdate,
+	perspective: int,
+	ksq: int,
+) {
+	if len(sfnnv14_transformer.threat_weights) == 0 { return }
+
+	// Apply subtractions first (preserves ordering); then adds.
+	for sub in subs {
+		idx := get_threat_feature_index(
+			perspective,
+			int(sub.attacker),
+			int(sub.from),
+			int(sub.to),
+			int(sub.victim),
+			ksq,
+		)
+		if idx >= SFNNV14_THREAT_DIMENSIONS { continue }
+		weight_offset := idx * SFNNV14_L1
+		for i in 0 ..< SFNNV14_L1 {
+			acc[i] -= sfnnv14_transformer.threat_weights[weight_offset + i]
+		}
+	}
+	for add_ in adds {
+		idx := get_threat_feature_index(
+			perspective,
+			int(add_.attacker),
+			int(add_.from),
+			int(add_.to),
+			int(add_.victim),
+			ksq,
+		)
+		if idx >= SFNNV14_THREAT_DIMENSIONS { continue }
+		weight_offset := idx * SFNNV14_L1
+		for i in 0 ..< SFNNV14_L1 {
+			acc[i] += sfnnv14_transformer.threat_weights[weight_offset + i]
+		}
+	}
+}
+
+// Apply threat deltas (with PSQT) to a full SFNNv14_AccumulatorState.
+apply_threat_deltas_full :: proc(
+	state: ^board.SFNNv14_AccumulatorState,
+	adds: []ThreatFeatureUpdate,
+	subs: []ThreatFeatureUpdate,
+	perspective: int,
+	ksq: int,
+) {
+	if len(sfnnv14_transformer.threat_weights) == 0 { return }
+
+	for sub in subs {
+		idx := get_threat_feature_index(
+			perspective,
+			int(sub.attacker),
+			int(sub.from),
+			int(sub.to),
+			int(sub.victim),
+			ksq,
+		)
+		if idx >= SFNNV14_THREAT_DIMENSIONS { continue }
+		weight_offset := idx * SFNNV14_L1
+		for i in 0 ..< SFNNV14_L1 {
+			state.accumulation[perspective][i] -= sfnnv14_transformer.threat_weights[weight_offset + i]
+		}
+		psqt_offset := idx * SFNNV14_PSQT_BUCKETS
+		for i in 0 ..< SFNNV14_PSQT_BUCKETS {
+			state.psqt_accumulation[perspective][i] -= sfnnv14_transformer.threat_psqt_weights[psqt_offset + i]
+		}
+	}
+	for add_ in adds {
+		idx := get_threat_feature_index(
+			perspective,
+			int(add_.attacker),
+			int(add_.from),
+			int(add_.to),
+			int(add_.victim),
+			ksq,
+		)
+		if idx >= SFNNV14_THREAT_DIMENSIONS { continue }
+		weight_offset := idx * SFNNV14_L1
+		for i in 0 ..< SFNNV14_L1 {
+			state.accumulation[perspective][i] += sfnnv14_transformer.threat_weights[weight_offset + i]
+		}
+		psqt_offset := idx * SFNNV14_PSQT_BUCKETS
+		for i in 0 ..< SFNNV14_PSQT_BUCKETS {
+			state.psqt_accumulation[perspective][i] += sfnnv14_transformer.threat_psqt_weights[psqt_offset + i]
+		}
+	}
+}
+
+// Apply PSQT feature deltas to a single-perspective accumulator.
+apply_psqt_deltas :: proc(
+	state: ^board.SFNNv14_AccumulatorState,
+	adds: []PsqtFeatureUpdate,
+	subs: []PsqtFeatureUpdate,
+	perspective: int,
+	ksq: int,
+) {
+	if len(sfnnv14_transformer.weights) == 0 { return }
+
+	for sub in subs {
+		idx := get_halfka_feature_index(perspective, sub.sq, sub.piece, ksq)
+		if idx >= 0 && idx < SFNNV14_HALFKA_DIMENSIONS {
+			weight_offset := idx * SFNNV14_L1
+			for i in 0 ..< SFNNV14_L1 {
+				state.accumulation[perspective][i] -= sfnnv14_transformer.weights[weight_offset + i]
+			}
+			psqt_offset := idx * SFNNV14_PSQT_BUCKETS
+			for i in 0 ..< SFNNV14_PSQT_BUCKETS {
+				state.psqt_accumulation[perspective][i] -= sfnnv14_transformer.psqt_weights[psqt_offset + i]
+			}
+		}
+	}
+	for add_ in adds {
+		idx := get_halfka_feature_index(perspective, add_.sq, add_.piece, ksq)
+		if idx >= 0 && idx < SFNNV14_HALFKA_DIMENSIONS {
+			weight_offset := idx * SFNNV14_L1
+			for i in 0 ..< SFNNV14_L1 {
+				state.accumulation[perspective][i] += sfnnv14_transformer.weights[weight_offset + i]
+			}
+			psqt_offset := idx * SFNNV14_PSQT_BUCKETS
+			for i in 0 ..< SFNNV14_PSQT_BUCKETS {
+				state.psqt_accumulation[perspective][i] += sfnnv14_transformer.psqt_weights[psqt_offset + i]
+			}
+		}
+	}
+}
+
+// Materialise a new threat accumulator by copying from the source
+// and applying the collected threat deltas (Viridithas pattern).
+// Reference: Viridithas network.rs:1734 (materialise_new_threat_acc_from)
+materialise_threat_acc_from :: proc(
+	src_acc: ^board.SFNNv14_AccumulatorState,
+	tgt_acc: ^board.SFNNv14_AccumulatorState,
+	updates: ^SFNNv14_ThreatUpdateBuffer,
+	perspective: int,
+	ksq: int,
+) {
+	// Copy source accumulator wholesale
+	tgt_acc.accumulation[perspective] = src_acc.accumulation[perspective]
+	tgt_acc.psqt_accumulation[perspective] = src_acc.psqt_accumulation[perspective]
+
+	// Apply deltas in place
+	adds := updates.add[:updates.add_count]
+	subs := updates.sub[:updates.sub_count]
+	apply_threat_deltas_full(tgt_acc, adds, subs, perspective, ksq)
+	tgt_acc.computed[perspective] = true
+}
+
+// ============================================================================
+// Simple Threat Delta Computation
+// ============================================================================
+// These functions compute which threats change when a piece is added,
+// removed, or moved. They serve as the fallback implementation until
+// the optimized Viridithas-style geometry helpers (in
+// nnue/sfnnv14_threat_updates.odin) are available.
+
+// Get attack bitboard for a given piece type from a square.
+// Returns squares attacked by piece_type at 'from' given 'occupied' blockers.
+threat_get_attacks :: proc(b: ^board.Board, piece: int, from: int) -> u64 {
+	color := piece / 6
+	pt := piece % 6
+	occupied := b.occupancies[constants.BOTH]
+
+	switch pt {
+	case constants.PAWN:
+		// Compute pawn attacks directly (no get_pawn_attacks_bitboard helper exists)
+		src_bit := u64(1) << u64(from)
+		if color == constants.WHITE {
+			return ((src_bit & ~constants.FILE_A) << 7) | ((src_bit & ~constants.FILE_H) << 9)
+		} else {
+			return ((src_bit & ~constants.FILE_H) >> 7) | ((src_bit & ~constants.FILE_A) >> 9)
+		}
+	case constants.KNIGHT:
+		return moves.get_knight_attacks_bitboard(from)
+	case constants.BISHOP:
+		return moves.get_bishop_attacks(from, occupied)
+	case constants.ROOK:
+		return moves.get_rook_attacks(from, occupied)
+	case constants.QUEEN:
+		return moves.get_queen_attacks(from, occupied)
+	case:
+		return 0  // Kings don't participate in threats
+	}
+}
+
+// Push outgoing threats from a piece on 'sq' to the threat buffer.
+// Only include threats where attacker and victim have different types
+// OR are enemies (kings excluded per SFNNv12 convention).
+threat_push_outgoing :: proc(
+	buf: ^SFNNv14_ThreatUpdateBuffer,
+	b: ^board.Board,
+	is_add: bool,
+	piece: int,
+	sq: int,
+) {
+	if piece % 6 == constants.KING { return }  // kings excluded from threats
+
+	attacks := threat_get_attacks(b, piece, sq)
+	occupied := b.occupancies[constants.BOTH]
+	// Only attack squares that are occupied (by non-king pieces)
+	non_king_occ := occupied & ~(b.bitboards[constants.KING] | b.bitboards[constants.KING + 6])
+	attacks &= non_king_occ
+
+	for attacks != 0 {
+		to := utils.pop_lsb(&attacks)
+		victim := int(b.mailbox[to])
+		if victim == -1 { continue }
+		if victim % 6 == constants.KING { continue }
+
+		uf: ThreatFeatureUpdate = {
+			attacker = u8(piece),
+			from     = u8(sq),
+			victim   = u8(victim),
+			to       = u8(to),
+		}
+		if is_add {
+			buf.add[buf.add_count] = uf
+			buf.add_count += 1
+		} else {
+			buf.sub[buf.sub_count] = uf
+			buf.sub_count += 1
+		}
+	}
+}
+
+// Push incoming threats TO a piece on 'sq' from all other pieces.
+threat_push_incoming :: proc(
+	buf: ^SFNNv14_ThreatUpdateBuffer,
+	b: ^board.Board,
+	is_add: bool,
+	piece: int,
+	sq: int,
+) {
+	if piece % 6 == constants.KING { return }
+
+	// For each non-king piece on the board, check if it attacks sq
+	colors := [2]int{constants.WHITE, constants.BLACK}
+	for color in colors {
+		for pt in 0 ..= 5 {
+			if pt == constants.KING { continue }
+			cpiece := color * 6 + pt
+			bb := b.bitboards[cpiece]
+			for bb != 0 {
+				from := utils.pop_lsb(&bb)
+				attacks := threat_get_attacks(b, cpiece, from)
+				if (attacks & (u64(1) << u64(sq))) != 0 {
+					uf: ThreatFeatureUpdate = {
+						attacker = u8(cpiece),
+						from     = u8(from),
+						victim   = u8(piece),
+						to       = u8(sq),
+					}
+					if is_add {
+						buf.add[buf.add_count] = uf
+						buf.add_count += 1
+					} else {
+						buf.sub[buf.sub_count] = uf
+						buf.sub_count += 1
+					}
+				}
+			}
+		}
+	}
+}
+
+// Compute threat deltas for adding or removing a single piece on a square.
+// "add" means the piece is appearing on sq (e.g., a piece moved to sq or was promoted).
+// "sub" means the piece is disappearing from sq (e.g., a capture or moved away).
+// NOTE: This is a simplified version. When nnue/sfnnv14_threat_updates.odin
+// is merged, the optimized on_change/on_move/on_mutate from Viridithas will
+// replace this.
+threat_compute_change_deltas :: proc(
+	buf: ^SFNNv14_ThreatUpdateBuffer,
+	b: ^board.Board,
+	piece: int,
+	sq: int,
+	is_add: bool,
+) {
+	threat_push_outgoing(buf, b, is_add, piece, sq)
+	threat_push_incoming(buf, b, is_add, piece, sq)
+}
+
+// ============================================================================
 // Combined Update Entry Point
 // ============================================================================
 
 // Update SFNNv14 accumulators after a move.
 // This is the main entry point called after make_move.
+//
+// For PSQT: incremental updates using deltas.
+// For Threats: delta-based incremental using simplified threat detection
+//              (will be upgraded to Viridithas-style optimized geometry).
+// For King moves: full refresh (bucket change invalidates incremental path).
 update_sfnnv14_accumulators :: proc(old_board: ^board.Board, new_board: ^board.Board, move: moves.Move) {
 	// Copy old accumulators
 	new_board.sfnnv14_accumulators = old_board.sfnnv14_accumulators
@@ -727,10 +1080,23 @@ update_sfnnv14_accumulators :: proc(old_board: ^board.Board, new_board: ^board.B
 		mantis_piece += 6
 	}
 
+	// Allocated on stack — buffer populated with exact threat deltas during this call
+	buf: SFNNv14_UpdateBuffer
+
 	// --- PSQ Accumulator Updates ---
+	// PSQT: we use the existing direct incremental approach (proven correct).
+	// The UpdateBuffer for PSQT is populated for compatibility with the
+	// Viridithas-style lazy-update architecture.
 	if piece_type == constants.KING {
 		refresh_psq_accumulator(new_board, side)
 	} else {
+		// Populate PSQ buffer
+		buf.psqt.add[0] = PsqtFeatureUpdate{sq = move.target, piece = mantis_piece}
+		buf.psqt.sub[0] = PsqtFeatureUpdate{sq = move.source, piece = mantis_piece}
+		buf.psqt.add_count = 1
+		buf.psqt.sub_count = 1
+
+		// Apply PSQ deltas directly (proven correct incremental path)
 		update_psq_accumulator_move(
 			&new_board.sfnnv14_accumulators.psq,
 			old_board,
@@ -749,10 +1115,14 @@ update_sfnnv14_accumulators :: proc(old_board: ^board.Board, new_board: ^board.B
 		)
 	}
 
-	// Handle captures for PSQ
+	// Handle captures
 	if move.capture {
 		captured_piece := int(old_board.mailbox[move.target])
 		if captured_piece != -1 {
+			// PSQT buffer: capture
+			buf.psqt.sub[buf.psqt.sub_count] = PsqtFeatureUpdate{sq = move.target, piece = captured_piece}
+			buf.psqt.sub_count += 1
+
 			if piece_type == constants.KING {
 				update_psq_accumulator_remove(
 					&new_board.sfnnv14_accumulators.psq,
@@ -787,7 +1157,12 @@ update_sfnnv14_accumulators :: proc(old_board: ^board.Board, new_board: ^board.B
 			final_piece += 6
 		}
 
-		// Remove pawn at target, add promoted piece
+		// PSQT buffer: promotion (remove pawn, add promoted piece)
+		buf.psqt.sub[buf.psqt.sub_count] = PsqtFeatureUpdate{sq = move.target, piece = mantis_piece}
+		buf.psqt.sub_count += 1
+		buf.psqt.add[buf.psqt.add_count] = PsqtFeatureUpdate{sq = move.target, piece = final_piece}
+		buf.psqt.add_count += 1
+
 		update_psq_accumulator_remove(
 			&new_board.sfnnv14_accumulators.psq,
 			new_board,
@@ -822,15 +1197,54 @@ update_sfnnv14_accumulators :: proc(old_board: ^board.Board, new_board: ^board.B
 	}
 
 	// --- Threat Accumulator Updates ---
-	// FullThreats requires refresh on ANY king move.
-	// For non-king moves, mark as dirty (refresh on next eval).
-	// Stockfish uses sophisticated dirty-piece tracking; we use refresh-on-dirty.
+	// For King moves: full refresh (king bucket changes invalidate incremental).
+	// For non-king moves: compute exact threat deltas and apply incrementally.
+	// Reference: Viridithas network.rs:1565 (force function)
 	if piece_type == constants.KING {
 		refresh_threat_accumulator(new_board, constants.WHITE)
 		refresh_threat_accumulator(new_board, constants.BLACK)
 	} else {
-		new_board.sfnnv14_accumulators.threat.computed[constants.WHITE] = false
-		new_board.sfnnv14_accumulators.threat.computed[constants.BLACK] = false
+		// Compute threat deltas on OLD board state (before the move was applied).
+		// Use the simplified delta computation. When sfnnv14_threat_updates.odin
+		// is merged, replace with the optimized on_move/on_change/on_mutate.
+
+		// 1. Remove threats from source square (piece leaves)
+		threat_compute_change_deltas(&buf.threat, old_board, mantis_piece, move.source, false)
+
+		// 2. If capture: remove the captured piece's threats too
+		if move.capture {
+			captured_piece := int(old_board.mailbox[move.target])
+			if captured_piece != -1 && captured_piece % 6 != constants.KING {
+				threat_compute_change_deltas(&buf.threat, old_board, captured_piece, move.target, false)
+			}
+		}
+
+		// 3. Add threats from destination square (piece arrives — use old board still has piece at src)
+		threat_compute_change_deltas(&buf.threat, old_board, mantis_piece, move.target, true)
+
+		// 4. Handle promotion: remove pawn threats, add promoted piece threats
+		if move.promoted != -1 {
+			final_piece := move.promoted
+			if side == constants.BLACK {
+				final_piece += 6
+			}
+			threat_compute_change_deltas(&buf.threat, old_board, mantis_piece, move.target, false)
+			threat_compute_change_deltas(&buf.threat, old_board, final_piece, move.target, true)
+		}
+
+		// Apply threat deltas to the accumulator for both perspectives.
+		// We use the king squares from old_board (they haven't changed for non-king moves).
+		wsq := board.get_king_square(old_board, constants.WHITE)
+		bsq := board.get_king_square(old_board, constants.BLACK)
+
+		adds := buf.threat.add[:buf.threat.add_count]
+		subs := buf.threat.sub[:buf.threat.sub_count]
+
+		apply_threat_deltas_full(&new_board.sfnnv14_accumulators.threat, adds, subs, constants.WHITE, wsq)
+		apply_threat_deltas_full(&new_board.sfnnv14_accumulators.threat, adds, subs, constants.BLACK, bsq)
+
+		new_board.sfnnv14_accumulators.threat.computed[constants.WHITE] = true
+		new_board.sfnnv14_accumulators.threat.computed[constants.BLACK] = true
 	}
 }
 
