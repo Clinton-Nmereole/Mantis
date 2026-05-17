@@ -129,12 +129,28 @@ init_nnue :: proc(filename: string) -> bool {
 	hash := read_i32(data, &offset)
 	desc_len := read_i32(data, &offset)
 
+	// Reject unsupported formats early
+	if version != i32(0x7AF32F20) {
+		return false
+	}
+
 	if desc_len > 0 {
 		offset += int(desc_len)
 	}
 
-	// Helper to read layer header
+	// Helper to read layer header.
+	// Some layers have: hash(4) + "COMPRESSED_LEB128"(17)
+	// Some layers have: "COMPRESSED_LEB128"(17) only (no hash)
 	read_layer_header :: proc(data: []byte, offset: ^int) -> (i32, string) {
+		// First, check if current position has "COMPRESSED_LEB128" (no hash)
+		if offset^ + 17 <= len(data) {
+			type_str := string(data[offset^:offset^ + 17])
+			if type_str == "COMPRESSED_LEB128" {
+				offset^ += 17
+				return 0, type_str
+			}
+		}
+		// Otherwise, read hash first, then type
 		l_hash := read_i32(data, offset)
 		l_type := ""
 		if offset^ + 17 <= len(data) {
@@ -157,80 +173,66 @@ init_nnue :: proc(filename: string) -> bool {
 
 	// 1. Feature Transformer Biases
 	_, l_type := read_layer_header(data, &offset)
-	if l_type == "COMPRESSED_LEB128" {
-		// Read HIDDEN_SIZE biases (1024 for standard networks)
-		for i in 0 ..< HIDDEN_SIZE {
-			current_network.feature_biases[i] = i16(read_sleb128(data, &offset))
-		}
-	} else {
-		return false
+	if l_type != "COMPRESSED_LEB128" { return false }
+	bc1 := read_i32(data, &offset)
+	end1 := offset + int(bc1) - 4 // byte_count includes itself
+	for i in 0 ..< HIDDEN_SIZE {
+		current_network.feature_biases[i] = i16(read_sleb128(data, &offset))
 	}
+	if offset != end1 { offset = end1 } // force-sync
 
 	// 2. Feature Transformer Weights
 	_, l_type = read_layer_header(data, &offset)
-	if l_type == "COMPRESSED_LEB128" {
-		// Read INPUT_SIZE * HIDDEN_SIZE weights
-		for i in 0 ..< INPUT_SIZE * HIDDEN_SIZE {
-			current_network.feature_weights[i] = i16(read_sleb128(data, &offset))
-		}
-	} else {
-		return false
+	if l_type != "COMPRESSED_LEB128" { return false }
+	bc2 := read_i32(data, &offset)
+	end2 := offset + int(bc2) - 4 // byte_count includes itself
+	for i in 0 ..< INPUT_SIZE * HIDDEN_SIZE {
+		current_network.feature_weights[i] = i16(read_sleb128(data, &offset))
+	}
+	if offset != end2 { offset = end2 } // force-sync
+
+	// 3. Combined remaining layers (single LEB128 block)
+	_, l_type = read_layer_header(data, &offset)
+	if l_type != "COMPRESSED_LEB128" { return false }
+	bc3 := read_i32(data, &offset)
+	end3 := offset + int(bc3) - 4 // byte_count includes itself
+
+	// Layer 1 Biases [32]
+	for i in 0 ..< 32 {
+		current_network.l1_biases[i] = read_sleb128(data, &offset)
 	}
 
-	// 3. Layer 1 Biases
-	_, l_type = read_layer_header(data, &offset)
-	if l_type == "COMPRESSED_LEB128" {
-		for i in 0 ..< 32 {
-			current_network.l1_biases[i] = read_sleb128(data, &offset)
-		}
-	} else {
-		return false
-	}
-
-	// 4. Layer 1 Weights
-	_, l_type = read_layer_header(data, &offset)
-	if l_type == "COMPRESSED_LEB128" {
-		for r in 0 ..< 32 {
-			for c in 0 ..< HIDDEN_SIZE {
-				val := i8(read_sleb128(data, &offset))
-				current_network.l1_weights[c * 32 + r] = val
-				current_network.l1_weights_t[r * HIDDEN_SIZE + c] = val
-			}
+	// Layer 1 Weights [HIDDEN_SIZE * 32]
+	for r in 0 ..< 32 {
+		for c in 0 ..< HIDDEN_SIZE {
+			val := i8(read_sleb128(data, &offset))
+			current_network.l1_weights[c * 32 + r] = val
+			current_network.l1_weights_t[r * HIDDEN_SIZE + c] = val
 		}
 	}
 
-	// 5. Layer 2 Biases
-	_, l_type = read_layer_header(data, &offset)
-	if l_type == "COMPRESSED_LEB128" {
-		for i in 0 ..< 32 {
-			current_network.l2_biases[i] = read_sleb128(data, &offset)
+	// Layer 2 Biases [32]
+	for i in 0 ..< 32 {
+		current_network.l2_biases[i] = read_sleb128(data, &offset)
+	}
+
+	// Layer 2 Weights [32 * 32]
+	for r in 0 ..< 32 {
+		for c in 0 ..< 32 {
+			val := i8(read_sleb128(data, &offset))
+			current_network.l2_weights[c * 32 + r] = val
 		}
 	}
 
-	// 6. Layer 2 Weights
-	_, l_type = read_layer_header(data, &offset)
-	if l_type == "COMPRESSED_LEB128" {
-		for r in 0 ..< 32 {
-			for c in 0 ..< 32 {
-				val := i8(read_sleb128(data, &offset))
-				current_network.l2_weights[c * 32 + r] = val
-			}
-		}
+	// Output Bias [1]
+	current_network.output_bias = read_sleb128(data, &offset)
+
+	// Output Weights [32]
+	for i in 0 ..< 32 {
+		current_network.output_weights[i] = i8(read_sleb128(data, &offset))
 	}
 
-	// 7. Output Bias
-	_, l_type = read_layer_header(data, &offset)
-	if l_type == "COMPRESSED_LEB128" {
-		current_network.output_bias = read_sleb128(data, &offset)
-	}
-
-	// 8. Output Weights
-	_, l_type = read_layer_header(data, &offset)
-	if l_type == "COMPRESSED_LEB128" {
-		for i in 0 ..< 32 {
-			current_network.output_weights[i] = i8(read_sleb128(data, &offset))
-		}
-	}
+	if offset != end3 { offset = end3 } // force-sync
 
 	is_initialized = true
 	return true
@@ -323,18 +325,15 @@ compute_accumulator :: proc(b: ^board.Board, side: int) -> board.Accumulator {
 
 	king_sq := board.get_king_square(b, side)
 
-	// Add active features using SIMD vector add
+	// Add active features
 	for sq in 0 ..< 64 {
 		piece := get_piece_at(b, sq)
 		if piece != -1 && piece != constants.KING && piece != (constants.KING + 6) {
 			feature_idx := get_feature_index(king_sq, sq, piece, side)
 			weights := current_network.feature_weights[feature_idx * HIDDEN_SIZE : (feature_idx + 1) * HIDDEN_SIZE]
 
-			for i := 0; i < HIDDEN_SIZE; i += 16 {
-				acc_vec := (^#simd[16]i16)(&acc.values[i])^
-				w_vec   := (^#simd[16]i16)(&weights[i])^
-				acc_vec  = intrinsics.simd_add(acc_vec, w_vec)
-				(^#simd[16]i16)(&acc.values[i])^ = acc_vec
+			for i := 0; i < HIDDEN_SIZE; i += 1 {
+				acc.values[i] += weights[i]
 			}
 		}
 	}
@@ -476,11 +475,8 @@ update_single_accumulator :: proc(
 		perspective,
 	)
 	weights_rem := current_network.feature_weights[idx_rem * HIDDEN_SIZE : (idx_rem + 1) * HIDDEN_SIZE]
-	for i := 0; i < HIDDEN_SIZE; i += 16 {
-		acc_vec := (^#simd[16]i16)(&acc.values[i])^
-		w_vec   := (^#simd[16]i16)(&weights_rem[i])^
-		acc_vec  = intrinsics.simd_sub(acc_vec, w_vec)
-		(^#simd[16]i16)(&acc.values[i])^ = acc_vec
+	for i := 0; i < HIDDEN_SIZE; i += 1 {
+		acc.values[i] -= weights_rem[i]
 	}
 
 	// Add to Target (Handle Promotion)
@@ -499,11 +495,8 @@ update_single_accumulator :: proc(
 		perspective,
 	)
 	weights_add := current_network.feature_weights[idx_add * HIDDEN_SIZE : (idx_add + 1) * HIDDEN_SIZE]
-	for i := 0; i < HIDDEN_SIZE; i += 16 {
-		acc_vec := (^#simd[16]i16)(&acc.values[i])^
-		w_vec   := (^#simd[16]i16)(&weights_add[i])^
-		acc_vec  = intrinsics.simd_add(acc_vec, w_vec)
-		(^#simd[16]i16)(&acc.values[i])^ = acc_vec
+	for i := 0; i < HIDDEN_SIZE; i += 1 {
+		acc.values[i] += weights_add[i]
 	}
 }
 
@@ -517,10 +510,7 @@ remove_feature :: proc(
 ) {
 	idx := get_feature_index(board.get_king_square(b, perspective), sq, piece, perspective)
 	weights := current_network.feature_weights[idx * HIDDEN_SIZE : (idx + 1) * HIDDEN_SIZE]
-	for i := 0; i < HIDDEN_SIZE; i += 16 {
-		acc_vec := (^#simd[16]i16)(&acc.values[i])^
-		w_vec   := (^#simd[16]i16)(&weights[i])^
-		acc_vec  = intrinsics.simd_sub(acc_vec, w_vec)
-		(^#simd[16]i16)(&acc.values[i])^ = acc_vec
+	for i := 0; i < HIDDEN_SIZE; i += 1 {
+		acc.values[i] -= weights[i]
 	}
 }
