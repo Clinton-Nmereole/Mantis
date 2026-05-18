@@ -1289,4 +1289,5 @@ init_sfnnv14_features :: proc() {
 	init_threat_pseudo_attacks()
 	init_threat_pawn_tables()
 	init_threat_luts()
+	init_threat_geometry()
 }

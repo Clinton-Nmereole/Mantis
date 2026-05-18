@@ -615,28 +615,28 @@ update_threat_accumulators_incremental :: proc(
 		if move.promoted != -1 {
 			// Promotion: piece type changes at target square
 			// Remove pawn threats from source
-			on_change_sub(old_board, perspective, moved_piece, move.source, &buffer)
+			fast_on_change_sub(old_board, perspective, moved_piece, move.source, &buffer)
 			// Remove captured piece threats at target (if capture)
 			if captured_piece != -1 {
-				on_change_sub(new_board, perspective, captured_piece, move.target, &buffer)
+				fast_on_change_sub(new_board, perspective, captured_piece, move.target, &buffer)
 			}
 			// Add promoted piece threats at target
-			on_change_add(new_board, perspective, final_piece, move.target, &buffer)
+			fast_on_change_add(new_board, perspective, final_piece, move.target, &buffer)
 		} else if move.capture && captured_piece != -1 {
 			// Normal capture: move piece, capture at target
-			on_move(old_board, perspective, moved_piece, move.source, final_piece, move.target, &buffer)
+			fast_on_move(old_board, perspective, moved_piece, move.source, final_piece, move.target, &buffer)
 			// Also remove captured piece's threats
-			on_change_sub(new_board, perspective, captured_piece, move.target, &buffer)
+			fast_on_change_sub(new_board, perspective, captured_piece, move.target, &buffer)
 		} else {
 			// Quiet move
-			on_move(old_board, perspective, moved_piece, move.source, final_piece, move.target, &buffer)
+			fast_on_move(old_board, perspective, moved_piece, move.source, final_piece, move.target, &buffer)
 		}
 
 		// Handle en passant capture (captured pawn is not on target square)
 		if move.en_passant {
 			ep_captured_sq := move.target + (side == constants.WHITE ? -8 : 8)
 			ep_captured_piece := side == constants.WHITE ? constants.PAWN + 6 : constants.PAWN
-			on_change_sub(new_board, perspective, ep_captured_piece, ep_captured_sq, &buffer)
+			fast_on_change_sub(new_board, perspective, ep_captured_piece, ep_captured_sq, &buffer)
 		}
 
 		// Apply the computed delta to the accumulator
