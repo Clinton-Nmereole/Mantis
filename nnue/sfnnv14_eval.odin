@@ -239,6 +239,20 @@ init_sfnnv14 :: proc(filename: string) -> bool {
 	}
 	fmt.println("  Layer Stacks OK")
 
+	// ALSO populate sfnnv14_transformer (used by refresh/evaluation in sfnnv14_features.odin)
+	sfnnv14_transformer.biases = network.transformer_biases
+	sfnnv14_transformer.weights = network.transformer_weights
+	sfnnv14_transformer.threat_weights = network.transformer_threat_wts
+	// PSQT weights are combined: [threat_psqt | psq_psqt]
+	// threat_psqt: THREAT_DIMS * 8 i32
+	// psq_psqt: PSQ_DIMS * 8 i32
+	tpsqt2 := file_threat_dims * PSQT_BUCKETS
+	ppsqt2 := PSQ_DIMS * PSQT_BUCKETS
+	if len(network.transformer_psqt) >= tpsqt2 + ppsqt2 {
+		sfnnv14_transformer.threat_psqt_weights = network.transformer_psqt[:tpsqt2]
+		sfnnv14_transformer.psqt_weights = network.transformer_psqt[tpsqt2:tpsqt2+ppsqt2]
+	}
+
 	fmt.printf("DONE: offset=%d/%d\n", offset, len(data))
 	initialized = true
 	return true
