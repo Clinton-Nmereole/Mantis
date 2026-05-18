@@ -1,6 +1,7 @@
 package uci
 
 import "../board"
+import "../book"
 import "../constants"
 import "../moves"
 import "../nnue"
@@ -31,6 +32,8 @@ move_overhead: int = 10 // Default 10ms for network/GUI lag compensation
 multi_pv: int = 1 // Number of principal variations to display (1-500)
 ponder_enabled: bool = false // Whether pondering is allowed
 thread_count: int = 1 // Number of search threads (1-512)
+own_book: bool = false // Whether to use internal opening book
+book_file: string = "2moves_v1.epd" // Path to opening book EPD file
 
 // Ponder State - manages background pondering
 Ponder_State :: struct {
@@ -92,6 +95,8 @@ uci_loop :: proc() {
 			fmt.println("id author")
 			fmt.println("option name Hash type spin default 64 min 1 max 1024")
 			fmt.println("option name EvalFile type string default nn-c0ae49f08b40.nnue")
+			fmt.println("option name OwnBook type check default false")
+			fmt.println("option name BookFile type string default 2moves_v1.epd")
 			fmt.println("option name Move Overhead type spin default 10 min 0 max 5000")
 			fmt.println("option name MultiPV type spin default 1 min 1 max 500")
 			fmt.println("option name Ponder type check default false")
@@ -165,8 +170,21 @@ parse_position :: proc(command: string, b: ^board.Board) {
 	if len(parts) < 2 {return}
 
 	if parts[1] == "startpos" {
-		b^ = board.parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-		move_start_index = 2
+		// If opening book is enabled, pick a random book position
+		if own_book && book.has_book() && len(parts) == 2 {
+			// Only use book for pure "position startpos" (no moves specified)
+			fen := book.get_random_book_position()
+			if fen != "" {
+				b^ = board.parse_fen(fen)
+				move_start_index = len(parts) // No moves to parse
+			} else {
+				b^ = board.parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+				move_start_index = 2
+			}
+		} else {
+			b^ = board.parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+			move_start_index = 2
+		}
 	} else if parts[1] == "fen" {
 		// Reconstruct FEN string (it might contain spaces)
 		// "position fen r... ... ... ... moves ..."
@@ -374,6 +392,26 @@ parse_setoption :: proc(command: string) {
 				ponder_enabled = true
 			} else if parts[4] == "false" {
 				ponder_enabled = false
+			}
+		} else if name == "OwnBook" {
+			if parts[4] == "true" {
+				own_book = true
+				// Load book if not already loaded
+				if !book.has_book() {
+					book.seed_book_random()
+					book.init_opening_book(book_file)
+				}
+			} else if parts[4] == "false" {
+				own_book = false
+			}
+		} else if name == "BookFile" {
+			// Reconstruct path (may contain spaces)
+			path_parts := parts[4:]
+			path := strings.join(path_parts, " ")
+			book_file = path
+			if own_book {
+				book.seed_book_random()
+				book.init_opening_book(book_file)
 			}
 		} else if name == "Threads" {
 			val, ok := strconv.parse_int(parts[4])
