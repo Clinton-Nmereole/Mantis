@@ -129,6 +129,7 @@ probe_tt :: proc(key: u64, alpha: int, beta: int, depth: int, ply: int) -> (int,
 
 // Validate that a TT move has sensible coordinates
 is_valid_tt_move :: proc(move: moves.Move) -> bool {
+	if moves.is_empty_move(move) {return false}
 	if move.source < 0 || move.source > 63 {return false}
 	if move.target < 0 || move.target > 63 {return false}
 	if move.piece < 0 || move.piece > 11 {return false}
@@ -186,7 +187,7 @@ store_tt :: proc(key: u64, move: moves.Move, score: int, depth: int, flag: u8, p
 			// move is empty and the old one isn't — this is common when we
 			// re-store a position after a fail-high with no best move yet.
 			best_move := move
-			if best_move.source == 0 && entry.move.source != 0 {
+			if moves.is_empty_move(best_move) && !moves.is_empty_move(entry.move) {
 				best_move = entry.move
 			}
 

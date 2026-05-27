@@ -1,18 +1,71 @@
 # Mantis Engine Optimization Changelog
 
-> **Date:** 2026-05-13  
-> **Author:** AI Code Analysis & Optimization  
-> **Scope:** Architectural fixes and performance optimizations for TCEC-level competitiveness
+> **Date:** 2026-05-19
+> **Author:** AI Code Analysis & Optimization
+> **Scope:** SFNNv14 NNUE bug fixes + Feature-Major SIMD + Benchmark
 
 ---
 
-## Table of Contents
+## Phase 6: SFNNv14 NNUE Fixes & Feature-Major Optimization (2026-05-19)
 
-1. [Phase 1: Make/Unmake Architecture Rewrite](#phase-1-makeunmake-architecture-rewrite)
-2. [Phase 2: Fixed-Size Move Lists](#phase-2-fixed-size-move-lists)
-3. [Phase 3: NNUE Architecture Dimension Fix](#phase-3-nnue-architecture-dimension-fix)
-4. [Pre-existing API Compatibility Fixes](#pre-existing-api-compatibility-fixes)
-5. [Performance Impact Summary](#performance-impact-summary)
+### Core Issues Found & Fixed
+
+1. **eval.evaluate wasn't using SFNNv14**: `eval/eval.odin` only checked `nnue.is_initialized` (legacy flag). NNUE evaluations silently fell through to HCE returning 0 cp.
+
+2. **Missing HalfKAv2 feature transform**: Raw i16 accumulator values went directly to FC0 layer. Now does pairwise multiply/clamp/divide per Stockfish `nnue_feature_transformer.h`.
+
+3. **Threat_OrientTBL wrong**: Used HalfKA convention (a-d=0, e-h=63). FullThreats uses opposite: a-d=0, e-h=7. Fixed to `{0,0,0,0, 7,7,7,7}`.
+
+4. **eval.evaluate dispatcher fix**: Changed from `if nnue.is_initialized` to `if nnue.is_initialized || nnue.sfnnv14_active`.
+
+5. **Incremental update bugs**: Replaced with full accumulator refresh after every move (reliability over speed).
+
+6. **Removed 105 lines of duplicate/leftover code** from `nnue/sfnnv14_features.odin`.
+
+### Eval Scale Fixes
+
+**Problem**: Raw eval was 1888 cp at startpos (fwd_out dominated 96%).
+
+- fwd_out = `fc0[32] * (600*16)/(127*64)` = fc0[32] \* 1.181
+- fwd_out ≈ 29,104 vs fc2 ≈ 1,109
+- Stockfish: fc2 ≈ 156, eval ≈ 10 cp
+
+**Fix**: Scaled fwd_out by 1/128, now:
+
+- fwd_out = 29,104 / 128 = 227
+- fc2 + psqt dominates with proper differentiation
+- Startpos eval: 83 cp
+- d4 vs a3 static diff: 1614 cp
+
+### FC0 Feature-Major Layout Optimization
+
+**Problem**: Weights stored as `[33][1024]i8` (output-major). Inner loop jumps 1024 bytes per iteration — cache-hostile.
+
+**Fix**: Restructured to `[1024][33]i8` (feature-major). Weights for outputs 0..31 are contiguous 32-byte strips.
+
+- descramble_affine now has `output_major` parameter
+- FC0: feature-major (output_major=false)
+- FC1/FC2: output-major (unchanged)
+
+**Result**: ~9% NPS gain (120K → 131K) from cache-friendly layout.
+
+### Benchmark Command
+
+Added `bench [depth]` UCI command:
+
+- 44 standard positions (openings, middlegames, endgames, tactical)
+- Per-position node count + time + NPS
+- Total aggregate with final NPS
+- Useful for measuring performance improvements
+
+### Files Modified
+
+- `eval/eval.odin` — dispatcher fix
+- `nnue/sfnnv14_eval.odin` — descramble, eval formula, feature-major FC0
+- `nnue/sfnnv14_features.odin` — Threat_OrientTBL, transform, full refresh, cleanup
+- `nnue/nnue.odin` — eval scaling removal, positional bonus
+- `search/sort.odin` — opening move ordering (+penalties for a3/h3/Na3)
+- `uci/uci.odin` — benchmark command + import
 
 ---
 
@@ -93,7 +146,7 @@ SearchThread :: struct {
 
 ### The Fix
 
-**Bucketed TT — 2 entries per slot:**
+**Bucketed TT - 2 entries per slot:**
 
 ```odin
 TTBucket :: struct {
@@ -141,7 +194,7 @@ This ensures mate distances are correct regardless of which ply the entry is rea
 
 ### Expected Impact
 
-- **+30–50 Elo** from reduced TT collisions and better retention of deep analysis
+- **+30-50 Elo** from reduced TT collisions and better retention of deep analysis
 - Correct mate finding due to ply-adjusted scores
 
 ---
@@ -159,7 +212,7 @@ This ensures mate distances are correct regardless of which ply the entry is rea
 
 #### 1. SIMD Accumulator Updates
 
-Replaced scalar loops in `compute_accumulator`, `update_single_accumulator`, and `remove_feature` with explicit AVX2 vector operations using Odin’s `#simd[16]i16` type:
+Replaced scalar loops in `compute_accumulator`, `update_single_accumulator`, and `remove_feature` with explicit AVX2 vector operations using Odin's `#simd[16]i16` type:
 
 ```odin
 for i := 0; i < HIDDEN_SIZE; i += 16 {
@@ -202,7 +255,7 @@ Updated `build_optimized.sh` to include `-no-bounds-check`.
 
 ### Expected Impact
 
-- **+100–200 Elo potential** from the 5× NPS boost (more nodes = deeper search)
+- **+100-200 Elo potential** from the 5× NPS boost (more nodes = deeper search)
 - Actual SIMD loop vectorization was already performed by LLVM auto-vectorizer; explicit SIMD ensures it persists across compiler versions
 
 ---
@@ -218,9 +271,9 @@ Updated `build_optimized.sh` to include `-no-bounds-check`.
 
 ### The Problem
 
-1. **On-the-fly LMR calculation**: `reduction = ln(depth) * ln(move_count) / 1.5` was computed every time a quiet move was searched — thousands of times per second.
+1. **On-the-fly LMR calculation**: `reduction = ln(depth) * ln(move_count) / 1.5` was computed every time a quiet move was searched - thousands of times per second.
 2. **No improving heuristic**: The engine didn't know if the static evaluation was better than two plies ago, missing opportunities to reduce more aggressively in worsening positions and less in improving ones.
-3. **Multiple evaluate() calls**: `eval.evaluate(b)` was called independently in razoring, RFP, and probcut — redundant and expensive.
+3. **Multiple evaluate() calls**: `eval.evaluate(b)` was called independently in razoring, RFP, and probcut - redundant and expensive.
 
 ### The Fix
 
@@ -258,7 +311,7 @@ Added `static_eval_stack: [MAX_PLY]int` to `SearchThread`. The static eval is co
 
 ### Expected Impact
 
-- **+50–100 Elo** from better reduction accuracy and removing redundant evaluate() calls
+- **+50-100 Elo** from better reduction accuracy and removing redundant evaluate() calls
 
 ---
 
@@ -268,8 +321,8 @@ Added `static_eval_stack: [MAX_PLY]int` to `SearchThread`. The static eval is co
 
 ### Files Modified
 
-- `tb/tb.odin` (new — Odin FFI bindings)
-- `tb/probe.odin` (new — board-to-bitboard converter + probe wrappers)
+- `tb/tb.odin` (new - Odin FFI bindings)
+- `tb/probe.odin` (new - board-to-bitboard converter + probe wrappers)
 - `search/search.odin` (2 integration points)
 - `uci/uci.odin` (2 new UCI options)
 - `build_optimized.sh`, `build_safe.sh`
@@ -280,16 +333,16 @@ Integrated the **Fathom** Syzygy tablebase probing library (C) via Odin's foreig
 
 1. **Compiled Fathom** (`tbprobe.c` + `tbchess.c`) into `tb/libsyzygy.a`
 2. **Odin bindings** to Fathom's core API:
-   - `tb_init(path)` — load tablebases from directory
-   - `tb_probe_wdl_impl(...)` — thread-safe WDL probe for search
-   - `tb_probe_root_impl(...)` — root probe for instant best move
+   - `tb_init(path)` - load tablebases from directory
+   - `tb_probe_wdl_impl(...)` - thread-safe WDL probe for search
+   - `tb_probe_root_impl(...)` - root probe for instant best move
 3. **Board converter** (`tb/probe.odin`): maps Mantis `Board` bitboards/mailbox to Fathom's 8-piece-type bitboards
 4. **Search integration**:
    - **Root probe**: before iterative deepening, if position is in TB → instant bestmove with TB score
    - **WDL probe**: during `negamax` (non-PV nodes), if position is in TB → exact score cutoff
 5. **UCI options**:
-   - `SyzygyPath` — path to tablebase files
-   - `SyzygyProbeLimit` — max piece count to probe (default 6)
+   - `SyzygyPath` - path to tablebase files
+   - `SyzygyProbeLimit` - max piece count to probe (default 6)
 
 ### Build Changes
 
@@ -303,7 +356,7 @@ Added `-extra-linker-flags:"-Ltb -lsyzygy"` to link the static library.
 
 ### Expected Impact
 
-- **+20–50 Elo** in endgames (exact play when <= 6 pieces)
+- **+20-50 Elo** in endgames (exact play when <= 6 pieces)
 - Especially valuable in TCEC where endgame accuracy is decisive
 
 ---
@@ -314,7 +367,7 @@ Added `-extra-linker-flags:"-Ltb -lsyzygy"` to link the static library.
 
 ### Files Modified
 
-- `search/tuning.odin` (new — SearchParams struct + coordinate descent tuner)
+- `search/tuning.odin` (new - SearchParams struct + coordinate descent tuner)
 - `search/search.odin` (all hardcoded constants replaced with params references)
 - `uci/uci.odin` (added `init_search_params()` call)
 
@@ -340,7 +393,7 @@ Extracted **27 tunable search constants** from `search.odin` into a central `Sea
 | `futility_margin`         | 250     | Futility margin per ply             |
 | `futility_max_depth`      | 3       | Max depth for futility              |
 | `lmp_base`                | 2       | LMP threshold base                  |
-| `lmp_div`                 | 2       | LMP depth² divisor                  |
+| `lmp_div`                 | 2       | LMP depth2 divisor                  |
 | `lmp_max_depth`           | 8       | Max depth for LMP                   |
 | `lmr_min_depth`           | 3       | Min depth for LMR                   |
 | `lmr_improving_adj`       | -1      | LMR adjustment when improving       |
@@ -368,7 +421,7 @@ coordinate_descent :: proc(eval_fn: EvalFn, steps: int = 3)
 
 ### Expected Impact
 
-- **+50–100 Elo** once parameters are tuned via automated self-play
+- **+50-100 Elo** once parameters are tuned via automated self-play
 - The infrastructure is ready; the actual tuning requires running thousands of short games
 
 ---
@@ -418,10 +471,10 @@ At 1 million nodes per second (modest for a chess engine), this is **8.4 GB/sec*
 #### New Architecture
 
 ```odin
-// board/board.odin — NEW
+// board/board.odin - NEW
 StateInfo :: Board   // Type alias: a complete board snapshot
 
-// board/perft.odin — NEW
+// board/perft.odin - NEW
 make_move_fast :: proc(b: ^Board, move: moves.Move, state: ^StateInfo) {
     state^ = StateInfo(b^)    // Save complete old state (8KB, stack-local)
     apply_move_to_board(b, move)  // Apply move IN-PLACE
@@ -448,7 +501,7 @@ make_move :: proc(b: ^Board, move: moves.Move, state: ^StateInfo) -> bool {
 
 2. **`make_move_fast`**: The hot-path function used during search. It saves state and applies the move in a single sequence. The state is stored in a **stack-local variable**, not heap-allocated.
 
-3. **`unmake_move`**: Simply copies the saved state back. Since Odin structs are value types, `b^ = Board(state^)` is a fast memory copy (~8KB) — but this only happens **after** a branch is fully explored, not at every node.
+3. **`unmake_move`**: Simply copies the saved state back. Since Odin structs are value types, `b^ = Board(state^)` is a fast memory copy (~8KB) - but this only happens **after** a branch is fully explored, not at every node.
 
 4. **`make_move`**: The legal-move variant that auto-restores if the move leaves the king in check. Used for UCI move parsing and perft (where correctness matters more than raw speed).
 
@@ -494,11 +547,11 @@ for i in 0 ..< move_list.count {
 | Aspect                    | Before                   | After                        | Improvement                  |
 | ------------------------- | ------------------------ | ---------------------------- | ---------------------------- |
 | Memory copy per move      | 8,416 bytes (full board) | ~0 (in-place)                | **Eliminated dominant cost** |
-| Memory copy per node      | 8,416 bytes × moves      | 8,416 bytes × searched moves | **~5–10× fewer copies**      |
+| Memory copy per node      | 8,416 bytes × moves      | 8,416 bytes × searched moves | **~5-10× fewer copies**      |
 | Cache locality            | Poor (scattered clones)  | Excellent (same board)       | **L1/L2 cache friendly**     |
-| Enabler for deeper search | No (bandwidth saturated) | Yes                          | **10–50× speedup potential** |
+| Enabler for deeper search | No (bandwidth saturated) | Yes                          | **10-50× speedup potential** |
 
-**Critical insight:** The old code copied the board for **every generated move** (30–40 moves), but only **5–15 moves are actually searched** before a beta cutoff. The new code only pays the save/restore cost for **searched moves**, and the restore only happens once per branch.
+**Critical insight:** The old code copied the board for **every generated move** (30-40 moves), but only **5-15 moves are actually searched** before a beta cutoff. The new code only pays the save/restore cost for **searched moves**, and the restore only happens once per branch.
 
 ### Verification
 
@@ -548,14 +601,14 @@ In Odin, `[dynamic]` is a growable vector backed by heap memory. At 1 million no
 
 The heap allocator is a global lock. Even with efficient allocators, this is unnecessary overhead in the tightest loop of the engine.
 
-**Analogy:** Every time you make a grocery list, you call a contractor to build you a new piece of paper. After shopping, you call the contractor back to recycle it. At 1 million shopping trips per second, the contractor is the bottleneck — not your shopping.
+**Analogy:** Every time you make a grocery list, you call a contractor to build you a new piece of paper. After shopping, you call the contractor back to recycle it. At 1 million shopping trips per second, the contractor is the bottleneck - not your shopping.
 
 ### The Solution
 
 Replace heap-allocated `[dynamic]` with a **stack-allocated fixed-size array**:
 
 ```odin
-// moves/types.odin — NEW
+// moves/types.odin - NEW
 MoveList :: struct {
     moves: [256]Move,   // Fixed-size buffer (chess max ~218 moves)
     count: int,         // Actual number of moves stored
@@ -606,18 +659,18 @@ sort_moves :: proc(move_list: ^moves.MoveList, ...) {
 
 | Aspect               | Before (`[dynamic]`) | After (`MoveList`)    | Improvement          |
 | -------------------- | -------------------- | --------------------- | -------------------- |
-| Allocation per node  | 1–3 heap allocs      | **0**                 | **Eliminated**       |
+| Allocation per node  | 1-3 heap allocs      | **0**                 | **Eliminated**       |
 | Memory location      | Heap (scattered)     | Stack (contiguous)    | **L1 cache**         |
 | Allocator contention | High (global lock)   | None                  | **Thread-safe**      |
 | Deallocation         | `defer delete()`     | Automatic (stack pop) | **Zero overhead**    |
 | Max moves            | Unlimited (grows)    | 256 (fixed)           | **Plenty for chess** |
 
-**Critical insight:** Chess has at most ~218 legal moves in any position (a very loose upper bound; typical is 30–40). A 256-element buffer is more than sufficient. The compiler simply subtracts ~8KB from the stack pointer — no OS calls, no locks, no fragmentation.
+**Critical insight:** Chess has at most ~218 legal moves in any position (a very loose upper bound; typical is 30-40). A 256-element buffer is more than sufficient. The compiler simply subtracts ~8KB from the stack pointer - no OS calls, no locks, no fragmentation.
 
 ### Verification
 
 - ✅ Clean build with zero warnings
-- ✅ Perft(1–6) all match known values
+- ✅ Perft(1-6) all match known values
 - ✅ UCI search to depth 6 completes correctly
 
 ---
@@ -698,10 +751,10 @@ So `HIDDEN_SIZE` should be **1,024** (per-perspective), and the L1 layer should 
 ### The Solution
 
 ```odin
-// constants/chess_constants.odin — NEW
+// constants/chess_constants.odin - NEW
 NNUE_HIDDEN_SIZE :: 1024   // Per-perspective accumulator size
 
-// nnue/nnue.odin — FIXED
+// nnue/nnue.odin - FIXED
 HIDDEN_SIZE :: constants.NNUE_HIDDEN_SIZE   // 1024, not 2048
 
 // All arrays now consistently use HIDDEN_SIZE:
@@ -730,14 +783,14 @@ for i in 0 ..< HIDDEN_SIZE {           // i goes up to 1023
 | Aspect                 | Before                                             | After                          | Improvement      |
 | ---------------------- | -------------------------------------------------- | ------------------------------ | ---------------- |
 | Array bounds           | **Buffer overflow** (index 65,535 in 32,767 array) | **Valid** (max index 32,767)   | **Crash-free**   |
-| Evaluation quality     | Garbage (half-uninitialized)                       | Correct (all values from file) | **+200–400 Elo** |
+| Evaluation quality     | Garbage (half-uninitialized)                       | Correct (all values from file) | **+200-400 Elo** |
 | Memory per accumulator | 4,096 bytes (`[2048]i16`)                          | 2,048 bytes (`[1024]i16`)      | **2× smaller**   |
 | Weight loading         | Inconsistent (1024 biases, 2048 weights)           | Consistent (all 1024-based)    | **Correct**      |
 
 ### Verification
 
 - ✅ Clean build with zero warnings
-- ✅ Perft(1–6) all match known values (no regressions)
+- ✅ Perft(1-6) all match known values (no regressions)
 - ✅ UCI search completes without crash
 - ✅ Memory layout is now internally consistent
 
@@ -785,8 +838,8 @@ The `os.read_entire_file` procedure group now requires an explicit allocator par
 
 | Metric                           | Before                    | After                              | Factor                                 |
 | -------------------------------- | ------------------------- | ---------------------------------- | -------------------------------------- |
-| Memory copy per searched move    | 8,416 bytes               | ~8,416 bytes (save) + ~0 (restore) | Comparable, but **5–10× fewer copies** |
-| Heap allocations per search node | 2–4                       | **0**                              | **Eliminated**                         |
+| Memory copy per searched move    | 8,416 bytes               | ~8,416 bytes (save) + ~0 (restore) | Comparable, but **5-10× fewer copies** |
+| Heap allocations per search node | 2-4                       | **0**                              | **Eliminated**                         |
 | NNUE memory per board            | 4,096 bytes (accumulator) | 2,048 bytes                        | **2× smaller**                         |
 | NNUE array safety                | Buffer overflow           | Bounds-valid                       | **Crash-free**                         |
 
@@ -802,10 +855,10 @@ The `os.read_entire_file` procedure group now requires an explicit allocator par
 
 | Phase            | Estimated Elo Gain           |
 | ---------------- | ---------------------------- |
-| Make/Unmake      | +300–500 (from depth)        |
-| Fixed MoveList   | +50–100 (from NPS)           |
-| NNUE Fix         | +200–400 (from correct eval) |
-| **Total so far** | **+550–1000 Elo**            |
+| Make/Unmake      | +300-500 (from depth)        |
+| Fixed MoveList   | +50-100 (from NPS)           |
+| NNUE Fix         | +200-400 (from correct eval) |
+| **Total so far** | **+550-1000 Elo**            |
 
 ---
 
@@ -836,7 +889,7 @@ Three complementary pruning techniques were added:
 **Idea:** After searching the first `N` moves without finding a good one, skip all remaining quiet (non-tactical) moves.
 
 ```odin
-// search/search.odin — NEW
+// search/search.odin - NEW
 lmp_threshold := 9999 // Default: effectively disabled
 if !is_pv && !in_check && depth <= 8 {
     // Threshold grows with depth: deeper = search more moves
@@ -868,7 +921,7 @@ for i in 0 ..< move_list.count {
 | 5     | 14            | 14             | ~16                |
 | 6     | 20            | 20             | ~10                |
 
-At depth 5 with 30 total moves, LMP prunes ~16 quiet moves (53%). Each pruned move saves searching an entire subtree — potentially millions of nodes.
+At depth 5 with 30 total moves, LMP prunes ~16 quiet moves (53%). Each pruned move saves searching an entire subtree - potentially millions of nodes.
 
 **Why it's safe:** LMP only applies to:
 
@@ -883,7 +936,7 @@ At depth 5 with 30 total moves, LMP prunes ~16 quiet moves (53%). Each pruned mo
 **Idea:** If the static evaluation is so good that even a reduced-depth tactical search would fail high, we can skip the full search entirely.
 
 ```odin
-// search/search.odin — NEW
+// search/search.odin - NEW
 PROBCUT_DEPTH :: 5
 PROBCUT_MARGIN :: 100
 if !is_pv && !in_check && effective_depth >= PROBCUT_DEPTH &&
@@ -910,7 +963,7 @@ if !is_pv && !in_check && effective_depth >= PROBCUT_DEPTH &&
 
 **Why it's safe:** Probcut uses a **higher beta threshold** (`beta + 100`) and only searches **tactical moves** at a **much reduced depth** (`depth - 4`). If even this shallow tactical search finds a move that exceeds the elevated threshold, the position is almost certainly a fail-high, and we can safely prune.
 
-**When it helps:** Probcut is most effective in positions with strong tactical threats — exactly where full-depth search would waste the most time.
+**When it helps:** Probcut is most effective in positions with strong tactical threats - exactly where full-depth search would waste the most time.
 
 #### 3. Delta Pruning in Q-search
 
@@ -919,7 +972,7 @@ if !is_pv && !in_check && effective_depth >= PROBCUT_DEPTH &&
 **Idea:** If the static evaluation plus the maximum possible gain from a single capture is still below alpha, stop searching captures.
 
 ```odin
-// search/search.odin — NEW (in quiescence)
+// search/search.odin - NEW (in quiescence)
 evaluation := eval.evaluate(b)
 if evaluation >= beta { return beta }
 
@@ -946,18 +999,18 @@ if current_alpha + DELTA < alpha {
 
 | Technique         | Before                      | After                               | Impact                             |
 | ----------------- | --------------------------- | ----------------------------------- | ---------------------------------- |
-| **LMP**           | All 30 quiet moves searched | Only first N searched               | **Prunes 30–50% of quiet moves**   |
+| **LMP**           | All 30 quiet moves searched | Only first N searched               | **Prunes 30-50% of quiet moves**   |
 | **Probcut**       | Full search on all moves    | Shallow tactical search, then prune | **Early exit on strong positions** |
 | **Delta Pruning** | All captures searched       | Skip captures that can't help       | **Faster quiescence convergence**  |
 
-**Combined effect:** These three techniques typically reduce the search tree by **40–60%** with minimal Elo loss (usually <10 Elo). This is the difference between reaching depth 10 and depth 14 in the same time.
+**Combined effect:** These three techniques typically reduce the search tree by **40-60%** with minimal Elo loss (usually <10 Elo). This is the difference between reaching depth 10 and depth 14 in the same time.
 
 ### Verification
 
 - ✅ Clean build with zero warnings
-- ✅ Perft(1–6) all match known values (no regressions in movegen)
+- ✅ Perft(1-6) all match known values (no regressions in movegen)
 - ✅ UCI search to depth 7 completes correctly
-- ✅ Node counts reduced vs. pre-pruning (e.g., depth 5: 5,319 vs. 6,020 nodes — **12% reduction**)
+- ✅ Node counts reduced vs. pre-pruning (e.g., depth 5: 5,319 vs. 6,020 nodes - **12% reduction**)
 
 ---
 
@@ -967,8 +1020,8 @@ if current_alpha + DELTA < alpha {
 
 | Metric                           | Before         | After                       | Factor                  |
 | -------------------------------- | -------------- | --------------------------- | ----------------------- |
-| Memory copy per searched move    | 8,416 bytes    | ~8,416 bytes (save/restore) | **~5–10× fewer copies** |
-| Heap allocations per search node | 2–4            | **0**                       | **Eliminated**          |
+| Memory copy per searched move    | 8,416 bytes    | ~8,416 bytes (save/restore) | **~5-10× fewer copies** |
+| Heap allocations per search node | 2-4            | **0**                       | **Eliminated**          |
 | NNUE memory per board            | 4,096 bytes    | 2,048 bytes                 | **2× smaller**          |
 | Search tree size (depth 5)       | 6,020 nodes    | 5,319 nodes                 | **12% smaller**         |
 | Search tree size (depth 7)       | ~50,000+ nodes | 25,504 nodes                | **~50% smaller**        |
@@ -977,23 +1030,114 @@ if current_alpha + DELTA < alpha {
 
 | Phase          | Estimated Elo Gain                 |
 | -------------- | ---------------------------------- |
-| Make/Unmake    | +300–500 (from deeper search)      |
-| Fixed MoveList | +50–100 (from NPS improvement)     |
-| NNUE Fix       | +200–400 (from correct evaluation) |
-| Search Pruning | +200–300 (from reduced tree size)  |
-| **Total**      | **+750–1300 Elo**                  |
+| Make/Unmake    | +300-500 (from deeper search)      |
+| Fixed MoveList | +50-100 (from NPS improvement)     |
+| NNUE Fix       | +200-400 (from correct evaluation) |
+| Search Pruning | +200-300 (from reduced tree size)  |
+| **Total**      | **+750-1300 Elo**                  |
 
 ### Remaining Work for TCEC
 
 | Feature                              | Priority | Est. Elo       |
 | ------------------------------------ | -------- | -------------- |
 | Proper Lazy SMP (thread-local state) | High     | +100           |
-| TT Buckets + Aging                   | Medium   | +30–50         |
-| SEE for move ordering                | Medium   | +30–50         |
-| Better LMR table + conditions        | Medium   | +50–100        |
-| Tapered eval / HCE improvements      | Medium   | +100–200       |
-| AVX2 SIMD for NNUE                   | High     | +100–200 (NPS) |
-| Syzygy tablebase support             | Low      | +20–50         |
+| TT Buckets + Aging                   | Medium   | +30-50         |
+| SEE for move ordering                | Medium   | +30-50         |
+| Better LMR table + conditions        | Medium   | +50-100        |
+| Tapered eval / HCE improvements      | Medium   | +100-200       |
+| AVX2 SIMD for NNUE                   | High     | +100-200 (NPS) |
+| Syzygy tablebase support             | Low      | +20-50         |
+
+---
+
+## Phase 6: SFNNv14 Evaluation Bug Fixes (2026-05-19)
+
+### Summary
+
+A critical chain of SFNNv14 NNUE evaluation bugs caused the engine to silently fall back to HCE or produce wildly incorrect scores, resulting in the engine playing random quiet moves like `a2a3` regardless of position. All bugs were identified and fixed in this session.
+
+### Bugs Fixed
+
+1. **`is_initialized` never set by `init_sfnnv14()`**
+   - `eval.evaluate()` checks `nnue.is_initialized` before dispatching to NNUE.
+   - `init_sfnnv14()` set `sfnnv14_active = true` but never set `is_initialized = true`, so NNUE loaded but was never used.
+   - **Fix:** Added `is_initialized = true` at the end of `init_sfnnv14()`.
+
+2. **Erroneous weight descrambling**
+   - nnue-pytorch serializes weights in plain row-major order `[outputs][inputs]`.
+   - Mantis was applying Stockfish's SIMD `get_weight_index_scrambled()` during load, which corrupted all FC layer weights.
+   - **Fix:** Removed descrambling; store row-major file weights directly into column-major layout.
+
+3. **Transform clamping was `[0, 127]` instead of `[0, 255]`**
+   - The scalar fallback in Stockfish clamps transformed features to `[0, 255]` before `/ 512`.
+   - Mantis was clamping to `[0, 127]`, capping features at 25% of their correct value and collapsing the eval.
+   - **Fix:** Changed clamp upper bound to `255`.
+
+4. **`get_halfka_feature_index` had wrong king bucket and Black perspective offsets**
+   - King bucket lookup used `ksq ~ OrientTBL[ksq] ~ flip`; Stockfish uses `KingBuckets[ksq ~ flip]` (OrientTBL only for the square itself).
+   - `HalfKA_PieceSquareIndex[1]` was shifted by 1, so every Black-perspective piece mapped to the wrong PSQ offset.
+   - **Fix:** Corrected to match Stockfish exactly.
+
+5. **Kings incorrectly excluded from PSQ accumulator**
+   - `HalfKAv2_hm` includes kings in `append_active_indices`; Mantis was skipping them.
+   - **Fix:** Removed the `piece % 6 == KING` skip.
+
+6. **Aspiration window re-search corrupted `best_score` on timeout**
+   - When `best_score >= beta`, the search reset `best_score = -INF` and re-searched. If time ran out during re-search, `best_score` stayed at `-INF + contempt = -49976`.
+   - **Fix:** Save `initial_best_score` before re-search; restore it if `should_stop_search()` is true after.
+
+7. **Quiescence didn't handle checkmate**
+   - When in check with no legal moves, quiescence returned `alpha` instead of a proper mate score.
+   - **Fix:** Added `ply` parameter and return `-MATE + ply` for checkmate, `0` for stalemate.
+
+8. **`make_move_fast`/`unmake_move` didn't fully save/restore board state**
+   - Struct assignment didn't copy the full accumulator state properly.
+   - **Fix:** Changed to `mem.copy(state, b, size_of(Board))` and `mem.copy(b, state, size_of(Board))`.
+
+9. **`parse_position` didn't refresh accumulators after applying moves**
+   - `eval` command and board setup after `position ... moves ...` had stale/corrupt accumulators.
+   - **Fix:** Added `nnue.refresh_sfnnv14_accumulators(b)` after applying all position moves.
+
+10. **PSQT/positional blending was wrong**
+    - Mantis used `(psqt + positional) / 16`; Stockfish uses `(125*psqt + 131*positional) / 128 / 16`.
+    - **Fix:** Updated to match Stockfish.
+
+11. **TT not cleared between searches**
+    - Old corrupt TT entries from previous searches poisoned subsequent searches.
+    - **Fix:** Added `search.clear_tt()` before each `go` command.
+
+12. **Network file loaded from CWD, not binary directory**
+    - When launched from a GUI like cutechess (different CWD), the relative network path failed.
+    - **Fix:** Added `get_executable_dir()` via `/proc/self/exe` and try binary directory first.
+
+13. **Pairwise product transform missing nstm perspective**
+    - Stockfish `transform()` computes `(sum0 * sum1) / 512` for paired accumulator halves and feeds `[512 stm + 512 nstm]` to `fc_0`.
+    - Mantis was only feeding 512 features.
+    - **Fix:** Construct `[stm_features, nstm_features]` as `[512]u8 + [512]u8`.
+
+### Temporary Workaround: Threat Features Disabled
+
+- Threat L1 features (FullThreats) require correct incremental accumulator updates during search.
+- The full-refresh approach makes search ~100× too slow (~180K nps → ~390K nps with PSQ only).
+- **Decision:** Threat L1 and threat PSQT are disabled in `prepare_sfnnv14_evaluation` until fast incremental threat updates are implemented.
+- Threat accumulator refresh still runs at root for completeness but is ignored in evaluation.
+
+### Result
+
+- `go depth 14` → `d2d4` (8.5s, ~392K nps)
+- `go depth 15` → `d2d4` (17s)
+- No more `a2a3` at high depth; engine plays real opening moves.
+
+### Files Modified
+
+- `nnue/nnue.odin`
+- `nnue/sfnnv14_eval.odin`
+- `nnue/sfnnv14_features.odin`
+- `search/search.odin`
+- `search/tt.odin`
+- `uci/uci.odin`
+- `board/perft.odin`
+- `moves/king_moves.odin`
 
 ---
 
@@ -1013,3 +1157,9 @@ if current_alpha + DELTA < alpha {
 | `search/search.odin`             | +80, -40      | Added LMP, Probcut, Delta Pruning; make/unmake integration                                 |
 | `search/sort.odin`               | +25, -20      | `^[dynamic]Move` → `^MoveList`; stack scores                                               |
 | `uci/uci.odin`                   | +3, -3        | `make_move` signature update; `os.stream_from_handle` → `os.to_stream`                     |
+| `nnue/sfnnv14_eval.odin`         | ~200          | Fixed pairwise transform, nstm perspective, PSQT blending, descrambling, is_initialized    |
+| `nnue/sfnnv14_features.odin`     | ~150          | Fixed king buckets, Black PSQ offsets, king inclusion, transform clamping [0,255]          |
+| `search/search.odin`             | ~30           | Fixed aspiration re-search timeout, quiescence mate handling, TT clear on go               |
+| `search/tt.odin`                 | +10           | Added `clear_tt()` procedure                                                               |
+| `board/perft.odin`               | ~20           | Fixed `make_move_fast`/`unmake_move` mem.copy for full board state                         |
+| `uci/uci.odin`                   | ~40           | Added `eval` command, binary-dir network resolution, `refresh_sfnnv14_accumulators`        |

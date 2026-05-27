@@ -16,6 +16,7 @@ SearchLimits :: struct {
 	max_time:     int, // Hard abort limit (ms)
 	optimal_time: int, // Target time (ms)
 	start_time:   time.Time,
+	is_movetime:  bool, // True for go movetime N (no dynamic scaling)
 }
 
 // Global search limits
@@ -34,6 +35,7 @@ calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> Search
 			max_time     = mt,
 			optimal_time = mt,
 			start_time   = time.now(),
+			is_movetime  = true,
 		}
 	}
 

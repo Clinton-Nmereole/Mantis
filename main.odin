@@ -70,6 +70,19 @@ main :: proc() {
 		}
 	}
 
+	// Check for CLI validation mode
+	if len(args) >= 3 && args[1] == "validate" {
+		depth, ok := strconv.parse_int(args[2])
+		if ok && depth >= 1 {
+			fen := "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+			if len(args) >= 5 && args[3] == "fen" {
+				fen = args[4]
+			}
+			board.validate_perft_test(fen, depth)
+			return
+		}
+	}
+
 	// Start UCI Loop
 	uci.uci_loop()
 }

@@ -84,20 +84,20 @@ params: SearchParams
 // Initialize with sensible defaults (current hand-tuned values)
 init_search_params :: proc() {
 	params = SearchParams{
-		aspiration_window      = 25,
+		aspiration_window      = 35,
 		nmp_min_depth          = 3,
 		nmp_reduction_base     = 2,
 		nmp_reduction_div      = 6,
-		rfp_depth              = 7,
-		rfp_margin             = 90,
+		rfp_depth              = 8,
+		rfp_margin             = 25,
 		probcut_depth          = 5,
-		probcut_margin         = 100,
+		probcut_margin         = 40,
 		probcut_reduce         = 4,
 		iir_min_depth          = 4,
 		se_depth               = 8,
 		se_margin              = 2,
 		se_reduced_div         = 2,
-		futility_margin        = 250,
+		futility_margin        = 65,
 		futility_max_depth     = 3,
 		lmp_base               = 2,
 		lmp_div                = 2,
@@ -108,10 +108,10 @@ init_search_params :: proc() {
 		lmr_history_bad_adj    = 1,
 		lmr_history_good_thresh= 2000,
 		lmr_history_bad_thresh = -2000,
-		razor_margin           = 300,
+		razor_margin           = 80,
 		razor_max_depth        = 3,
-		delta_pruning_margin   = 900,
-		see_prune_threshold    = -100,
+		delta_pruning_margin   = 250,
+		see_prune_threshold    = -50,
 		history_max            = 10000,
 		history_min            = -10000,
 		history_decay_numer    = 9,
@@ -122,7 +122,7 @@ init_search_params :: proc() {
 		killer1_score          = 9000,
 		killer2_score          = 8000,
 		check_ext_max_ply      = 40,
-		contempt               = 24,
+		contempt               = 12,
 	}
 }
 

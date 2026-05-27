@@ -38,11 +38,9 @@ SFNNV14_LAYER_STACKS :: 8
 // Dimensions = 64 squares * 704 piece-square values / 2 (mirroring) = 22528
 SFNNV14_HALFKA_DIMENSIONS :: 22528
 
-// FullThreats dimensions for the SFNNv14 network nn-7bf13f9655c8.nnue.
-// Stockfish full_threats.h declares 60720, but this network was trained with 30360.
-// Verified by loader: 30360 * 1024 threat weights parsed, 89,221,134 bytes exact match.
-// All threat feature indices MUST be validated against this bound.
-SFNNV14_THREAT_DIMENSIONS :: 30360
+// FullThreats dimensions for the SFNNv14 network.
+// Stockfish full_threats.h declares 60720. Raw i8 LE, 62,177,280 bytes.
+SFNNV14_THREAT_DIMENSIONS :: 60720
 
 // Total input dimensions = PSQ features + Threat features
 SFNNV14_TOTAL_INPUT_DIMENSIONS :: SFNNV14_HALFKA_DIMENSIONS + SFNNV14_THREAT_DIMENSIONS
@@ -71,31 +69,30 @@ HalfKA_PieceSquareIndex := [2][16]int {
 }
 
 // King buckets for grouping king positions.
-// From half_ka_v2_hm.h lines 63-75.
-// The B(v) macro computes v * PS_NB = v * 704.
+// Mantis and Stockfish both use a1=0..h8=63 square order.
 HalfKA_KingBuckets := [64]int {
-	19712, 20416, 21120, 21824, 21824, 21120, 20416, 19712,  // Rank 8: B(28)..B(31)
-	16896, 17600, 18304, 19008, 19008, 18304, 17600, 16896,  // Rank 7: B(24)..B(27)
-	14080, 14784, 15488, 16192, 16192, 15488, 14784, 14080,  // Rank 6: B(20)..B(23)
-	11264, 11968, 12672, 13376, 13376, 12672, 11968, 11264,  // Rank 5: B(16)..B(19)
-	 8448,  9152,  9856, 10560, 10560,  9856,  9152,  8448,  // Rank 4: B(12)..B(15)
-	 5632,  6336,  7040,  7744,  7744,  7040,  6336,  5632,  // Rank 3: B( 8)..B(11)
-	 2816,  3520,  4224,  4928,  4928,  4224,  3520,  2816,  // Rank 2: B( 4)..B( 7)
-	    0,   704,  1408,  2112,  2112,  1408,   704,     0,  // Rank 1: B( 0)..B( 3)
+	19712, 20416, 21120, 21824, 21824, 21120, 20416, 19712, // Rank 1: B(28)..B(31)
+	16896, 17600, 18304, 19008, 19008, 18304, 17600, 16896, // Rank 2: B(24)..B(27)
+	14080, 14784, 15488, 16192, 16192, 15488, 14784, 14080, // Rank 3: B(20)..B(23)
+	11264, 11968, 12672, 13376, 13376, 12672, 11968, 11264, // Rank 4: B(16)..B(19)
+	8448,  9152,  9856, 10560, 10560,  9856,  9152,  8448,  // Rank 5: B(12)..B(15)
+	5632,  6336,  7040,  7744,  7744,  7040,  6336,  5632,  // Rank 6: B( 8)..B(11)
+	2816,  3520,  4224,  4928,  4928,  4224,  3520,  2816,  // Rank 7: B( 4)..B( 7)
+	   0,   704,  1408,  2112,  2112,  1408,   704,     0,  // Rank 8: B( 0)..B( 3)
 }
 
 // Orientation table for horizontal mirroring.
 // From half_ka_v2_hm.h lines 77-86.
-// If king is on files a-d, square is XORed with 63 to mirror to e-h side.
+// If king is on files a-d, square is XORed with 7 (SQ_H1 = file index 7) to mirror to e-h side.
 HalfKA_OrientTBL := [64]int {
-	63, 63, 63, 63,  0,  0,  0,  0,  // Rank 1
-	63, 63, 63, 63,  0,  0,  0,  0,  // Rank 2
-	63, 63, 63, 63,  0,  0,  0,  0,  // Rank 3
-	63, 63, 63, 63,  0,  0,  0,  0,  // Rank 4
-	63, 63, 63, 63,  0,  0,  0,  0,  // Rank 5
-	63, 63, 63, 63,  0,  0,  0,  0,  // Rank 6
-	63, 63, 63, 63,  0,  0,  0,  0,  // Rank 7
-	63, 63, 63, 63,  0,  0,  0,  0,  // Rank 8
+	 7,  7,  7,  7,  0,  0,  0,  0,  // Rank 1
+	 7,  7,  7,  7,  0,  0,  0,  0,  // Rank 2
+	 7,  7,  7,  7,  0,  0,  0,  0,  // Rank 3
+	 7,  7,  7,  7,  0,  0,  0,  0,  // Rank 4
+	 7,  7,  7,  7,  0,  0,  0,  0,  // Rank 5
+	 7,  7,  7,  7,  0,  0,  0,  0,  // Rank 6
+	 7,  7,  7,  7,  0,  0,  0,  0,  // Rank 7
+	 7,  7,  7,  7,  0,  0,  0,  0,  // Rank 8
 }
 
 // ============================================================================
@@ -126,16 +123,16 @@ Threat_map := [6][6]int {
 
 // Orientation table for FullThreats.
 // From full_threats.h lines 55-64.
-// Unlike HalfKAv2_hm, this ORIENTs a-d files to SQ_A1=0 and e-h files to SQ_H1=63.
+// Unlike HalfKAv2_hm, this ORIENTs a-d files to 0 and e-h files to 7.
 Threat_OrientTBL := [64]int {
-	 0,  0,  0,  0, 63, 63, 63, 63,  // Rank 1
-	 0,  0,  0,  0, 63, 63, 63, 63,  // Rank 2
-	 0,  0,  0,  0, 63, 63, 63, 63,  // Rank 3
-	 0,  0,  0,  0, 63, 63, 63, 63,  // Rank 4
-	 0,  0,  0,  0, 63, 63, 63, 63,  // Rank 5
-	 0,  0,  0,  0, 63, 63, 63, 63,  // Rank 6
-	 0,  0,  0,  0, 63, 63, 63, 63,  // Rank 7
-	 0,  0,  0,  0, 63, 63, 63, 63,  // Rank 8
+	 0,  0,  0,  0,  7,  7,  7,  7,  // Rank 1
+	 0,  0,  0,  0,  7,  7,  7,  7,  // Rank 2
+	 0,  0,  0,  0,  7,  7,  7,  7,  // Rank 3
+	 0,  0,  0,  0,  7,  7,  7,  7,  // Rank 4
+	 0,  0,  0,  0,  7,  7,  7,  7,  // Rank 5
+	 0,  0,  0,  0,  7,  7,  7,  7,  // Rank 6
+	 0,  0,  0,  0,  7,  7,  7,  7,  // Rank 7
+	 0,  0,  0,  0,  7,  7,  7,  7,  // Rank 8
 }
 
 // ============================================================================
@@ -306,7 +303,9 @@ init_threat_luts :: proc() {
 			attacks := threat_pseudo_attacks[pt][from]
 			for to in 0 ..< 64 {
 				mask := (u64(1) << u64(to)) - 1
-				threat_index_lut2[pt][from][to] = u8(popcount(mask & attacks))
+				index := u8(popcount(mask & attacks))
+				threat_index_lut2[pt][from][to] = index
+				threat_index_lut2[pt + 8][from][to] = index
 			}
 		}
 	}
@@ -337,7 +336,7 @@ init_threat_luts :: proc() {
 // HalfKAv2_hm feature index.
 // Reference: Stockfish half_ka_v2_hm.cpp:88-91
 //
-// Formula: (s ^ OrientTBL[ksq] ^ flip) + PieceSquareIndex[perspective][pc] + KingBuckets[ksq ^ flip]
+// Formula: (sq ^ OrientTBL[ksq] ^ flip) + PieceSquareIndex[perspective][pc] + KingBuckets[ksq ^ flip]
 get_halfka_feature_index :: proc(perspective: int, sq: int, piece: int, ksq: int) -> int {
 	flip := 56 * perspective
 	sf_pc := mantis_to_sf_piece(piece)
@@ -544,9 +543,9 @@ refresh_threat_accumulator :: proc(b: ^board.Board, perspective: int) {
 		// Compute pushers: pawns blocked by any pawn in front
 		pushers: u64 = 0
 		if c == constants.WHITE {
-			pushers = ((all_pawns & ~constants.RANK_8) << 8) & c_pawns
-		} else {
 			pushers = ((all_pawns & ~constants.RANK_1) >> 8) & c_pawns
+		} else {
+			pushers = ((all_pawns & ~constants.RANK_8) << 8) & c_pawns
 		}
 
 		// White pawn attacks
@@ -1197,11 +1196,12 @@ update_sfnnv14_accumulators :: proc(old_board: ^board.Board, new_board: ^board.B
 	}
 
 	// --- Threat Accumulator Updates ---
-	// Delegates to the Viridithas-style optimized incremental update system
-	// in nnue/sfnnv14_threat_updates.odin (same package).
-	// Handles: king moves (full refresh), captures, promotions, en passant,
-	// discovered/blocked threats, and quiet moves via exact delta computation.
-	update_threat_accumulators_incremental(old_board, new_board, move)
+	// FullThreats are highly sensitive to discovered and blocked attacks. The
+	// delta updater is not parity-correct yet, so refresh both perspectives to
+	// preserve exact NNUE input features during search.
+	for perspective in 0 ..= 1 {
+		refresh_threat_accumulator(new_board, perspective)
+	}
 }
 
 // ============================================================================
@@ -1229,7 +1229,7 @@ get_psqt_bucket :: proc(b: ^board.Board) -> int {
 // The combined accumulator is simply the sum of PSQ and Threat accumulations
 // for the side to move. The 1024 values are passed directly to fc_0.
 // Reference: Stockfish nnue_feature_transformer.h:226-280
-prepare_sfnnv14_evaluation :: proc(b: ^board.Board) -> (acc: [SFNNV14_L1]i16, psqt: i32, bucket: int) {
+prepare_sfnnv14_evaluation :: proc(b: ^board.Board) -> (acc: [SFNNV14_L1]u8, psqt: i32, bucket: int) {
 	// Ensure PSQ accumulators are computed
 	for perspective in 0 ..= 1 {
 		if !b.sfnnv14_accumulators.psq.computed[perspective] {
@@ -1257,11 +1257,22 @@ prepare_sfnnv14_evaluation :: proc(b: ^board.Board) -> (acc: [SFNNV14_L1]i16, ps
 		b.sfnnv14_accumulators.threat.psqt_accumulation[nstm][bucket]
 	psqt /= 2
 
-	// Combine accumulations for side to move:
-	// acc[i] = psq_acc[stm][i] + threat_acc[stm][i]
-	for i in 0 ..< SFNNV14_L1 {
-		acc[i] = b.sfnnv14_accumulators.psq.accumulation[stm][i] +
-			b.sfnnv14_accumulators.threat.accumulation[stm][i]
+	// HalfKAv2 pair transform: combine PSQ+Threat then clamp-multiply-divide.
+	// For each perspective p, for each j in 0..511:
+	//   acc[p*512+j] = clamp(psq[p][j]+threat[p][j]) * clamp(psq[p][j+512]+threat[p][j+512]) / 512
+	// Stockfish: nnue_feature_transformer.h:420-430, divisor=512 (SIMD-scaled weights)
+	for p in 0 ..= 1 {
+		perspective := p == 0 ? stm : nstm
+		base := p * (SFNNV14_L1 / 2)
+		for j in 0 ..< SFNNV14_L1 / 2 {
+			s0 := b.sfnnv14_accumulators.psq.accumulation[perspective][j] +
+				b.sfnnv14_accumulators.threat.accumulation[perspective][j]
+			s1 := b.sfnnv14_accumulators.psq.accumulation[perspective][j + SFNNV14_L1 / 2] +
+				b.sfnnv14_accumulators.threat.accumulation[perspective][j + SFNNV14_L1 / 2]
+			c0 := s0; if c0 < 0 { c0 = 0 }; if c0 > 255 { c0 = 255 }
+			c1 := s1; if c1 < 0 { c1 = 0 }; if c1 > 255 { c1 = 255 }
+			acc[base + j] = u8((i32(c0) * i32(c1)) / 512)
+		}
 	}
 
 	return
@@ -1278,6 +1289,138 @@ refresh_sfnnv14_accumulators :: proc(b: ^board.Board) {
 		refresh_psq_accumulator(b, perspective)
 		refresh_threat_accumulator(b, perspective)
 	}
+}
+
+trace_psq_feature_hash :: proc(b: ^board.Board, perspective: int) -> (count: int, hash: u64) {
+	ksq := board.get_king_square(b, perspective)
+	for sq in 0 ..< 64 {
+		piece := int(b.mailbox[sq])
+		if piece == -1 {
+			continue
+		}
+		idx := get_halfka_feature_index(perspective, sq, piece, ksq)
+		count += 1
+		hash = hash * 131 + u64(idx)
+	}
+	return
+}
+
+trace_threat_feature_hash :: proc(b: ^board.Board, perspective: int) -> (count: int, sum: u64, hash: u64) {
+	ksq := board.get_king_square(b, perspective)
+	occupied := b.occupancies[constants.BOTH]
+	all_pawns := b.bitboards[constants.PAWN] | b.bitboards[constants.PAWN + 6]
+
+	add_idx :: proc(count: ^int, sum: ^u64, hash: ^u64, idx: int) {
+		if idx < SFNNV14_THREAT_DIMENSIONS {
+			count^ += 1
+			sum^ += u64(idx)
+			hash^ = hash^ * 131 + u64(idx)
+		}
+	}
+
+	for color in 0 ..= 1 {
+		c := perspective ~ color
+
+		attacker := c * 6 + constants.PAWN
+		c_pawns := b.bitboards[c * 6 + constants.PAWN]
+
+		pushers: u64 = 0
+		if c == constants.WHITE {
+			pushers = ((all_pawns & ~constants.RANK_1) >> 8) & c_pawns
+		} else {
+			pushers = ((all_pawns & ~constants.RANK_8) << 8) & c_pawns
+		}
+
+		if c == constants.WHITE {
+			attacks := (c_pawns & ~constants.FILE_H) << 9
+			attacks &= occupied
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to - 9
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(&count, &sum, &hash, idx)
+			}
+
+			attacks = (c_pawns & ~constants.FILE_A) << 7
+			attacks &= occupied
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to - 7
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(&count, &sum, &hash, idx)
+			}
+
+			attacks = pushers << 8
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to - 8
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(&count, &sum, &hash, idx)
+			}
+		} else {
+			attacks := (c_pawns & ~constants.FILE_A) >> 9
+			attacks &= occupied
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to + 9
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(&count, &sum, &hash, idx)
+			}
+
+			attacks = (c_pawns & ~constants.FILE_H) >> 7
+			attacks &= occupied
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to + 7
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(&count, &sum, &hash, idx)
+			}
+
+			attacks = pushers >> 8
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to + 8
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(&count, &sum, &hash, idx)
+			}
+		}
+
+		for pt in constants.KNIGHT ..< constants.KING {
+			attacker = c * 6 + pt
+			bb := b.bitboards[attacker]
+
+			for bb != 0 {
+				from := utils.pop_lsb(&bb)
+
+				attacks: u64 = 0
+				switch pt {
+				case constants.KNIGHT:
+					attacks = moves.get_knight_attacks_bitboard(from)
+				case constants.BISHOP:
+					attacks = moves.get_bishop_attacks(from, occupied)
+				case constants.ROOK:
+					attacks = moves.get_rook_attacks(from, occupied)
+				case constants.QUEEN:
+					attacks = moves.get_queen_attacks(from, occupied)
+				}
+
+				attacks &= occupied
+				for attacks != 0 {
+					to := utils.pop_lsb(&attacks)
+					attacked_piece := int(b.mailbox[to])
+					idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+					add_idx(&count, &sum, &hash, idx)
+				}
+			}
+		}
+	}
+	return
 }
 
 // ============================================================================

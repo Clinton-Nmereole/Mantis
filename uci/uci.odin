@@ -3,6 +3,7 @@ package uci
 import "../board"
 import "../book"
 import "../constants"
+import "../eval"
 import "../moves"
 import "../nnue"
 import "../search"
@@ -13,18 +14,24 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
+import "core:sys/linux"
 import "core:thread"
+import "core:time"
 
-// Debug log file for tracking UCI commands and responses
-DEBUG_LOG :: "mantis_uci_debug.log"
-
-debug_log :: proc(msg: string) {
-	fd, err := os.open(DEBUG_LOG, os.O_WRONLY | os.O_CREATE | os.O_APPEND)
-	if err == os.ERROR_NONE {
-		os.write_string(fd, msg)
-		os.write_string(fd, "\n")
-		os.close(fd)
+// Get the directory containing the current executable.
+// On Linux, reads /proc/self/exe symlink via raw syscall.
+get_executable_dir :: proc() -> string {
+	buf: [4096]u8
+	ret, errno := linux.readlink("/proc/self/exe", buf[:])
+	if errno != .NONE || ret <= 0 {
+		return ""
 	}
+	exe_path := string(buf[:ret])
+	last_slash := strings.last_index(exe_path, "/")
+	if last_slash >= 0 {
+		return strings.clone(exe_path[:last_slash])
+	}
+	return ""
 }
 
 // UCI Configuration
@@ -67,9 +74,40 @@ uci_loop :: proc() {
 	// Initialize tunable search parameters
 	search.init_search_params()
 
-	// Load Default NNUE (silently)
-	default_nnue := "nn-c0ae49f08b40.nnue"
-	nnue.init_nnue(default_nnue)
+	// Load Default NNUE — try SFNNv14 first, then fall back to legacy.
+	// Try executable directory first (so cutechess / GUI launches work),
+	// then fall back to current working directory.
+	exe_dir := get_executable_dir()
+	default_nnue := "nn-7bf13f9655c8.nnue"
+
+	sfnnv14_loaded := false
+	if exe_dir != "" {
+		path := strings.concatenate([]string{exe_dir, "/", default_nnue})
+		sfnnv14_loaded = nnue.init_sfnnv14(path)
+		delete(path)
+	}
+	if !sfnnv14_loaded {
+		sfnnv14_loaded = nnue.init_sfnnv14(default_nnue)
+	}
+
+	if sfnnv14_loaded {
+		nnue.sfnnv14_active = true
+		nnue.init_sfnnv14_features()
+	} else {
+		legacy_nnue := "nn-c0ae49f08b40.nnue"
+		legacy_loaded := false
+		if exe_dir != "" {
+			path := strings.concatenate([]string{exe_dir, "/", legacy_nnue})
+			legacy_loaded = nnue.init_nnue(path)
+			delete(path)
+		}
+		if !legacy_loaded {
+			legacy_loaded = nnue.init_nnue(legacy_nnue)
+		}
+		if !legacy_loaded {
+			fmt.println("WARNING: No NNUE network loaded. Using HCE fallback.")
+		}
+	}
 
 	for {
 		line, err := bufio.reader_read_string(&reader, '\n')
@@ -142,6 +180,43 @@ uci_loop :: proc() {
 			board.print_board(game_board)
 			fmt.printf("FEN: %s\n", board.get_fen(game_board))
 			os.flush(os.stdout)
+		} else if command == "eval" {
+			score := eval.evaluate(&game_board)
+			fmt.printf("Static evaluation: %d (side to move perspective)\n", score)
+			if nnue.sfnnv14_active {
+				bucket, psqt, positional, total, nnz, sum, hash, psq_stm_count, psq_stm_hash, psq_nstm_count, psq_nstm_hash, threat_stm_count, threat_stm_sum, threat_stm_hash, threat_nstm_count, threat_nstm_sum, threat_nstm_hash := nnue.trace_sfnnv14(&game_board)
+				fmt.printf(
+					"SFNNv14 trace: bucket=%d psqt=%d positional=%d total=%d transformed_nnz=%d transformed_sum=%d transformed_hash=%x psq_stm_count=%d psq_stm_hash=%x psq_nstm_count=%d psq_nstm_hash=%x threat_stm_count=%d threat_stm_sum=%d threat_stm_hash=%x threat_nstm_count=%d threat_nstm_sum=%d threat_nstm_hash=%x (side to move)\n",
+					bucket,
+					psqt,
+					positional,
+					total,
+					nnz,
+					sum,
+					hash,
+					psq_stm_count,
+					psq_stm_hash,
+					psq_nstm_count,
+					psq_nstm_hash,
+					threat_stm_count,
+					threat_stm_sum,
+					threat_stm_hash,
+					threat_nstm_count,
+					threat_nstm_sum,
+					threat_nstm_hash,
+				)
+			}
+			ml: moves.MoveList
+			board.generate_all_moves(&game_board, &ml)
+			fmt.printf("Move count: %d\n", ml.count)
+			for i in 0 ..< ml.count {
+				fmt.printf("  %d: ", i)
+				board.print_move(ml.moves[i])
+				fmt.println()
+			}
+			os.flush(os.stdout)
+		} else if command == "bench" || strings.has_prefix(command, "bench ") {
+			run_benchmark(command)
 		} else if command == "stop" {
 			// Stop current search (including pondering)
 			if sync.atomic_load(&ponder_state.is_active) != 0 {
@@ -219,12 +294,18 @@ parse_position :: proc(command: string, b: ^board.Board) {
 					state: board.StateInfo
 					board.make_move(b, move, &state)
 				} else {
-					debug_log(fmt.tprintf("[PARSE FAIL] move='%s' not found", move_str))
+					// Invalid move, skip
 				}
 			}
 		}
 	}
-	debug_log(fmt.tprintf("[POSITION] side=%d", b.side))
+	// Refresh NNUE accumulators after setting up position.
+	if nnue.sfnnv14_active {
+		nnue.refresh_sfnnv14_accumulators(b)
+	} else if nnue.is_initialized {
+		b.accumulators[constants.WHITE] = nnue.compute_accumulator(b, constants.WHITE)
+		b.accumulators[constants.BLACK] = nnue.compute_accumulator(b, constants.BLACK)
+	}
 }
 
 // Parse 'go' command
@@ -335,6 +416,127 @@ parse_go :: proc(command: string, b: ^board.Board) {
 	}
 }
 
+
+// ============================================================================
+// Benchmark
+// ============================================================================
+
+// Standard benchmark positions covering openings, middlegames, endgames, and tactics.
+// These 44 positions exercise all major code paths in the engine.
+BENCH_FENS := []string {
+	// Openings
+	"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+	"rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+	"rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+	"r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3",
+	"rnbqkbnr/pppp1ppp/8/4p3/2P5/8/PP1PPPPP/RNBQKBNR w KQkq - 0 2",
+	"rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+	"r1bqkbnr/pp1ppppp/2n5/1Bp5/4P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3",
+	"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1",
+	"rnbq1rk1/ppppqppp/5n2/4p1B1/1b1PP3/5N2/PPP2PPP/RN1QKB1R w KQ - 4 6",
+	"rnbqkb1r/pppp1ppp/7n/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 3 3",
+	"r1bqk2r/ppp2ppp/2n2n2/3pp3/1b1PP3/2N2N2/PPP2PPP/R1BQKB1R w KQkq - 5 6",
+	"r1bq1rk1/ppp2ppp/2np1n2/4p3/2PPP3/2N2N2/PP3PPP/R1BQKB1R w KQ - 2 6",
+
+	// Middlegames
+	"r3kb1r/pppb1ppp/2np4/4p3/1PP1P3/5N2/PB3PPP/RN1QKB1R w KQkq - 2 9",
+	"r1bq1rk1/pppnn1bp/3p2p1/3Ppp2/2P1P3/2N2NP1/PP1B1PBP/R2Q1RK1 b - - 0 11",
+	"rn1qkb1r/pb1p1ppp/1p2pn2/2p5/2PP4/2N2NP1/PP2PPBP/R1BQK2R b KQkq - 0 7",
+	"r4rk1/ppp1qppp/2n1p3/3p4/1b1P4/2N1PN2/PP2BPPP/R2Q1RK1 w - - 2 9",
+	"2rq1rk1/pp1bppbp/2np1np1/4P3/3N1P2/2N1B3/PPP1B1PP/R2Q1RK1 w - - 3 12",
+	"r1bq1rk1/pp2bppp/2n1pn2/2pp4/2PP4/2N1PN2/PPQ1BPPP/R1B2RK1 b - - 3 8",
+	"r1bq1rk1/1pp2ppp/p1np1n2/4p3/2PPP3/2N2N2/PP2BPPP/R1BQ1RK1 w - - 3 9",
+	"r1b1kb1r/pp1p1ppp/1qn1p3/2pn4/3P4/2N2N2/PPP1BPPP/R1BQ1RK1 w kq - 4 7",
+	"r1bqk2r/pp1pppbp/2n2np1/8/2PNP3/2N5/PP2BPPP/R1BQK2R w KQkq - 0 7",
+	"2rqrnk1/pp2bp1p/2p1p1pB/3p4/3P4/2P1PN2/P4PPP/R2Q1RK1 w - - 5 16",
+
+	// Tactical / complex
+	"r1b1k2r/ppppqppp/2n5/8/1PP2B2/3PBn2/P1Q2PPP/RN3RK1 w kq - 1 13",
+	"r2qkb1r/1ppb1ppp/p1np4/4p3/B3P3/2PP1N2/PP3PPP/RNBQ1RK1 w kq - 1 9",
+	"r1bq1rk1/p4ppp/1pnp4/4p3/2P5/1PP1PN2/PB3PPP/R2QKB1R w KQ - 1 12",
+	"1r1q1rk1/1p2bppp/pB1ppn2/8/2PQ4/2N2NP1/PP2PPBP/R4RK1 b - - 0 14",
+	"r1bq1rk1/pp3ppp/2n1pn2/2pp4/2PP4/2PBPN2/P4PPP/R1BQ1RK1 b - - 1 9",
+	"rn2k2r/p4ppp/1q2p3/2bp2B1/1p6/4P3/PP1N1PPP/R2QK2R w KQkq - 0 14",
+	"r3k2r/p1q2ppp/2p1pn2/1pb1N3/2B5/2N5/PPP1QPPP/R4RK1 w kq - 1 15",
+	"r3r1k1/pp3ppp/2p1bn2/2PpNbb1/3P4/2N1B3/PP2BPPP/R2Q1RK1 w - - 3 15",
+
+	// Endgames
+	"8/k7/3p4/p2P1p2/P2P1P2/8/8/K7 w - - 0 1",
+	"8/8/8/8/5kp1/P7/8/1K1N4 w - - 0 1",
+	"8/2P5/8/4k3/3N4/4K3/8/8 w - - 0 1",
+	"6k1/5p2/6p1/8/7p/7P/6PK/8 w - - 0 1",
+	"8/8/8/8/1k6/p3R3/1K6/8 w - - 0 1",
+	"r1b5/ppp2kpp/8/4p3/2B1n3/2N5/PPP2PPP/R1B1K2R w KQ - 4 13",
+	"8/8/8/8/4k3/8/4K3/8 w - - 0 1",
+	"8/8/1Pk5/8/2K5/8/8/8 w - - 0 1",
+	"8/5pk1/r6p/8/2Q5/3q4/P4PPP/6K1 w - - 0 1",
+	"r4rk1/1pp2ppp/2p2n2/p2b4/8/3P2P1/P1P2P1P/R1B1R1K1 w - - 0 22",
+
+	// Mate in X / tricky
+	"3rr1k1/pp3ppp/2p5/4q3/P2Q4/2P5/1P3PPP/R2R2K1 w - - 1 22",
+	"r1b2rk1/pp3ppp/2n1p3/3p4/2P5/2N1PN2/q4PPP/1R1QKB1R w K - 1 13",
+	"7r/p3q1kp/2p1Ppp1/1p1p4/3Q1P2/2P3R1/Pr4PP/4R1K1 b - - 0 26",
+	"rnbq2k1/ppp2pp1/4p2p/3n4/1P1P4/P1N2N2/4PPPP/R2QKB1R w KQ - 0 11",
+}
+
+run_benchmark :: proc(command: string) {
+	parts := strings.split(command, " ")
+	defer delete(parts)
+
+	depth := 13
+	if len(parts) > 1 {
+		val, ok := strconv.parse_int(parts[1])
+		if ok && val > 0 && val <= 64 {
+			depth = val
+		}
+	}
+
+	fmt.printf("\n=== Mantis Benchmark ===\n")
+	fmt.printf("Positions: %d, Depth: %d\n", len(BENCH_FENS), depth)
+	os.flush(os.stdout)
+
+	total_nodes: u64 = 0
+	total_time_ms: u64 = 0
+
+	for i in 0 ..< len(BENCH_FENS) {
+		search.clear_tt()
+		b := board.parse_fen(BENCH_FENS[i])
+		nnue.refresh_sfnnv14_accumulators(&b)
+
+		search.reset_search_control()
+		sync.atomic_store(&search.total_nodes, 0)
+
+		st: search.SearchThread
+		search.init_search_thread(&st, 0)
+		defer free(st.continuation_history)
+
+		start := time.now()
+		search.search_position(&st, &b, depth, 1, false)
+		elapsed := int(time.duration_milliseconds(time.since(start)))
+
+		nodes := search.get_total_nodes()
+		total_nodes += u64(nodes)
+		total_time_ms += u64(elapsed)
+
+		nps: u64 = 0
+		if elapsed > 0 {
+			nps = u64(nodes) * 1000 / u64(elapsed)
+		}
+		fmt.printf("[%2d/%2d] %7d nodes %6d ms %7d nps\n",
+			i + 1, len(BENCH_FENS), nodes, elapsed, nps)
+		os.flush(os.stdout)
+	}
+
+	total_nps: u64 = 0
+	if total_time_ms > 0 {
+		total_nps = total_nodes * 1000 / total_time_ms
+	}
+	fmt.println("================================")
+	fmt.printf("Total: %d nodes %d ms\n", total_nodes, total_time_ms)
+	fmt.printf("NPS:   %d\n", total_nps)
+	fmt.println("================================")
+	os.flush(os.stdout)
+}
 
 // Parse 'setoption' command
 // setoption name EvalFile value <path>

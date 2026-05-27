@@ -13,6 +13,19 @@ Move :: struct {
 	castling:    bool,
 }
 
+// The zero-value Move is used throughout the search as "no move".
+// This keeps a real move from a1 distinct from an empty sentinel.
+is_empty_move :: proc(move: Move) -> bool {
+	return move.source == 0 &&
+		move.target == 0 &&
+		move.piece == 0 &&
+		move.promoted == 0 &&
+		!move.capture &&
+		!move.double_push &&
+		!move.en_passant &&
+		!move.castling
+}
+
 // Helper to create a simple move
 create_move :: proc(source, target, piece: int, capture: bool = false) -> Move {
 	return Move {

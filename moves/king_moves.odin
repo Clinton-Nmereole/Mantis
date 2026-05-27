@@ -2,6 +2,7 @@ package moves
 
 import "../constants"
 import "../utils"
+import "core:fmt"
 
 get_king_moves :: proc(
 	king: u64,

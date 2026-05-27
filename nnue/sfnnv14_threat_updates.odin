@@ -538,7 +538,7 @@ apply_threat_buffer_to_accumulator :: proc(
 
 		weight_offset := idx * SFNNV14_L1
 		for j in 0 ..< SFNNV14_L1 {
-			state.accumulation[perspective][j] -= sfnnv14_transformer.threat_weights[weight_offset + j]
+			state.accumulation[perspective][j] -= i16(sfnnv14_transformer.threat_weights[weight_offset + j])
 		}
 		psqt_offset := idx * SFNNV14_PSQT_BUCKETS
 		for j in 0 ..< SFNNV14_PSQT_BUCKETS {
@@ -554,7 +554,7 @@ apply_threat_buffer_to_accumulator :: proc(
 
 		weight_offset := idx * SFNNV14_L1
 		for j in 0 ..< SFNNV14_L1 {
-			state.accumulation[perspective][j] += sfnnv14_transformer.threat_weights[weight_offset + j]
+			state.accumulation[perspective][j] += i16(sfnnv14_transformer.threat_weights[weight_offset + j])
 		}
 		psqt_offset := idx * SFNNV14_PSQT_BUCKETS
 		for j in 0 ..< SFNNV14_PSQT_BUCKETS {

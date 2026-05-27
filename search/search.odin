@@ -330,7 +330,7 @@ negamax :: proc(
 		if in_check && ply < params.check_ext_max_ply {	// Don't extend too deep in search
 			effective_depth = 1 // Extend by 1 ply when in check
 		} else {
-			return quiescence(st, b, alpha, beta)
+			return quiescence(st, b, alpha, beta, ply)
 		}
 	}
 
@@ -348,7 +348,7 @@ negamax :: proc(
 		razor_margin := params.razor_margin * depth
 		if static_eval + razor_margin < alpha {
 			// Position is so bad even with margin, just do quiescence
-			qscore := quiescence(st, b, alpha, beta)
+			qscore := quiescence(st, b, alpha, beta, ply)
 			if qscore < alpha {
 				return qscore
 			}
@@ -399,7 +399,7 @@ negamax :: proc(
 
 	// Reverse Futility Pruning (RFP) / Static Null Move Pruning
 	// If position is so good that even with a margin, we're above beta, prune
-	if !is_pv && !in_check && effective_depth <= params.rfp_depth && excluded_move.source == 0 {
+	if !is_pv && !in_check && effective_depth <= params.rfp_depth && moves.is_empty_move(excluded_move) {
 		// Margin based on depth
 		rfp_margin := params.rfp_margin * effective_depth
 
@@ -416,7 +416,7 @@ negamax :: proc(
 	// If the position is good enough that even a reduced-depth tactical search
 	// would fail high, we can prune safely.
 	if !is_pv && !in_check && effective_depth >= params.probcut_depth &&
-	   abs(beta) < eval.MATE && excluded_move.source == 0 {
+	   abs(beta) < eval.MATE && moves.is_empty_move(excluded_move) {
 		probcut_beta := beta + params.probcut_margin
 		if static_eval >= probcut_beta {
 			// Try a few tactical moves at reduced depth
@@ -473,7 +473,7 @@ negamax :: proc(
 	// Internal Iterative Reduction (IIR)
 	// If we have no hash move and this is a PV node, reduce depth
 	// We don't know what's good here, so search shallower first
-	if tt_move.source == 0 && is_pv && effective_depth >= params.iir_min_depth {
+	if moves.is_empty_move(tt_move) && is_pv && effective_depth >= params.iir_min_depth {
 		effective_depth -= 1
 	}
 
@@ -487,8 +487,8 @@ negamax :: proc(
 	if depth >= params.se_depth &&
 	   !in_check &&
 	   ply > 0 &&
-	   tt_move.source != 0 &&
-	   excluded_move.source == 0 {	// Don't do SE during SE search
+	   !moves.is_empty_move(tt_move) &&
+	   moves.is_empty_move(excluded_move) {	// Don't do SE during SE search
 
 		// Get TT score for singular test
 		tt_entry_score, tt_found := probe_tt(b.hash, alpha, beta, depth, ply)
@@ -553,9 +553,10 @@ negamax :: proc(
 		}
 
 		// Skip excluded move (for singular extensions)
-		if excluded_move.source != 0 &&
+		if !moves.is_empty_move(excluded_move) &&
 		   move_list.moves[i].source == excluded_move.source &&
-		   move_list.moves[i].target == excluded_move.target {
+		   move_list.moves[i].target == excluded_move.target &&
+		   move_list.moves[i].promoted == excluded_move.promoted {
 			continue
 		}
 
@@ -719,7 +720,7 @@ negamax :: proc(
 				update_history(st, move_list.moves[i], effective_depth, true)
 
 				// Store as counter move if we have a previous move
-				if prev_move.source != 0 {
+				if !moves.is_empty_move(prev_move) {
 					store_counter_move(st, prev_move, move_list.moves[i])
 
 					// Continuation history - DISABLED (caused regression)
@@ -737,7 +738,7 @@ negamax :: proc(
 		// Let's use `is_square_attacked` on King.
 		king_sq := board.get_king_square(b, b.side)
 		if board.is_square_attacked(b, king_sq, 1 - b.side) {
-			return -eval.MATE + (MAX_PLY - depth) // Prefer shorter mates
+			return -eval.MATE + ply // Prefer shorter mates
 		} else {
 			return 0 // Stalemate
 		}
@@ -787,7 +788,7 @@ see_capture :: proc(b: ^board.Board, move: moves.Move) -> int {
 }
 
 // Quiescence Search
-quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int) -> int {
+quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, ply: int) -> int {
 	count_nodes(st)
 
 	// Time check: stop if hard limit exceeded
@@ -807,21 +808,26 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int) ->
 
 	evaluation := eval.evaluate(b)
 
-	if evaluation >= beta {
-		return beta
-	}
+	king_sq := board.get_king_square(b, b.side)
+	in_check := board.is_square_attacked(b, king_sq, 1 - b.side)
 
 	current_alpha := alpha
-	if evaluation > current_alpha {
-		current_alpha = evaluation
-	}
+	if !in_check {
+		if evaluation >= beta {
+			return beta
+		}
 
-	// Delta Pruning
-	// If even capturing the most valuable piece won't raise alpha,
-	// stop searching captures.  Delta is the maximum material swing
-	// from a single capture (typically queen value + small margin).
-	if evaluation + params.delta_pruning_margin < alpha {
-		return evaluation
+		if evaluation > current_alpha {
+			current_alpha = evaluation
+		}
+
+		// Delta Pruning
+		// If even capturing the most valuable piece won't raise alpha,
+		// stop searching captures.  Delta is the maximum material swing
+		// from a single capture (typically queen value + small margin).
+		if evaluation + params.delta_pruning_margin < alpha {
+			return evaluation
+		}
 	}
 
 	move_list: moves.MoveList
@@ -831,40 +837,60 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int) ->
 	// Move Ordering for Quiescence
 	sort_moves(st, &move_list, b)
 
+	legal_moves := 0
+
 	for i in 0 ..< move_list.count {
-		if move_list.moves[i].capture {
-			// SEE Pruning - skip obviously losing captures
-			// Conservative threshold: only skip if we lose more than a pawn
+		// In quiescence, only search captures unless we are in check.
+		// When in check, we must search all legal moves (including non-captures)
+		// because the king must escape check.
+		if !in_check && !move_list.moves[i].capture {
+			continue
+		}
+
+		// SEE Pruning - skip obviously losing captures
+		// Only apply to captures when not in check
+		if move_list.moves[i].capture && !in_check {
 			see_score := see_capture(b, move_list.moves[i])
 			if see_score < params.see_prune_threshold {
 				continue // Skip this losing capture
 			}
+		}
 
-			if !board.is_castling_legal_now(b, move_list.moves[i]) {
-				continue
-			}
+		if !board.is_castling_legal_now(b, move_list.moves[i]) {
+			continue
+		}
 
-			state: board.StateInfo
-			board.make_move_fast(b, move_list.moves[i], &state)
+		state: board.StateInfo
+		board.make_move_fast(b, move_list.moves[i], &state)
 
-			// Check legality
-			king_sq := board.get_king_square(b, 1 - b.side)
-			if board.is_square_attacked(b, king_sq, b.side) {
-				board.unmake_move(b, &state)
-				continue
-			}
-
-			nnue.update_accumulators(&state, b, move_list.moves[i])
-			score := -quiescence(st, b, -beta, -current_alpha)
-
+		// Check legality
+		king_sq := board.get_king_square(b, 1 - b.side)
+		if board.is_square_attacked(b, king_sq, b.side) {
 			board.unmake_move(b, &state)
+			continue
+		}
+		legal_moves += 1
 
-			if score >= beta {
-				return beta
-			}
-			if score > current_alpha {
-				current_alpha = score
-			}
+		nnue.update_accumulators(&state, b, move_list.moves[i])
+		score := -quiescence(st, b, -beta, -current_alpha, ply + 1)
+
+		board.unmake_move(b, &state)
+
+		if score >= beta {
+			return beta
+		}
+		if score > current_alpha {
+			current_alpha = score
+		}
+	}
+
+	// Checkmate / stalemate detection in quiescence
+	if legal_moves == 0 {
+		king_sq := board.get_king_square(b, b.side)
+		if board.is_square_attacked(b, king_sq, 1 - b.side) {
+			return -eval.MATE + ply // Checkmate
+		} else {
+			return current_alpha // Stalemate or no captures - return best found
 		}
 	}
 
@@ -920,8 +946,12 @@ search_position :: proc(
 	defer delete(multi_pv_results)
 
 	// Iterative Deepening
+	prev_completed_best_move: moves.Move  // Save last fully completed depth's best move
+	depth_completed := true
 	for current_depth in 1 ..= depth {
-		// fmt.printf("DEBUG: Starting depth %d\n", current_depth)
+		// Save best move before attempting this depth (for recovery if aborted)
+		prev_completed_best_move = best_move
+		depth_completed = true
 
 		// Clear MultiPV results for this depth
 		clear(&multi_pv_results)
@@ -976,6 +1006,9 @@ search_position :: proc(
 				break // No more moves to search
 			}
 
+			// Sort root moves so central pawns/e4/d4 are searched first
+			sort_moves(st, &move_list, b, moves.Move{}, 0, moves.Move{})
+
 			best_score := -eval.INF
 			current_best_move: moves.Move
 			found_move := false
@@ -985,6 +1018,7 @@ search_position :: proc(
 			for i in 0 ..< move_list.count {
 				// Abort root move loop if search was stopped (time limit or external stop)
 				if should_stop_search() {
+					depth_completed = false
 					break
 				}
 
@@ -1011,7 +1045,7 @@ search_position :: proc(
 					-beta,
 					-current_alpha,
 					current_depth - 1,
-					0,
+					1,
 					&child_pv,
 				)
 
@@ -1037,6 +1071,10 @@ search_position :: proc(
 
 			// Re-search if outside aspiration window (first PV only)
 			if current_depth >= 5 && pv_index == 0 {
+				initial_best_score := best_score
+				initial_best_move := current_best_move
+				initial_pv := best_pv
+
 				if best_score <= alpha {
 					// Failed low - re-search with lower bound
 					alpha = -eval.INF
@@ -1045,6 +1083,7 @@ search_position :: proc(
 
 					for i in 0 ..< move_list.count {
 						if should_stop_search() {
+							depth_completed = false
 							break
 						}
 
@@ -1070,7 +1109,7 @@ search_position :: proc(
 							-beta,
 							-current_alpha,
 							current_depth - 1,
-							0,
+							1,
 							&child_pv,
 						)
 
@@ -1100,6 +1139,7 @@ search_position :: proc(
 
 					for i in 0 ..< move_list.count {
 						if should_stop_search() {
+							depth_completed = false
 							break
 						}
 
@@ -1125,7 +1165,7 @@ search_position :: proc(
 							-beta,
 							-current_alpha,
 							current_depth - 1,
-							0,
+							1,
 							&child_pv,
 						)
 
@@ -1147,6 +1187,13 @@ search_position :: proc(
 							current_alpha = score
 						}
 					}
+				}
+
+				// If search was stopped during re-search, restore initial results
+				if should_stop_search() {
+					best_score = initial_best_score
+					current_best_move = initial_best_move
+					best_pv = initial_pv
 				}
 			}
 
@@ -1189,7 +1236,13 @@ search_position :: proc(
 			nps = get_total_nodes() * 1000 / u64(ms_int)
 		}
 
-		// Only output info lines if we're the main thread
+		// Only output info lines and update best_move if depth completed (not aborted by timeout)
+		if !depth_completed {
+			// Depth aborted: restore best_move from previous completed depth, stop search
+			best_move = prev_completed_best_move
+			break
+		}
+
 		if output_bestmove {
 			// Output each PV line
 			for pv_idx in 0 ..< len(multi_pv_results) {
@@ -1242,7 +1295,8 @@ search_position :: proc(
 		}
 
 		// Dynamic time scaling based on best-move stability
-		if use_time_management {
+		// NOTE: Disabled for movetime (user wants exactly N milliseconds)
+		if use_time_management && !search_limits.is_movetime {
 			if best_move.source == prev_best_move.source &&
 			   best_move.target == prev_best_move.target {
 				best_move_stable_count += 1
@@ -1261,8 +1315,19 @@ search_position :: proc(
 		// Check if we should stop iterative deepening
 		// Skip time check if still in ponder mode (infinite search)
 		is_pondering := sync.atomic_load(&search_control.ponder_mode)
-		if is_pondering == 0 && use_time_management && exceeded_scaled_optimal(search_limits, time_factor) {
-			break // Stop if we've used our scaled optimal time
+		if is_pondering == 0 && use_time_management {
+			should_stop_deepening := false
+			if search_limits.is_movetime {
+				// Movetime: stop deepening when >50% time used.
+				// The hard limit (should_stop) already guarantees we won't exceed movetime.
+				// This check prevents starting a depth that will certainly be aborted.
+				should_stop_deepening = elapsed_ms(search_limits) > search_limits.max_time / 2
+			} else {
+				should_stop_deepening = exceeded_scaled_optimal(search_limits, time_factor)
+			}
+			if should_stop_deepening {
+				break // Stop deepening, but the current depth was already completed
+			}
 		}
 	}
 
@@ -1271,7 +1336,7 @@ search_position :: proc(
 
 	// Only output bestmove if requested (main thread only)
 	if output_bestmove {
-		if best_move.source == 0 && best_move.target == 0 {
+		if moves.is_empty_move(best_move) {
 			fmt.printf("info string WARNING: best_move is zero, side=%d, regenerating fallback\n", b.side)
 			// Fallback: regenerate legal moves and pick the first one
 			fallback_list: moves.MoveList
@@ -1290,7 +1355,7 @@ search_position :: proc(
 				}
 				board.unmake_move(b, &state)
 			}
-			if best_move.source == 0 && best_move.target == 0 {
+			if moves.is_empty_move(best_move) {
 				fmt.printf("info string CRITICAL: no legal moves found!\n")
 			}
 		}

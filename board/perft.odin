@@ -5,6 +5,7 @@ import "../moves"
 import "../utils"
 import "../zobrist"
 import "core:fmt"
+import "core:mem"
 import "core:time"
 
 // apply_move_to_board performs the actual move application WITHOUT saving state
@@ -123,13 +124,13 @@ apply_move_to_board :: proc(b: ^Board, move: moves.Move) {
 // make_move_fast: save state, apply move, NO legality check.
 // This is the hot-path function used during search.
 make_move_fast :: proc(b: ^Board, move: moves.Move, state: ^StateInfo) {
-	state^ = StateInfo(b^)
+	mem.copy(state, b, size_of(Board))
 	apply_move_to_board(b, move)
 }
 
 // unmake_move: restore board to previously saved state.
 unmake_move :: proc(b: ^Board, state: ^StateInfo) {
-	b^ = Board(state^)
+	mem.copy(b, state, size_of(Board))
 }
 
 // make_move: full legal move application. Saves state, applies move,
@@ -376,6 +377,138 @@ perft :: proc(b: ^Board, depth: int) -> u64 {
 	}
 
 	return nodes
+}
+
+validate_board_state :: proc(b: ^Board) -> (bool, string) {
+	if b.side != constants.WHITE && b.side != constants.BLACK {
+		return false, fmt.tprintf("invalid side: %d", b.side)
+	}
+	if b.en_passant < -1 || b.en_passant >= 64 {
+		return false, fmt.tprintf("invalid en passant square: %d", b.en_passant)
+	}
+	if b.castle < 0 || b.castle > 15 {
+		return false, fmt.tprintf("invalid castling rights: %d", b.castle)
+	}
+
+	expected_mailbox: [64]i8
+	for sq in 0 ..< 64 {
+		expected_mailbox[sq] = -1
+	}
+
+	white_occ: u64 = 0
+	black_occ: u64 = 0
+	seen: u64 = 0
+	white_kings := 0
+	black_kings := 0
+
+	for piece in 0 ..< 12 {
+		bb := b.bitboards[piece]
+		if (seen & bb) != 0 {
+			return false, fmt.tprintf("overlapping piece bitboard for piece %d", piece)
+		}
+		seen |= bb
+
+		if piece < 6 {
+			white_occ |= bb
+		} else {
+			black_occ |= bb
+		}
+
+		tmp := bb
+		for tmp != 0 {
+			sq := utils.pop_lsb(&tmp)
+			expected_mailbox[sq] = i8(piece)
+			if piece == constants.KING {white_kings += 1}
+			if piece == constants.KING + 6 {black_kings += 1}
+		}
+	}
+
+	if white_kings != 1 || black_kings != 1 {
+		return false, fmt.tprintf("invalid king count: white=%d black=%d", white_kings, black_kings)
+	}
+	if white_occ != b.occupancies[constants.WHITE] {
+		return false, fmt.tprintf("white occupancy mismatch: expected=%x actual=%x", white_occ, b.occupancies[constants.WHITE])
+	}
+	if black_occ != b.occupancies[constants.BLACK] {
+		return false, fmt.tprintf("black occupancy mismatch: expected=%x actual=%x", black_occ, b.occupancies[constants.BLACK])
+	}
+	if (white_occ | black_occ) != b.occupancies[constants.BOTH] {
+		return false, fmt.tprintf("both occupancy mismatch: expected=%x actual=%x", white_occ | black_occ, b.occupancies[constants.BOTH])
+	}
+
+	for sq in 0 ..< 64 {
+		if b.mailbox[sq] != expected_mailbox[sq] {
+			return false, fmt.tprintf("mailbox mismatch at square %d: expected=%d actual=%d", sq, expected_mailbox[sq], b.mailbox[sq])
+		}
+	}
+
+	expected_hash := generate_hash(b)
+	if b.hash != expected_hash {
+		return false, fmt.tprintf("hash mismatch: expected=%x actual=%x", expected_hash, b.hash)
+	}
+
+	return true, ""
+}
+
+perft_validate :: proc(b: ^Board, depth: int) -> (u64, bool, string) {
+	ok, msg := validate_board_state(b)
+	if !ok {return 0, false, msg}
+	if depth == 0 {return 1, true, ""}
+
+	start_hash := b.hash
+	start_fen := get_fen(b^)
+	defer delete(start_fen)
+
+	nodes: u64 = 0
+	move_list: moves.MoveList
+	generate_all_moves(b, &move_list)
+
+	for i in 0 ..< move_list.count {
+		state: StateInfo
+		if make_move(b, move_list.moves[i], &state) {
+			child_nodes, child_ok, child_msg := perft_validate(b, depth - 1)
+			if !child_ok {
+				unmake_move(b, &state)
+				return nodes, false, child_msg
+			}
+			nodes += child_nodes
+			unmake_move(b, &state)
+
+			ok, msg = validate_board_state(b)
+			if !ok {
+				return nodes, false, fmt.tprintf("after unmake: %s", msg)
+			}
+			if b.hash != start_hash {
+				return nodes, false, fmt.tprintf("hash not restored: expected=%x actual=%x", start_hash, b.hash)
+			}
+			current_fen := get_fen(b^)
+			if current_fen != start_fen {
+				defer delete(current_fen)
+				return nodes, false, fmt.tprintf("FEN not restored: expected=%s actual=%s", start_fen, current_fen)
+			}
+			delete(current_fen)
+		} else {
+			ok, msg = validate_board_state(b)
+			if !ok {
+				return nodes, false, fmt.tprintf("after rejected move: %s", msg)
+			}
+		}
+	}
+
+	return nodes, true, ""
+}
+
+validate_perft_test :: proc(fen: string, depth: int) {
+	game_board := parse_fen(fen)
+	start_time := time.now()
+	nodes, ok, msg := perft_validate(&game_board, depth)
+	duration := time.since(start_time)
+
+	if ok {
+		fmt.printf("Validation OK: nodes=%d depth=%d time=%v\n", nodes, depth, duration)
+	} else {
+		fmt.printf("Validation FAILED: depth=%d nodes_before_failure=%d error=%s\n", depth, nodes, msg)
+	}
 }
 
 // Perft Driver (Prints results)

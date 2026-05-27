@@ -14,6 +14,7 @@ package nnue
 //   fwdOut: fc_0[31] * (600*OUTPUT_SCALE) / (127 * (1<<WEIGHT_SCALE_BITS))
 //   score = (fc_2_out + fwdOut + psqt) / OUTPUT_SCALE
 
+import "../board"
 import "core:fmt"
 import "core:os"
 
@@ -37,7 +38,7 @@ AC_CLAMP :: 127
 
 LayerStack :: struct {
 	fc0_biases:  [FC0_OUTPUTS + 1]i32,
-	fc0_weights: [FC0_OUTPUTS + 1][HALF_DIMENSIONS]i8,
+	fc0_weights: [HALF_DIMENSIONS][FC0_OUTPUTS + 1]i8,  // feature-major [1024][33]
 	fc1_biases:  [FC1_OUTPUTS]i32,
 	fc1_weights: [FC1_OUTPUTS][FC0_OUTPUTS * 2]i8,
 	fc2_bias:    i32,
@@ -130,12 +131,46 @@ read_leb128_into_i16 :: proc(data: []byte, offset: ^int, dest: []i16) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// PackusEpi16 Block Permutation (Stockfish block-level, NOT within-block)
+// ---------------------------------------------------------------------------
+@private PACKUS_ORDER := [8]int{0, 2, 1, 3, 4, 6, 5, 7}
+
+// Permute a flat 1D array (e.g., biases [1024]i16) — reorder 8-i16 blocks within 64-element groups
+permute_blocks_i16 :: proc(data: []i16) {
+	for g := 0; g < len(data); g += 64 {
+		buf: [64]i16
+		for i in 0 ..< 64 { buf[i] = data[g + i] }
+		for bi in 0 ..< 8 {
+			src := PACKUS_ORDER[bi]
+			for i in 0 ..< 8 { data[g + bi * 8 + i] = buf[src * 8 + i] }
+		}
+	}
+}
+
+// Permute a 2D array with given stride (for PSQ/threat weights [N][stride]i16)
+permute_blocks_i16_2d :: proc(data: []i16, stride: int) {
+	n := len(data) / stride
+	for r in 0 ..< n {
+		base := r * stride
+		for g := 0; g < stride; g += 64 {
+			buf: [64]i16
+			for i in 0 ..< 64 { buf[i] = data[base + g + i] }
+			for bi in 0 ..< 8 {
+				src := PACKUS_ORDER[bi]
+				for i in 0 ..< 8 { data[base + g + bi * 8 + i] = buf[src * 8 + i] }
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Weight Descrambling
 // ---------------------------------------------------------------------------
 // Stockfish SIMD-scrambles affine weights via get_weight_index().
 // Descramble: file_pos i -> output=(i/4)/(padded/4), input=((i/4)%(padded/4))*4 + i%4
 
-descramble_affine :: proc(data: []byte, offset: ^int, out_dim, input_dim, padded_in_dim: int, dst: [^]i8) {
+// When output_major=false, writes dst[j * out_dim + o] for feature-major layout.
+descramble_affine :: proc(data: []byte, offset: ^int, out_dim, input_dim, padded_in_dim: int, dst: [^]i8, output_major := true) {
 	total := out_dim * padded_in_dim
 	sg := padded_in_dim / 4  // SIMD groups per output block
 	for i in 0 ..< total {
@@ -143,7 +178,11 @@ descramble_affine :: proc(data: []byte, offset: ^int, out_dim, input_dim, padded
 		q := i / 4; r := i % 4
 		o := q / sg; j := (q % sg) * 4 + r
 		if j < input_dim {
-			dst[o * input_dim + j] = i8(b)
+			if output_major {
+				dst[o * input_dim + j] = i8(b)
+			} else {
+				dst[j * out_dim + o] = i8(b)
+			}
 		}
 	}
 }
@@ -180,25 +219,19 @@ init_sfnnv14 :: proc(filename: string) -> bool {
 		fmt.println("FAIL: biases"); return false
 	}
 
-	// 2. Threat weights raw LE i16
-	// Detect THREAT_DIMS from the PSQT+stacks bytes we know are coming.
-	// We know: PSQ weights = PSQ_DIMS * 1024 i16 (LEB128)
-	//          PSQT combined = (THREAT_DIMS + PSQ_DIMS) * 8 i32 (LEB128)
-	//          8 stacks = ~280K bytes
-	// We compute threat dims from remaining file size.
-	// For nn-7bf13f9655c8.nnue: THREAT_DIMS = 30360
-	file_threat_dims := 30360  // default for this network
-
-	twc := file_threat_dims * HALF_DIMENSIONS
-	tw, ok := read_raw_i16_array(data, &offset, twc)
-	if !ok { fmt.println("FAIL: threat weights"); return false }
-	network.transformer_threat_wts = tw
+	// 2. Threat weights raw LE i8 (NOT i16!)
+	// Stockfish threat weights: [60720][1024]i8 stored as raw LE bytes
+	file_threat_dims := 60720
+	threat_byte_count := file_threat_dims * HALF_DIMENSIONS
+	if offset + threat_byte_count > len(data) { fmt.println("FAIL: threat OOB"); return false }
+	threat_u8 := data[offset:offset+threat_byte_count]
+	offset += threat_byte_count
+	network.transformer_threat_wts = make([]i16, threat_byte_count)
+	for i in 0 ..< threat_byte_count { network.transformer_threat_wts[i] = i16(i8(threat_u8[i])) }
 
 	// 3. PSQ weights LEB128 i16
 	network.transformer_weights = make([]i16, PSQ_DIMS * HALF_DIMENSIONS)
-	if !read_leb128_into_i16(data, &offset, network.transformer_weights) {
-		fmt.println("FAIL: PSQ weights"); return false
-	}
+	if !read_leb128_into_i16(data, &offset, network.transformer_weights) { fmt.println("FAIL: PSQ wts"); return false }
 
 	// 4. PSQT combined LEB128 i32 (threatPsqtWeights + psqtWeights from ONE stream)
 	tpsqt := file_threat_dims * PSQT_BUCKETS
@@ -222,7 +255,7 @@ init_sfnnv14 :: proc(filename: string) -> bool {
 
 		// fc_0: biases[32] i32 raw + weights[32][1024] i8 descrambled
 		for i in 0 ..< FC0_OUTPUTS + 1 { s.fc0_biases[i] = read_i32(data, &offset) }
-		descramble_affine(data, &offset, FC0_OUTPUTS + 1, HALF_DIMENSIONS, HALF_DIMENSIONS, &s.fc0_weights[0][0])
+		descramble_affine(data, &offset, FC0_OUTPUTS + 1, HALF_DIMENSIONS, HALF_DIMENSIONS, &s.fc0_weights[0][0], false)
 
 		// fc_1: biases[32] i32 raw + weights[32][62] i8 descrambled (padded to 64)
 		fc1in := FC0_OUTPUTS * 2
@@ -295,7 +328,7 @@ clipped_relu :: #force_inline proc(x: i32) -> u8 {
 //
 // Result: centipawn score (Stockfish Value ≈ 1cp per unit after OUTPUT_SCALE division)
 
-evaluate_sfnnv14 :: proc(acc: [HALF_DIMENSIONS]i16, psqt: i32, bucket: int, stm: int) -> int {
+evaluate_sfnnv14 :: proc(acc: [HALF_DIMENSIONS]u8, psqt: i32, bucket: int, stm: int) -> int {
 	if !initialized { return 0 }
 
 	s := &network.stacks[bucket]
@@ -306,12 +339,10 @@ evaluate_sfnnv14 :: proc(acc: [HALF_DIMENSIONS]i16, psqt: i32, bucket: int, stm:
 	fc0: [FC0_OUTPUTS + 1]i32
 	for o in 0 ..< FC0_OUTPUTS + 1 { fc0[o] = s.fc0_biases[o] }
 	for j in 0 ..< HALF_DIMENSIONS {
-		v := acc[j]
-		if v <= 0 { continue }  // zero inputs don't contribute
-		if v > QA { v = QA }    // clamp to [0, 255] for i16 accumulator
-		vi := i32(v)
+		v := i32(acc[j])
+		if v == 0 { continue }
 		for o in 0 ..< FC0_OUTPUTS + 1 {
-			fc0[o] += vi * i32(s.fc0_weights[o][j])
+			fc0[o] += v * i32(s.fc0_weights[j][o])
 		}
 	}
 
@@ -363,11 +394,96 @@ evaluate_sfnnv14 :: proc(acc: [HALF_DIMENSIONS]i16, psqt: i32, bucket: int, stm:
 	fwd_out := fc0[FC0_OUTPUTS] * (600 * OUTPUT_SCALE) / (127 * (1 << WEIGHT_SCALE_BITS))
 
 	// --- Combine ---
-	// Stockfish returns {psqt/OutputScale, positional/OutputScale} (network.cpp:161).
-	// Caller sums them: score = (psqt + positional) / OutputScale.
-	// positional = fc2_out + fwd_out.
+	// Stockfish returns {psqt/OutputScale, positional/OutputScale} separately
+	// (network.cpp:161). Keep the divisions separate to match integer truncation.
 	out += fwd_out
-	out += psqt
 
-	return int(out / OUTPUT_SCALE)
+	return int(psqt / OUTPUT_SCALE) + int(out / OUTPUT_SCALE)
+}
+
+trace_sfnnv14 :: proc(
+	b: ^board.Board,
+) -> (
+	bucket: int,
+	psqt_cp: int,
+	positional_cp: int,
+	total_cp: int,
+	transformed_nonzero: int,
+	transformed_sum: int,
+	transformed_hash: u64,
+	psq_stm_count: int,
+	psq_stm_hash: u64,
+	psq_nstm_count: int,
+	psq_nstm_hash: u64,
+	threat_stm_count: int,
+	threat_stm_sum: u64,
+	threat_stm_hash: u64,
+	threat_nstm_count: int,
+	threat_nstm_sum: u64,
+	threat_nstm_hash: u64,
+) {
+	transformed, psqt, bucket_value := prepare_sfnnv14_evaluation(b)
+	bucket = bucket_value
+	stm := b.side
+	nstm := 1 - stm
+	psq_stm_count, psq_stm_hash = trace_psq_feature_hash(b, stm)
+	psq_nstm_count, psq_nstm_hash = trace_psq_feature_hash(b, nstm)
+	threat_stm_count, threat_stm_sum, threat_stm_hash = trace_threat_feature_hash(b, stm)
+	threat_nstm_count, threat_nstm_sum, threat_nstm_hash = trace_threat_feature_hash(b, nstm)
+
+	for v in transformed {
+		if v != 0 {transformed_nonzero += 1}
+		transformed_sum += int(v)
+		transformed_hash = transformed_hash * 131 + u64(v)
+	}
+
+	if !initialized {
+		return
+	}
+
+	s := &network.stacks[bucket]
+
+	fc0: [FC0_OUTPUTS + 1]i32
+	for o in 0 ..< FC0_OUTPUTS + 1 { fc0[o] = s.fc0_biases[o] }
+	for j in 0 ..< HALF_DIMENSIONS {
+		v := i32(transformed[j])
+		if v == 0 { continue }
+		for o in 0 ..< FC0_OUTPUTS + 1 {
+			fc0[o] += v * i32(s.fc0_weights[j][o])
+		}
+	}
+
+	fc1in: [FC0_OUTPUTS * 2]u8
+	for o in 0 ..< FC0_OUTPUTS {
+		fc1in[o]               = sqr_clipped_relu(fc0[o])
+		fc1in[FC0_OUTPUTS + o] = clipped_relu(fc0[o])
+	}
+
+	fc1: [FC1_OUTPUTS]i32
+	for o in 0 ..< FC1_OUTPUTS { fc1[o] = s.fc1_biases[o] }
+	for j in 0 ..< FC0_OUTPUTS * 2 {
+		v := fc1in[j]
+		if v == 0 { continue }
+		for o in 0 ..< FC1_OUTPUTS {
+			fc1[o] += i32(v) * i32(s.fc1_weights[o][j])
+		}
+	}
+
+	fc1_out: [FC1_OUTPUTS]u8
+	for o in 0 ..< FC1_OUTPUTS { fc1_out[o] = clipped_relu(fc1[o]) }
+
+	positional_raw: i32 = s.fc2_bias
+	for j in 0 ..< FC1_OUTPUTS {
+		v := fc1_out[j]
+		if v == 0 { continue }
+		positional_raw += i32(v) * i32(s.fc2_weights[j])
+	}
+
+	fwd_out := fc0[FC0_OUTPUTS] * (600 * OUTPUT_SCALE) / (127 * (1 << WEIGHT_SCALE_BITS))
+	positional_raw += fwd_out
+
+	psqt_cp = int(psqt / OUTPUT_SCALE)
+	positional_cp = int(positional_raw / OUTPUT_SCALE)
+	total_cp = psqt_cp + positional_cp
+	return
 }

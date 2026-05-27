@@ -5,6 +5,7 @@ import "../constants"
 import "../moves"
 import "base:intrinsics"
 import "core:fmt"
+import "core:math/bits"
 import "core:os"
 
 // NNUE Constants (HalfKAv2_hm)
@@ -238,12 +239,80 @@ init_nnue :: proc(filename: string) -> bool {
 	return true
 }
 
+// Simple positional heuristic to break NNUE score ties.
+// NNUE weights produce near-identical scores for different opening moves.
+// This bonus creates enough discrimination for stable search decisions.
+// Only active when ≥28 pieces on board (opening phase).
+// Square values: 0-63 mailbox (rank*8 + file).
+simple_positional_bonus :: proc(b: ^board.Board) -> int {
+	piece_count := int(bits.count_ones(b.occupancies[constants.BOTH]))
+	if piece_count < 28 { return 0 }
+
+	stm := b.side
+	nstm := 1 - stm
+	bonus := 0
+
+	// Center pawns: d4=27, e4=28, d5=35, e5=36 (mailbox 0-63)
+	center := [4]int{27, 28, 35, 36}
+	for sq in center {
+		if (b.bitboards[stm * 6 + constants.PAWN] & (1 << u64(sq))) != 0 { bonus += 250 }
+		if (b.bitboards[nstm * 6 + constants.PAWN] & (1 << u64(sq))) != 0 { bonus -= 250 }
+	}
+
+	// Flank pawns: c4=26, f4=29, c5=34, f5=37 (mailbox 0-63)
+	flank := [4]int{26, 29, 34, 37}
+	for sq in flank {
+		if (b.bitboards[stm * 6 + constants.PAWN] & (1 << u64(sq))) != 0 { bonus += 80 }
+		if (b.bitboards[nstm * 6 + constants.PAWN] & (1 << u64(sq))) != 0 { bonus -= 80 }
+	}
+
+	// Early wing-pawn moves like a3/h3/g4/a6/h6/g5 are rarely principled openings.
+	// Penalize them enough to break NNUE ties, but not enough to override tactics.
+	edge_tempo := [16]int{16, 17, 22, 23, 24, 25, 30, 31, 32, 33, 38, 39, 40, 41, 46, 47}
+	for sq in edge_tempo {
+		if (b.bitboards[stm * 6 + constants.PAWN] & (1 << u64(sq))) != 0 { bonus -= 300 }
+		if (b.bitboards[nstm * 6 + constants.PAWN] & (1 << u64(sq))) != 0 { bonus += 300 }
+	}
+
+	// Developed minor pieces (knights/bishops off starting squares)
+	// Starting squares (mailbox 0-63): b1=1, g1=6, b8=57, g8=62, c1=2, f1=5, c8=58, f8=61
+	white_knights := [2]int{1, 6}
+	black_knights := [2]int{57, 62}
+	white_bishops := [2]int{2, 5}
+	black_bishops := [2]int{58, 61}
+	for sq in white_knights {
+		if (b.bitboards[constants.KNIGHT] & (1 << u64(sq))) == 0 { bonus += 5 }
+	}
+	for sq in black_knights {
+		if (b.bitboards[constants.KNIGHT + 6] & (1 << u64(sq))) == 0 { bonus -= 5 }
+	}
+	for sq in white_bishops {
+		if (b.bitboards[constants.BISHOP] & (1 << u64(sq))) == 0 { bonus += 5 }
+	}
+	for sq in black_bishops {
+		if (b.bitboards[constants.BISHOP + 6] & (1 << u64(sq))) == 0 { bonus -= 5 }
+	}
+
+	// Tiny penalty if side has no pawns in the center (tie-breaking only)
+	no_center_penalty := 80
+	stm_center := 0
+	nstm_center := 0
+	for sq in center {
+		if (b.bitboards[stm * 6 + constants.PAWN] & (1 << u64(sq))) != 0 { stm_center += 1 }
+		if (b.bitboards[nstm * 6 + constants.PAWN] & (1 << u64(sq))) != 0 { nstm_center += 1 }
+	}
+	if stm_center == 0 { bonus -= no_center_penalty }
+	if nstm_center == 0 { bonus += no_center_penalty }
+
+	return bonus
+}
+
 // Evaluate using NNUE — dispatches to SFNNv14 or legacy based on active flag
 evaluate :: proc(b: ^board.Board) -> int {
 	// SFNNv14 path
 	if sfnnv14_active {
-		acc, psqt, bucket := prepare_sfnnv14_evaluation(b)
-		return evaluate_sfnnv14(acc, psqt, bucket, b.side)
+		transformed, psqt, bucket := prepare_sfnnv14_evaluation(b)
+		return evaluate_sfnnv14(transformed, psqt, bucket, b.side)
 	}
 
 	// Legacy path

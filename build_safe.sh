@@ -1,7 +1,10 @@
 #!/bin/bash
-# Build Mantis with all optimizations
+# Build Mantis with all optimizations (AVX2 auto-vectorized)
+# For portable builds (SSE2 baseline), change -microarch:native to -microarch:x86-64-v2
 
-echo "Building Mantis (Full Optimizations)..."
+MARCH="${1:-native}"
+
+echo "Building Mantis (Full Optimizations, microarch=$MARCH)..."
 echo ""
 
 # Clean old binary
@@ -11,8 +14,8 @@ if [ -f mantis ]; then
 fi
 
 # Build with full optimizations
-echo "Compiling with -o:speed -no-bounds-check -disable-assert..."
-odin build . -out:mantis -o:speed -no-bounds-check -disable-assert -extra-linker-flags:"-Ltb -lsyzygy"
+echo "Compiling with -o:speed -no-bounds-check -disable-assert -microarch:$MARCH..."
+odin build . -out:mantis -o:speed -no-bounds-check -disable-assert -microarch:$MARCH -extra-linker-flags:"-Ltb -lsyzygy"
 
 if [ $? -eq 0 ]; then
 	echo ""

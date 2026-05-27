@@ -514,9 +514,12 @@ fast_update_threat_accumulators_for_move :: proc(
 		mantis_piece += 6
 	}
 
+	// Clear threat buffer before populating
+	buffer.threat.add_count = 0
+	buffer.threat.sub_count = 0
+
 	// Step 1: Remove piece from source
 	fast_on_change_sub(new_b, constants.WHITE, mantis_piece, int(move.source), &buffer.threat)
-	fast_on_change_sub(new_b, constants.BLACK, mantis_piece, int(move.source), &buffer.threat)
 
 	// Step 2: Add piece at destination
 	final_piece := mantis_piece
@@ -528,21 +531,18 @@ fast_update_threat_accumulators_for_move :: proc(
 	}
 
 	fast_on_change_add(new_b, constants.WHITE, final_piece, int(move.target), &buffer.threat)
-	fast_on_change_add(new_b, constants.BLACK, final_piece, int(move.target), &buffer.threat)
 
 	// Step 3: Handle captures
 	if move.capture {
 		captured := int(old_b.mailbox[move.target])
 		if captured != -1 {
 			fast_on_change_sub(new_b, constants.WHITE, captured, int(move.target), &buffer.threat)
-			fast_on_change_sub(new_b, constants.BLACK, captured, int(move.target), &buffer.threat)
 		}
 	}
 
 	// Step 4: Handle promotion (remove pawn at dst if different from final_piece)
 	if move.promoted != -1 && mantis_piece != final_piece {
 		fast_on_change_sub(new_b, constants.WHITE, mantis_piece, int(move.target), &buffer.threat)
-		fast_on_change_sub(new_b, constants.BLACK, mantis_piece, int(move.target), &buffer.threat)
 	}
 
 	// Step 5: Handle en passant capture
@@ -550,7 +550,6 @@ fast_update_threat_accumulators_for_move :: proc(
 		ep_sq := side == constants.WHITE ? int(move.target) - 8 : int(move.target) + 8
 		captured_pawn := side == constants.WHITE ? constants.PAWN + 6 : constants.PAWN
 		fast_on_change_sub(new_b, constants.WHITE, captured_pawn, ep_sq, &buffer.threat)
-		fast_on_change_sub(new_b, constants.BLACK, captured_pawn, ep_sq, &buffer.threat)
 	}
 
 	return true

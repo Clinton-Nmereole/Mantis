@@ -12,8 +12,8 @@ MATE :: 49000
 // Evaluate the board position
 // Returns score in centipawns (from side to move perspective)
 evaluate :: proc(b: ^board.Board) -> int {
-	// Try NNUE
-	if nnue.is_initialized {
+	// Try NNUE (either SFNNv14 or legacy)
+	if nnue.is_initialized || nnue.sfnnv14_active {
 		return nnue.evaluate(b)
 	}
 
