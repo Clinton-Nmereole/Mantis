@@ -7,6 +7,7 @@ import "core:math/bits"
 import "core:os"
 import "core:strconv"
 import "moves"
+import "nnue"
 import "search"
 import "uci"
 import "zobrist"
@@ -58,6 +59,24 @@ main :: proc() {
 
 	// Check for CLI perft mode
 	args := os.args
+	if len(args) >= 3 && args[1] == "validate-threat" {
+		depth, ok := strconv.parse_int(args[2])
+		if ok && depth >= 1 {
+			fen := "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+			if len(args) >= 5 && args[3] == "fen" {
+				fen = args[4]
+			}
+			if nnue.init_sfnnv14("nn-7bf13f9655c8.nnue") {
+				nnue.sfnnv14_active = true
+				nnue.init_sfnnv14_features()
+				nnue.validate_threat_incremental_test(fen, depth)
+			} else {
+				fmt.println("Threat validation FAILED: could not load SFNNv14 network")
+			}
+			return
+		}
+	}
+
 	if len(args) >= 3 && args[1] == "perft" {
 		depth, ok := strconv.parse_int(args[2])
 		if ok && depth >= 1 {

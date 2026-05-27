@@ -694,6 +694,42 @@ add_threat_feature :: proc(state: ^board.SFNNv14_AccumulatorState, perspective: 
 	}
 }
 
+apply_threat_feature_delta :: proc(
+	state: ^board.SFNNv14_AccumulatorState,
+	perspective: int,
+	feature_idx: int,
+	add: bool,
+) {
+	if len(sfnnv14_transformer.threat_weights) == 0 {
+		return
+	}
+	if feature_idx < 0 || feature_idx >= SFNNV14_THREAT_DIMENSIONS {
+		return
+	}
+
+	weight_offset := feature_idx * SFNNV14_L1
+	if add {
+		for i in 0 ..< SFNNV14_L1 {
+			state.accumulation[perspective][i] += sfnnv14_transformer.threat_weights[weight_offset + i]
+		}
+	} else {
+		for i in 0 ..< SFNNV14_L1 {
+			state.accumulation[perspective][i] -= sfnnv14_transformer.threat_weights[weight_offset + i]
+		}
+	}
+
+	psqt_offset := feature_idx * SFNNV14_PSQT_BUCKETS
+	if add {
+		for i in 0 ..< SFNNV14_PSQT_BUCKETS {
+			state.psqt_accumulation[perspective][i] += sfnnv14_transformer.threat_psqt_weights[psqt_offset + i]
+		}
+	} else {
+		for i in 0 ..< SFNNV14_PSQT_BUCKETS {
+			state.psqt_accumulation[perspective][i] -= sfnnv14_transformer.threat_psqt_weights[psqt_offset + i]
+		}
+	}
+}
+
 // ============================================================================
 // Incremental Update Functions
 // ============================================================================
@@ -1196,12 +1232,10 @@ update_sfnnv14_accumulators :: proc(old_board: ^board.Board, new_board: ^board.B
 	}
 
 	// --- Threat Accumulator Updates ---
-	// FullThreats are highly sensitive to discovered and blocked attacks. The
-	// delta updater is not parity-correct yet, so refresh both perspectives to
-	// preserve exact NNUE input features during search.
-	for perspective in 0 ..= 1 {
-		refresh_threat_accumulator(new_board, perspective)
-	}
+	// Build the exact old/new FullThreats index sets and apply only the row
+	// differences. This keeps the source of truth identical to full refresh
+	// while avoiding work for unchanged threat features.
+	update_threat_accumulators_by_index_diff(old_board, new_board)
 }
 
 // ============================================================================
@@ -1288,6 +1322,266 @@ refresh_sfnnv14_accumulators :: proc(b: ^board.Board) {
 	for perspective in 0 ..= 1 {
 		refresh_psq_accumulator(b, perspective)
 		refresh_threat_accumulator(b, perspective)
+	}
+}
+
+collect_threat_indices :: proc(b: ^board.Board, perspective: int, out: ^[128]int) -> int {
+	count := 0
+	ksq := board.get_king_square(b, perspective)
+	occupied := b.occupancies[constants.BOTH]
+	all_pawns := b.bitboards[constants.PAWN] | b.bitboards[constants.PAWN + 6]
+
+	add_idx :: proc(out: ^[128]int, count: ^int, idx: int) {
+		if idx < SFNNV14_THREAT_DIMENSIONS && count^ < len(out^) {
+			out[count^] = idx
+			count^ += 1
+		}
+	}
+
+	for color in 0 ..= 1 {
+		c := perspective ~ color
+
+		attacker := c * 6 + constants.PAWN
+		c_pawns := b.bitboards[c * 6 + constants.PAWN]
+
+		pushers: u64 = 0
+		if c == constants.WHITE {
+			pushers = ((all_pawns & ~constants.RANK_1) >> 8) & c_pawns
+		} else {
+			pushers = ((all_pawns & ~constants.RANK_8) << 8) & c_pawns
+		}
+
+		if c == constants.WHITE {
+			attacks := (c_pawns & ~constants.FILE_H) << 9
+			attacks &= occupied
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to - 9
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(out, &count, idx)
+			}
+
+			attacks = (c_pawns & ~constants.FILE_A) << 7
+			attacks &= occupied
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to - 7
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(out, &count, idx)
+			}
+
+			attacks = pushers << 8
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to - 8
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(out, &count, idx)
+			}
+		} else {
+			attacks := (c_pawns & ~constants.FILE_A) >> 9
+			attacks &= occupied
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to + 9
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(out, &count, idx)
+			}
+
+			attacks = (c_pawns & ~constants.FILE_H) >> 7
+			attacks &= occupied
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to + 7
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(out, &count, idx)
+			}
+
+			attacks = pushers >> 8
+			for attacks != 0 {
+				to := utils.pop_lsb(&attacks)
+				from := to + 8
+				attacked_piece := int(b.mailbox[to])
+				idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+				add_idx(out, &count, idx)
+			}
+		}
+
+		for pt in constants.KNIGHT ..< constants.KING {
+			attacker = c * 6 + pt
+			bb := b.bitboards[attacker]
+
+			for bb != 0 {
+				from := utils.pop_lsb(&bb)
+
+				attacks: u64 = 0
+				switch pt {
+				case constants.KNIGHT:
+					attacks = moves.get_knight_attacks_bitboard(from)
+				case constants.BISHOP:
+					attacks = moves.get_bishop_attacks(from, occupied)
+				case constants.ROOK:
+					attacks = moves.get_rook_attacks(from, occupied)
+				case constants.QUEEN:
+					attacks = moves.get_queen_attacks(from, occupied)
+				}
+
+				attacks &= occupied
+				for attacks != 0 {
+					to := utils.pop_lsb(&attacks)
+					attacked_piece := int(b.mailbox[to])
+					idx := get_threat_feature_index(perspective, attacker, from, to, attacked_piece, ksq)
+					add_idx(out, &count, idx)
+				}
+			}
+		}
+	}
+
+	return count
+}
+
+apply_threat_index_diff :: proc(
+	state: ^board.SFNNv14_AccumulatorState,
+	perspective: int,
+	old_indices: ^[128]int,
+	old_count: int,
+	new_indices: ^[128]int,
+	new_count: int,
+) {
+	used_new: [128]bool
+
+	for i in 0 ..< old_count {
+		found := false
+		for j in 0 ..< new_count {
+			if !used_new[j] && old_indices[i] == new_indices[j] {
+				used_new[j] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			apply_threat_feature_delta(state, perspective, old_indices[i], false)
+		}
+	}
+
+	for j in 0 ..< new_count {
+		if !used_new[j] {
+			apply_threat_feature_delta(state, perspective, new_indices[j], true)
+		}
+	}
+}
+
+update_threat_accumulators_by_index_diff :: proc(old_board: ^board.Board, new_board: ^board.Board) {
+	for perspective in 0 ..= 1 {
+		old_indices: [128]int
+		new_indices: [128]int
+		old_count := collect_threat_indices(old_board, perspective, &old_indices)
+		new_count := collect_threat_indices(new_board, perspective, &new_indices)
+
+		apply_threat_index_diff(
+			&new_board.sfnnv14_accumulators.threat,
+			perspective,
+			&old_indices,
+			old_count,
+			&new_indices,
+			new_count,
+		)
+		new_board.sfnnv14_accumulators.threat.computed[perspective] = true
+	}
+}
+
+compare_threat_accumulators :: proc(a: ^board.Board, b: ^board.Board) -> (bool, string) {
+	for perspective in 0 ..= 1 {
+		for i in 0 ..< SFNNV14_L1 {
+			if a.sfnnv14_accumulators.threat.accumulation[perspective][i] !=
+			   b.sfnnv14_accumulators.threat.accumulation[perspective][i] {
+				return false, fmt.tprintf(
+					"threat accumulation mismatch perspective=%d index=%d incremental=%d refresh=%d",
+					perspective,
+					i,
+					a.sfnnv14_accumulators.threat.accumulation[perspective][i],
+					b.sfnnv14_accumulators.threat.accumulation[perspective][i],
+				)
+			}
+		}
+		for i in 0 ..< SFNNV14_PSQT_BUCKETS {
+			if a.sfnnv14_accumulators.threat.psqt_accumulation[perspective][i] !=
+			   b.sfnnv14_accumulators.threat.psqt_accumulation[perspective][i] {
+				return false, fmt.tprintf(
+					"threat psqt mismatch perspective=%d bucket=%d incremental=%d refresh=%d",
+					perspective,
+					i,
+					a.sfnnv14_accumulators.threat.psqt_accumulation[perspective][i],
+					b.sfnnv14_accumulators.threat.psqt_accumulation[perspective][i],
+				)
+			}
+		}
+	}
+
+	return true, ""
+}
+
+validate_threat_incremental :: proc(b: ^board.Board, depth: int) -> (nodes: u64, ok: bool, msg: string) {
+	if depth == 0 {
+		return 1, true, ""
+	}
+
+	move_list: moves.MoveList
+	board.generate_all_moves(b, &move_list)
+
+	for i in 0 ..< move_list.count {
+		state: board.StateInfo
+		board.make_move_fast(b, move_list.moves[i], &state)
+
+		king_sq := board.get_king_square(b, 1 - b.side)
+		if board.is_square_attacked(b, king_sq, b.side) {
+			board.unmake_move(b, &state)
+			continue
+		}
+
+		update_accumulators(&state, b, move_list.moves[i])
+
+		refreshed := b^
+		for perspective in 0 ..= 1 {
+			refresh_threat_accumulator(&refreshed, perspective)
+		}
+
+		match, compare_msg := compare_threat_accumulators(b, &refreshed)
+		if !match {
+			board.unmake_move(b, &state)
+			return nodes, false, fmt.tprintf(
+				"after move source=%d target=%d promoted=%d: %s",
+				move_list.moves[i].source,
+				move_list.moves[i].target,
+				move_list.moves[i].promoted,
+				compare_msg,
+			)
+		}
+
+		child_nodes, child_ok, child_msg := validate_threat_incremental(b, depth - 1)
+		if !child_ok {
+			board.unmake_move(b, &state)
+			return nodes, false, child_msg
+		}
+		nodes += child_nodes
+		board.unmake_move(b, &state)
+	}
+
+	return nodes, true, ""
+}
+
+validate_threat_incremental_test :: proc(fen: string, depth: int) {
+	game_board := board.parse_fen(fen)
+	refresh_sfnnv14_accumulators(&game_board)
+	nodes, ok, msg := validate_threat_incremental(&game_board, depth)
+	if ok {
+		fmt.printf("Threat incremental validation OK: nodes=%d depth=%d\n", nodes, depth)
+	} else {
+		fmt.printf("Threat incremental validation FAILED: depth=%d nodes_before_failure=%d error=%s\n", depth, nodes, msg)
 	}
 }
 
