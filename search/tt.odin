@@ -100,6 +100,7 @@ score_from_tt :: proc(score: int, ply: int) -> int {
 // Returns: score, found
 probe_tt :: proc(key: u64, alpha: int, beta: int, depth: int, ply: int) -> (int, bool) {
 	if len(tt) == 0 { return 0, false }
+	stat_add(&search_stats.tt_probes)
 
 	index := key % u64(len(tt))
 	bucket := &tt[index]
@@ -109,6 +110,7 @@ probe_tt :: proc(key: u64, alpha: int, beta: int, depth: int, ply: int) -> (int,
 		entry_key := sync.atomic_load(&entry.key)
 
 		if entry_key == key && entry.depth >= depth {
+			stat_add(&search_stats.tt_hits)
 			score := score_from_tt(entry.score, ply)
 			#no_bounds_check {
 				if entry.flag == TT_FLAG_EXACT {
@@ -171,6 +173,7 @@ get_tt_move :: proc(key: u64) -> moves.Move {
 //     - If still tied, prefer entry[1] (always-replace slot)
 store_tt :: proc(key: u64, move: moves.Move, score: int, depth: int, flag: u8, ply: int) {
 	if len(tt) == 0 { return }
+	stat_add(&search_stats.tt_stores)
 
 	index := key % u64(len(tt))
 	bucket := &tt[index]

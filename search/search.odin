@@ -86,6 +86,131 @@ SearchThread :: struct {
 // Global atomic node counter for UCI reporting
 total_nodes: u64 = 0
 
+SearchStats :: struct {
+	nodes:              u64,
+	qnodes:             u64,
+	evals:              u64,
+	movegen_calls:      u64,
+	moves_generated:    u64,
+	legal_rejects:      u64,
+	tt_probes:          u64,
+	tt_hits:            u64,
+	tt_cutoffs:         u64,
+	tt_stores:          u64,
+	tb_probes:          u64,
+	tb_hits:            u64,
+	nmp_tries:          u64,
+	nmp_cutoffs:        u64,
+	rfp_cutoffs:        u64,
+	razor_tries:        u64,
+	razor_cutoffs:      u64,
+	probcut_tries:      u64,
+	probcut_cutoffs:    u64,
+	futility_prunes:    u64,
+	lmp_prunes:         u64,
+	lmr_searches:       u64,
+	lmr_researches:     u64,
+	pvs_researches:     u64,
+	q_delta_prunes:     u64,
+	q_see_prunes:       u64,
+	see_calls:          u64,
+	beta_cutoffs:       u64,
+	aspiration_fail_low:  u64,
+	aspiration_fail_high: u64,
+}
+
+search_stats_enabled: bool = false
+search_stats: SearchStats
+
+reset_search_stats :: proc() {
+	search_stats = SearchStats{}
+}
+
+stat_add :: proc(counter: ^u64, amount: u64 = 1) {
+	if search_stats_enabled {
+		sync.atomic_add(counter, amount)
+	}
+}
+
+stat_load :: proc(counter: ^u64) -> u64 {
+	return sync.atomic_load(counter)
+}
+
+print_search_stats :: proc() {
+	if !search_stats_enabled {return}
+
+	nodes := stat_load(&search_stats.nodes)
+	qnodes := stat_load(&search_stats.qnodes)
+	tt_probes := stat_load(&search_stats.tt_probes)
+	tt_hits := stat_load(&search_stats.tt_hits)
+	tt_cutoffs := stat_load(&search_stats.tt_cutoffs)
+	movegen_calls := stat_load(&search_stats.movegen_calls)
+	moves_generated := stat_load(&search_stats.moves_generated)
+	see_calls := stat_load(&search_stats.see_calls)
+
+	tt_hit_pct: u64 = 0
+	tt_cut_pct: u64 = 0
+	avg_moves: u64 = 0
+	qnode_pct: u64 = 0
+	if tt_probes > 0 {
+		tt_hit_pct = tt_hits * 100 / tt_probes
+		tt_cut_pct = tt_cutoffs * 100 / tt_probes
+	}
+	if movegen_calls > 0 {
+		avg_moves = moves_generated / movegen_calls
+	}
+	if nodes > 0 {
+		qnode_pct = qnodes * 100 / nodes
+	}
+
+	fmt.printf(
+		"info string stats nodes=%d qnodes=%d qnode_pct=%d evals=%d movegen=%d avg_moves=%d legal_rejects=%d see=%d\n",
+		nodes,
+		qnodes,
+		qnode_pct,
+		stat_load(&search_stats.evals),
+		movegen_calls,
+		avg_moves,
+		stat_load(&search_stats.legal_rejects),
+		see_calls,
+	)
+	fmt.printf(
+		"info string stats tt probes=%d hits=%d hit_pct=%d cutoffs=%d cut_pct=%d stores=%d tb_probes=%d tb_hits=%d\n",
+		tt_probes,
+		tt_hits,
+		tt_hit_pct,
+		tt_cutoffs,
+		tt_cut_pct,
+		stat_load(&search_stats.tt_stores),
+		stat_load(&search_stats.tb_probes),
+		stat_load(&search_stats.tb_hits),
+	)
+	fmt.printf(
+		"info string stats prune nmp=%d/%d rfp=%d razor=%d/%d probcut=%d/%d futility=%d lmp=%d qdelta=%d qsee=%d\n",
+		stat_load(&search_stats.nmp_cutoffs),
+		stat_load(&search_stats.nmp_tries),
+		stat_load(&search_stats.rfp_cutoffs),
+		stat_load(&search_stats.razor_cutoffs),
+		stat_load(&search_stats.razor_tries),
+		stat_load(&search_stats.probcut_cutoffs),
+		stat_load(&search_stats.probcut_tries),
+		stat_load(&search_stats.futility_prunes),
+		stat_load(&search_stats.lmp_prunes),
+		stat_load(&search_stats.q_delta_prunes),
+		stat_load(&search_stats.q_see_prunes),
+	)
+	fmt.printf(
+		"info string stats search beta_cutoffs=%d lmr=%d lmr_research=%d pvs_research=%d asp_low=%d asp_high=%d\n",
+		stat_load(&search_stats.beta_cutoffs),
+		stat_load(&search_stats.lmr_searches),
+		stat_load(&search_stats.lmr_researches),
+		stat_load(&search_stats.pvs_researches),
+		stat_load(&search_stats.aspiration_fail_low),
+		stat_load(&search_stats.aspiration_fail_high),
+	)
+	os.flush(os.stdout)
+}
+
 // Initialize a SearchThread
 init_search_thread :: proc(st: ^SearchThread, id: int) {
 	st.thread_id = id
@@ -265,6 +390,7 @@ get_continuation_score :: proc(st: ^SearchThread, prev_move: moves.Move, curr_mo
 // Count nodes and periodically update global atomic counter
  count_nodes :: proc(st: ^SearchThread) {
 	st.nodes += 1
+	stat_add(&search_stats.nodes)
 	if st.nodes % 1024 == 0 {
 		sync.atomic_add(&total_nodes, 1024)
 	}
@@ -312,14 +438,17 @@ negamax :: proc(
 	if moves.is_empty_move(excluded_move) {
 		tt_score, tt_hit := probe_tt(b.hash, alpha, beta, depth, ply)
 		if tt_hit {
+			stat_add(&search_stats.tt_cutoffs)
 			return tt_score
 		}
 	}
 
 	// Syzygy WDL Probe (during search, for exact endgame scores)
 	if !is_pv && depth >= 1 {
+		stat_add(&search_stats.tb_probes)
 		tb_score, tb_hit := tb.probe_wdl(b)
 		if tb_hit {
+			stat_add(&search_stats.tb_hits)
 			return tb_score
 		}
 	}
@@ -356,6 +485,7 @@ negamax :: proc(
 	}
 
 	// Compute static evaluation once and cache it for improving heuristic
+	stat_add(&search_stats.evals)
 	static_eval := eval.evaluate(b)
 	st.static_eval_stack[ply] = static_eval
 
@@ -369,9 +499,11 @@ negamax :: proc(
 	   depth <= params.razor_max_depth && moves.is_empty_move(excluded_move) {
 		razor_margin := params.razor_margin * depth
 		if static_eval + razor_margin < alpha {
+			stat_add(&search_stats.razor_tries)
 			// Position is so bad even with margin, just do quiescence
 			qscore := quiescence(st, b, alpha, beta, ply)
 			if qscore < alpha {
+				stat_add(&search_stats.razor_cutoffs)
 				return qscore
 			}
 		}
@@ -391,6 +523,7 @@ negamax :: proc(
 		static_eval >= beta
 
 	if can_null_move {
+		stat_add(&search_stats.nmp_tries)
 		// Make null move
 		null_board := b^
 		null_board.side = 1 - null_board.side
@@ -425,6 +558,7 @@ negamax :: proc(
 
 		// If null move fails high, prune
 		if null_score >= beta {
+			stat_add(&search_stats.nmp_cutoffs)
 			return beta
 		}
 	}
@@ -437,6 +571,7 @@ negamax :: proc(
 		rfp_margin := params.rfp_margin * effective_depth
 
 		if static_eval - rfp_margin >= beta {
+			stat_add(&search_stats.rfp_cutoffs)
 			return static_eval - rfp_margin
 		}
 	}
@@ -455,9 +590,12 @@ negamax :: proc(
 			probcut_beta = eval.MATE - MAX_PLY - 1
 		}
 		if static_eval >= probcut_beta {
+			stat_add(&search_stats.probcut_tries)
 			// Try a few tactical moves at reduced depth
 			tactical_list: moves.MoveList
 			board.generate_all_moves(b, &tactical_list)
+			stat_add(&search_stats.movegen_calls)
+			stat_add(&search_stats.moves_generated, u64(tactical_list.count))
 			sort_moves(st, &tactical_list, b, tt_move, ply, prev_move)
 
 			for j in 0 ..< tactical_list.count {
@@ -475,6 +613,7 @@ negamax :: proc(
 				king_sq := board.get_king_square(b, 1 - b.side)
 				if board.is_square_attacked(b, king_sq, b.side) {
 					board.unmake_move(b, &t_state)
+					stat_add(&search_stats.legal_rejects)
 					continue
 				}
 
@@ -498,6 +637,7 @@ negamax :: proc(
 				board.unmake_move(b, &t_state)
 
 				if probcut_score >= probcut_beta {
+					stat_add(&search_stats.probcut_cutoffs)
 					return probcut_beta
 				}
 			}
@@ -509,6 +649,8 @@ negamax :: proc(
 	// deferred delete removed: MoveList is stack-allocated
 
 	board.generate_all_moves(b, &move_list)
+	stat_add(&search_stats.movegen_calls)
+	stat_add(&search_stats.moves_generated, u64(move_list.count))
 
 	// Internal Iterative Reduction (IIR)
 	// If we have no hash move and this is a PV node, reduce depth
@@ -615,6 +757,7 @@ negamax :: proc(
 		king_sq := board.get_king_square(b, 1 - b.side)
 		if board.is_square_attacked(b, king_sq, b.side) {
 			board.unmake_move(b, &state)
+			stat_add(&search_stats.legal_rejects)
 			continue
 		}
 
@@ -628,6 +771,7 @@ negamax :: proc(
 		if !is_pv && !in_check && legal_moves >= lmp_threshold &&
 		   !gives_check && !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
 			board.unmake_move(b, &state)
+			stat_add(&search_stats.lmp_prunes)
 			continue
 		}
 
@@ -635,6 +779,7 @@ negamax :: proc(
 		if do_futility && legal_moves > 0 && !gives_check &&
 		   !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
 			board.unmake_move(b, &state)
+			stat_add(&search_stats.futility_prunes)
 			continue
 		}
 
@@ -693,6 +838,9 @@ negamax :: proc(
 				if reduction < 0 { reduction = 0 }
 				if reduction > combined_depth - 2 { reduction = combined_depth - 2 }
 			}
+			if reduction > 0 {
+				stat_add(&search_stats.lmr_searches)
+			}
 
 			// Null window search with reduction
 			score = -negamax(
@@ -710,6 +858,7 @@ negamax :: proc(
 
 			// Re-search if reduced search raised alpha
 			if score > current_alpha && reduction > 0 {
+				stat_add(&search_stats.lmr_researches)
 				// Re-search at full depth with null window
 				score = -negamax(
 					st,
@@ -727,6 +876,7 @@ negamax :: proc(
 
 			// Re-search if within bounds (PVS)
 			if score > current_alpha && score < beta {
+				stat_add(&search_stats.pvs_researches)
 				score = -negamax(
 					st,
 					b,
@@ -761,6 +911,7 @@ negamax :: proc(
 		}
 
 		if current_alpha >= beta {
+			stat_add(&search_stats.beta_cutoffs)
 			// Beta Cutoff - store killer, history, and counter move for quiet moves
 			if !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
 				store_killer(st, move_list.moves[i], ply)
@@ -850,6 +1001,7 @@ least_valuable_attacker :: proc(b: ^board.Board, attackers: u64, side: int) -> (
 // Static Exchange Evaluation. Returns the material result of the capture
 // after both sides make their best recaptures on the target square.
 see_capture :: proc(b: ^board.Board, move: moves.Move) -> int {
+	stat_add(&search_stats.see_calls)
 	if !move.capture {
 		return 0
 	}
@@ -913,6 +1065,7 @@ see_capture :: proc(b: ^board.Board, move: moves.Move) -> int {
 // Quiescence Search
 quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, ply: int) -> int {
 	count_nodes(st)
+	stat_add(&search_stats.qnodes)
 
 	// Time check: stop if hard limit exceeded
 	if use_time_management && st.nodes % 1024 == 0 {
@@ -929,6 +1082,7 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 		}
 	}
 
+	stat_add(&search_stats.evals)
 	evaluation := eval.evaluate(b)
 
 	king_sq := board.get_king_square(b, b.side)
@@ -949,6 +1103,7 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 		// stop searching captures.  Delta is the maximum material swing
 		// from a single capture (typically queen value + small margin).
 		if evaluation + params.delta_pruning_margin < alpha {
+			stat_add(&search_stats.q_delta_prunes)
 			return evaluation
 		}
 	}
@@ -956,6 +1111,8 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 	move_list: moves.MoveList
 	// deferred delete removed: MoveList is stack-allocated
 	board.generate_all_moves(b, &move_list)
+	stat_add(&search_stats.movegen_calls)
+	stat_add(&search_stats.moves_generated, u64(move_list.count))
 
 	// Move Ordering for Quiescence
 	sort_moves(st, &move_list, b)
@@ -975,6 +1132,7 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 		if move_list.moves[i].capture && !in_check {
 			see_score := see_capture(b, move_list.moves[i])
 			if see_score < params.see_prune_threshold {
+				stat_add(&search_stats.q_see_prunes)
 				continue // Skip this losing capture
 			}
 		}
@@ -990,6 +1148,7 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 		king_sq := board.get_king_square(b, 1 - b.side)
 		if board.is_square_attacked(b, king_sq, b.side) {
 			board.unmake_move(b, &state)
+			stat_add(&search_stats.legal_rejects)
 			continue
 		}
 		legal_moves += 1
@@ -1031,6 +1190,7 @@ search_position :: proc(
 	// fmt.println("DEBUG: Entering search_position")
 	st.nodes = 0
 	sync.atomic_store(&total_nodes, 0)
+	reset_search_stats()
 	clear_killers(st) // Clear killer moves for new search
 	clear_history(st) // Clear history table for new search
 	clear_counter_moves(st) // Clear counter moves for new search
@@ -1091,6 +1251,8 @@ search_position :: proc(
 		all_moves: moves.MoveList
 		// deferred delete removed: MoveList is stack-allocated
 		board.generate_all_moves(b, &all_moves)
+		stat_add(&search_stats.movegen_calls)
+		stat_add(&search_stats.moves_generated, u64(all_moves.count))
 
 		// Track which moves have been searched for MultiPV
 		excluded_moves: [dynamic]moves.Move
@@ -1164,6 +1326,7 @@ search_position :: proc(
 				king_sq := board.get_king_square(b, 1 - b.side)
 				if board.is_square_attacked(b, king_sq, b.side) {
 					board.unmake_move(b, &state)
+					stat_add(&search_stats.legal_rejects)
 					continue
 				}
 
@@ -1208,6 +1371,7 @@ search_position :: proc(
 
 				if best_score <= alpha {
 					aspiration_failures += 1
+					stat_add(&search_stats.aspiration_fail_low)
 					// Failed low - re-search with lower bound
 					alpha = -eval.INF
 					best_score = -eval.INF
@@ -1230,6 +1394,7 @@ search_position :: proc(
 						king_sq := board.get_king_square(b, 1 - b.side)
 						if board.is_square_attacked(b, king_sq, b.side) {
 							board.unmake_move(b, &state)
+							stat_add(&search_stats.legal_rejects)
 							continue
 						}
 
@@ -1265,6 +1430,7 @@ search_position :: proc(
 					}
 				} else if best_score >= beta {
 					aspiration_failures += 1
+					stat_add(&search_stats.aspiration_fail_high)
 					// Failed high - re-search with upper bound
 					beta = eval.INF
 					best_score = -eval.INF
@@ -1287,6 +1453,7 @@ search_position :: proc(
 						king_sq := board.get_king_square(b, 1 - b.side)
 						if board.is_square_attacked(b, king_sq, b.side) {
 							board.unmake_move(b, &state)
+							stat_add(&search_stats.legal_rejects)
 							continue
 						}
 
@@ -1497,6 +1664,7 @@ search_position :: proc(
 				fmt.printf("info string CRITICAL: no legal moves found!\n")
 			}
 		}
+		print_search_stats()
 		fmt.printf("bestmove ")
 		board.print_move(best_move)
 		fmt.printf("\n")

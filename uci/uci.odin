@@ -142,6 +142,7 @@ uci_loop :: proc() {
 			fmt.println("option name SyzygyProbeLimit type spin default 6 min 0 max 7")
 			fmt.println("option name Threads type spin default 1 min 1 max 512")
 			fmt.println("option name Contempt type spin default 24 min -100 max 100")
+			fmt.println("option name SearchStats type check default false")
 			fmt.println("uciok")
 			os.flush(os.stdout)
 		} else if command == "isready" {
@@ -621,6 +622,12 @@ parse_setoption :: proc(command: string) {
 				thread_count = val
 				// Reinitialize thread pool with new count
 				search.init_thread_pool(val)
+			}
+		} else if name == "SearchStats" {
+			if parts[4] == "true" {
+				search.search_stats_enabled = true
+			} else if parts[4] == "false" {
+				search.search_stats_enabled = false
 			}
 		} else if name == "Contempt" {
 			val, ok := strconv.parse_int(parts[4])
