@@ -86,6 +86,8 @@ def parse_stats(output: str) -> dict[str, int | str]:
                     "capture_beta",
                     "capture_hist_updates",
                     "capture_hist_maluses",
+                    "cont_updates",
+                    "cont_maluses",
                 }:
                     stats[f"search_{key}"] = int(value)
                     continue
@@ -151,6 +153,8 @@ def print_summary(rows: list[dict[str, int | str]]) -> None:
     total_capture_beta = sum(int(row.get("search_capture_beta", 0)) for row in rows)
     total_capture_hist_updates = sum(int(row.get("search_capture_hist_updates", 0)) for row in rows)
     total_capture_hist_maluses = sum(int(row.get("search_capture_hist_maluses", 0)) for row in rows)
+    total_cont_updates = sum(int(row.get("search_cont_updates", 0)) for row in rows)
+    total_cont_maluses = sum(int(row.get("search_cont_maluses", 0)) for row in rows)
     total_nmp_tries = sum(int(row.get("nmp_tries", 0)) for row in rows)
     total_nmp_cutoffs = sum(int(row.get("nmp_cutoffs", 0)) for row in rows)
     total_probcut_tries = sum(int(row.get("probcut_tries", 0)) for row in rows)
@@ -194,6 +198,8 @@ def print_summary(rows: list[dict[str, int | str]]) -> None:
     print(f"capture_beta_pct:    {pct(total_capture_beta, total_beta_cutoffs):.1f}")
     print(f"capture_hist_updates:{total_capture_hist_updates}")
     print(f"capture_hist_maluses:{total_capture_hist_maluses}")
+    print(f"cont_updates:        {total_cont_updates}")
+    print(f"cont_maluses:        {total_cont_maluses}")
     print(f"nmp_cut_pct:         {pct(total_nmp_cutoffs, total_nmp_tries):.1f}")
     print(f"probcut_cut_pct:     {pct(total_probcut_cutoffs, total_probcut_tries):.1f}")
     print(f"see_calls:           {sum(int(row.get('see', 0)) for row in rows)}")

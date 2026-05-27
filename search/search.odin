@@ -143,6 +143,8 @@ SearchStats :: struct {
 	capture_beta_cutoffs: u64,
 	capture_history_updates: u64,
 	capture_history_maluses: u64,
+	continuation_updates: u64,
+	continuation_maluses: u64,
 	aspiration_fail_low:  u64,
 	aspiration_fail_high: u64,
 }
@@ -260,12 +262,14 @@ print_search_stats :: proc() {
 		stat_load(&search_stats.q_see_prunes),
 	)
 	fmt.printf(
-		"info string stats search beta_cutoffs=%d quiet_beta=%d capture_beta=%d capture_hist_updates=%d capture_hist_maluses=%d lmr=%d lmr_research=%d pvs_research=%d asp_low=%d asp_high=%d\n",
+		"info string stats search beta_cutoffs=%d quiet_beta=%d capture_beta=%d capture_hist_updates=%d capture_hist_maluses=%d cont_updates=%d cont_maluses=%d lmr=%d lmr_research=%d pvs_research=%d asp_low=%d asp_high=%d\n",
 		stat_load(&search_stats.beta_cutoffs),
 		stat_load(&search_stats.quiet_beta_cutoffs),
 		stat_load(&search_stats.capture_beta_cutoffs),
 		stat_load(&search_stats.capture_history_updates),
 		stat_load(&search_stats.capture_history_maluses),
+		stat_load(&search_stats.continuation_updates),
+		stat_load(&search_stats.continuation_maluses),
 		stat_load(&search_stats.lmr_searches),
 		stat_load(&search_stats.lmr_researches),
 		stat_load(&search_stats.pvs_researches),
@@ -466,6 +470,9 @@ store_continuation :: proc(st: ^SearchThread, prev_move: moves.Move, curr_move: 
 	bonus := depth * depth
 	if !good {
 		bonus = -bonus
+		stat_add(&search_stats.continuation_maluses)
+	} else {
+		stat_add(&search_stats.continuation_updates)
 	}
 
 	// Update with clamping
@@ -1049,9 +1056,10 @@ negamax :: proc(
 				// Store as counter move if we have a previous move
 				if !moves.is_empty_move(prev_move) {
 					store_counter_move(st, prev_move, move_list.moves[i])
-
-					// Continuation history - DISABLED (caused regression)
-					// store_continuation(st, prev_move, move, effective_depth, true)
+					store_continuation(st, prev_move, move_list.moves[i], effective_depth, true)
+					for j in 0 ..< quiet_moves_count {
+						store_continuation(st, prev_move, quiet_moves_searched[j], effective_depth, false)
+					}
 				}
 			}
 			break

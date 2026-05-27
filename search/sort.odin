@@ -93,6 +93,9 @@ score_move :: proc(
 
 		// 4. History score (for non-killer quiet moves)
 		hist := get_history_score(st, move)
+		if !moves.is_empty_move(prev_move) {
+			hist += get_continuation_score(st, prev_move, move) / 16
+		}
 
 		// Opening priority: prefer center pawn pushes at root only.
 		// NNUE rates all opening moves ~equal; this biases toward sound openings
