@@ -18,6 +18,7 @@ score_move :: proc(
 	   move.source == tt_move.source &&
 	   move.target == tt_move.target &&
 	   move.promoted == tt_move.promoted {
+		stat_add(&search_stats.tt_move_ordered)
 		return params.hash_move_score
 	}
 

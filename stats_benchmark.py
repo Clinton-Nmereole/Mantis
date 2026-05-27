@@ -67,6 +67,9 @@ def parse_stats(output: str) -> dict[str, int | str]:
                 stats[f"{key}_cutoffs"] = int(cutoffs)
                 stats[f"{key}_tries"] = int(tries)
             for key, value in STAT_RE.findall(line):
+                if line.startswith("info string stats ttmove ") and key in {"probes", "hits", "invalid", "ordered"}:
+                    stats[f"ttmove_{key}"] = int(value)
+                    continue
                 if key not in stats:
                     stats[key] = int(value)
 
@@ -128,6 +131,10 @@ def print_summary(rows: list[dict[str, int | str]]) -> None:
     total_nmp_cutoffs = sum(int(row.get("nmp_cutoffs", 0)) for row in rows)
     total_probcut_tries = sum(int(row.get("probcut_tries", 0)) for row in rows)
     total_probcut_cutoffs = sum(int(row.get("probcut_cutoffs", 0)) for row in rows)
+    total_hash_probes = sum(int(row.get("ttmove_probes", 0)) for row in rows)
+    total_hash_hits = sum(int(row.get("ttmove_hits", 0)) for row in rows)
+    total_hash_ordered = sum(int(row.get("ttmove_ordered", 0)) for row in rows)
+    total_depth_misses = sum(int(row.get("depth_misses", 0)) for row in rows)
 
     nps = total_nodes * 1000 // total_time if total_time > 0 else 0
     qnode_pct = pct(total_qnodes, total_nodes)
@@ -143,6 +150,10 @@ def print_summary(rows: list[dict[str, int | str]]) -> None:
     print(f"qnode_pct:           {qnode_pct:.1f}")
     print(f"tt_hit_pct:          {tt_hit_pct:.1f}")
     print(f"tt_cut_pct:          {tt_cut_pct:.1f}")
+    print(f"tt_depth_misses:     {total_depth_misses}")
+    if total_hash_probes > 0:
+        print(f"hash_move_hit_pct:   {pct(total_hash_hits, total_hash_probes):.1f}")
+        print(f"hash_move_ordered:   {total_hash_ordered}")
     print(f"lmr_research_pct:    {lmr_research_pct:.1f}")
     print(f"pvs_researches:      {total_pvs_research}")
     print(f"nmp_cut_pct:         {pct(total_nmp_cutoffs, total_nmp_tries):.1f}")
@@ -152,6 +163,9 @@ def print_summary(rows: list[dict[str, int | str]]) -> None:
     print(f"futility_prunes:     {sum(int(row.get('futility', 0)) for row in rows)}")
     print(f"lmp_prunes:          {sum(int(row.get('lmp', 0)) for row in rows)}")
     print(f"legal_rejects:       {sum(int(row.get('legal_rejects', 0)) for row in rows)}")
+    print(f"tt_same_key_kept:    {sum(int(row.get('same_key_kept', 0)) for row in rows)}")
+    print(f"tt_replacements:     {sum(int(row.get('replacements', 0)) for row in rows)}")
+    print(f"tt_stale_replaces:   {sum(int(row.get('stale_replacements', 0)) for row in rows)}")
 
     slowest = sorted(rows, key=lambda row: int(row.get("time_ms", 0)), reverse=True)[:5]
     print("\n=== Slowest Positions ===")

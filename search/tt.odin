@@ -109,17 +109,32 @@ probe_tt :: proc(key: u64, alpha: int, beta: int, depth: int, ply: int) -> (int,
 		entry := &bucket.entries[i]
 		entry_key := sync.atomic_load(&entry.key)
 
-		if entry_key == key && entry.depth >= depth {
+		if entry_key == key {
 			stat_add(&search_stats.tt_hits)
+			if entry.flag == TT_FLAG_EXACT {
+				stat_add(&search_stats.tt_exact_hits)
+			} else if entry.flag == TT_FLAG_ALPHA {
+				stat_add(&search_stats.tt_alpha_hits)
+			} else if entry.flag == TT_FLAG_BETA {
+				stat_add(&search_stats.tt_beta_hits)
+			}
+			if entry.depth < depth {
+				stat_add(&search_stats.tt_depth_misses)
+				continue
+			}
+
 			score := score_from_tt(entry.score, ply)
 			#no_bounds_check {
 				if entry.flag == TT_FLAG_EXACT {
+					stat_add(&search_stats.tt_exact_cutoffs)
 					return score, true
 				}
 				if entry.flag == TT_FLAG_ALPHA && score <= alpha {
+					stat_add(&search_stats.tt_alpha_cutoffs)
 					return alpha, true
 				}
 				if entry.flag == TT_FLAG_BETA && score >= beta {
+					stat_add(&search_stats.tt_beta_cutoffs)
 					return beta, true
 				}
 			}
@@ -142,6 +157,7 @@ is_valid_tt_move :: proc(move: moves.Move) -> bool {
 // Scans both entries and returns the move from the deeper one when both match.
 get_tt_move :: proc(key: u64) -> moves.Move {
 	if len(tt) == 0 { return moves.Move{} }
+	stat_add(&search_stats.tt_move_probes)
 
 	index := key % u64(len(tt))
 	bucket := &tt[index]
@@ -157,11 +173,36 @@ get_tt_move :: proc(key: u64) -> moves.Move {
 			if is_valid_tt_move(entry.move) {
 				best_depth = entry.depth
 				best_move = entry.move
+			} else if !moves.is_empty_move(entry.move) {
+				stat_add(&search_stats.tt_move_invalid)
 			}
 		}
 	}
 
+	if !moves.is_empty_move(best_move) {
+		stat_add(&search_stats.tt_move_hits)
+	}
 	return best_move
+}
+
+tt_flag_bonus :: proc(flag: u8) -> int {
+	if flag == TT_FLAG_EXACT { return 3 }
+	if flag == TT_FLAG_BETA { return 2 }
+	return 0
+}
+
+tt_replace_score :: proc(entry: ^TTEntry) -> int {
+	entry_key := sync.atomic_load(&entry.key)
+	if entry_key == 0 { return -1_000_000 }
+
+	score := entry.depth * 8 + tt_flag_bonus(entry.flag)
+	if entry.age == tt_age {
+		score += 16
+	}
+	if is_valid_tt_move(entry.move) {
+		score += 1
+	}
+	return score
 }
 
 // Store TT
@@ -186,6 +227,15 @@ store_tt :: proc(key: u64, move: moves.Move, score: int, depth: int, flag: u8, p
 		entry := &bucket.entries[i]
 		old_key := sync.atomic_load(&entry.key)
 		if old_key == key {
+			if depth + 2 < entry.depth && flag != TT_FLAG_EXACT {
+				if !moves.is_empty_move(move) && moves.is_empty_move(entry.move) {
+					entry.move = move
+				}
+				entry.age = tt_age
+				stat_add(&search_stats.tt_same_key_kept)
+				return
+			}
+
 			// Overwrite same-key entry.  Keep the existing move if the new
 			// move is empty and the old one isn't — this is common when we
 			// re-store a position after a fail-high with no best move yet.
@@ -200,6 +250,7 @@ store_tt :: proc(key: u64, move: moves.Move, score: int, depth: int, flag: u8, p
 			entry.flag  = flag
 			entry.age   = tt_age
 			sync.atomic_store(&entry.key, key)
+			stat_add(&search_stats.tt_same_key_updates)
 			return
 		}
 	}
@@ -207,26 +258,24 @@ store_tt :: proc(key: u64, move: moves.Move, score: int, depth: int, flag: u8, p
 	// No key match — pick the replacement target
 	replace_idx := 0
 	for i in 1 ..< 2 {
-		entry      := &bucket.entries[i]
-		candidate  := &bucket.entries[replace_idx]
-
-		// Prefer stale age
-		if entry.age != tt_age && candidate.age == tt_age {
-			replace_idx = i
-			continue
-		}
-		if candidate.age != tt_age && entry.age == tt_age {
-			continue
-		}
-
-		// Same age (or both stale): prefer lower depth
-		if entry.depth < candidate.depth {
+		entry := &bucket.entries[i]
+		candidate := &bucket.entries[replace_idx]
+		if tt_replace_score(entry) < tt_replace_score(candidate) {
 			replace_idx = i
 		}
 	}
 
 	// Write the chosen entry (data first, key last)
 	entry := &bucket.entries[replace_idx]
+	old_key := sync.atomic_load(&entry.key)
+	if old_key == 0 {
+		stat_add(&search_stats.tt_empty_replaces)
+	} else if entry.age != tt_age {
+		stat_add(&search_stats.tt_stale_replaces)
+	} else if depth > entry.depth {
+		stat_add(&search_stats.tt_deeper_replaces)
+	}
+	stat_add(&search_stats.tt_replacements)
 	entry.move  = move
 	entry.score = tt_score
 	entry.depth = depth
