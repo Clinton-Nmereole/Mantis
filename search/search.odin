@@ -78,6 +78,7 @@ SearchThread :: struct {
 	nodes:                u64,
 	killer_moves:         [MAX_PLY][2]moves.Move,
 	history_table:        [12][64]int,
+	capture_history:      [12][64]int,
 	counter_moves:        [12][64]moves.Move,
 	continuation_history: ^[6][64][6][64]int,
 	static_eval_stack:    [MAX_PLY]int,
@@ -138,6 +139,10 @@ SearchStats :: struct {
 	q_see_prunes:       u64,
 	see_calls:          u64,
 	beta_cutoffs:       u64,
+	quiet_beta_cutoffs: u64,
+	capture_beta_cutoffs: u64,
+	capture_history_updates: u64,
+	capture_history_maluses: u64,
 	aspiration_fail_low:  u64,
 	aspiration_fail_high: u64,
 }
@@ -255,8 +260,12 @@ print_search_stats :: proc() {
 		stat_load(&search_stats.q_see_prunes),
 	)
 	fmt.printf(
-		"info string stats search beta_cutoffs=%d lmr=%d lmr_research=%d pvs_research=%d asp_low=%d asp_high=%d\n",
+		"info string stats search beta_cutoffs=%d quiet_beta=%d capture_beta=%d capture_hist_updates=%d capture_hist_maluses=%d lmr=%d lmr_research=%d pvs_research=%d asp_low=%d asp_high=%d\n",
 		stat_load(&search_stats.beta_cutoffs),
+		stat_load(&search_stats.quiet_beta_cutoffs),
+		stat_load(&search_stats.capture_beta_cutoffs),
+		stat_load(&search_stats.capture_history_updates),
+		stat_load(&search_stats.capture_history_maluses),
 		stat_load(&search_stats.lmr_searches),
 		stat_load(&search_stats.lmr_researches),
 		stat_load(&search_stats.pvs_researches),
@@ -279,6 +288,7 @@ init_search_thread :: proc(st: ^SearchThread, id: int) {
 	st.nodes = 0
 	clear_killers(st)
 	clear_history(st)
+	clear_capture_history(st)
 	clear_counter_moves(st)
 	init_continuation_history(st)
 }
@@ -356,6 +366,41 @@ clear_history :: proc(st: ^SearchThread) {
 	for i in 0 ..< 12 {
 		for j in 0 ..< 64 {
 			st.history_table[i][j] = 0
+		}
+	}
+}
+
+update_capture_history :: proc(st: ^SearchThread, move: moves.Move, depth: int, good: bool) {
+	if move.piece < 0 || move.piece >= 12 {return}
+	if move.target < 0 || move.target >= 64 {return}
+
+	bonus := depth * depth
+	if !good {
+		bonus = -bonus
+		stat_add(&search_stats.capture_history_maluses)
+	} else {
+		stat_add(&search_stats.capture_history_updates)
+	}
+
+	st.capture_history[move.piece][move.target] += bonus
+	if st.capture_history[move.piece][move.target] > params.history_max {
+		st.capture_history[move.piece][move.target] = params.history_max
+	}
+	if st.capture_history[move.piece][move.target] < params.history_min {
+		st.capture_history[move.piece][move.target] = params.history_min
+	}
+}
+
+get_capture_history_score :: proc(st: ^SearchThread, move: moves.Move) -> int {
+	if move.piece < 0 || move.piece >= 12 {return 0}
+	if move.target < 0 || move.target >= 64 {return 0}
+	return st.capture_history[move.piece][move.target]
+}
+
+clear_capture_history :: proc(st: ^SearchThread) {
+	for i in 0 ..< 12 {
+		for j in 0 ..< 64 {
+			st.capture_history[i][j] = 0
 		}
 	}
 }
@@ -773,6 +818,8 @@ negamax :: proc(
 	best_move: moves.Move
 	quiet_moves_searched: [64]moves.Move
 	quiet_moves_count := 0
+	capture_moves_searched: [64]moves.Move
+	capture_moves_count := 0
 
 	// Futility Pruning - pre-compute for move loop
 	do_futility := false
@@ -983,8 +1030,16 @@ negamax :: proc(
 
 		if current_alpha >= beta {
 			stat_add(&search_stats.beta_cutoffs)
+			if move_list.moves[i].capture || move_list.moves[i].promoted != -1 {
+				stat_add(&search_stats.capture_beta_cutoffs)
+				update_capture_history(st, move_list.moves[i], effective_depth, true)
+				for j in 0 ..< capture_moves_count {
+					update_capture_history(st, capture_moves_searched[j], effective_depth, false)
+				}
+			}
 			// Beta Cutoff - store killer, history, and counter move for quiet moves
 			if !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
+				stat_add(&search_stats.quiet_beta_cutoffs)
 				store_killer(st, move_list.moves[i], ply)
 				update_history(st, move_list.moves[i], effective_depth, true)
 				for j in 0 ..< quiet_moves_count {
@@ -1006,6 +1061,10 @@ negamax :: proc(
 		   quiet_moves_count < len(quiet_moves_searched) {
 			quiet_moves_searched[quiet_moves_count] = move_list.moves[i]
 			quiet_moves_count += 1
+		} else if (move_list.moves[i].capture || move_list.moves[i].promoted != -1) &&
+		          capture_moves_count < len(capture_moves_searched) {
+			capture_moves_searched[capture_moves_count] = move_list.moves[i]
+			capture_moves_count += 1
 		}
 	}
 
@@ -1264,6 +1323,7 @@ search_position :: proc(
 	reset_search_stats()
 	clear_killers(st) // Clear killer moves for new search
 	clear_history(st) // Clear history table for new search
+	clear_capture_history(st)
 	clear_counter_moves(st) // Clear counter moves for new search
 	init_continuation_history(st) // Initialize continuation history
 	// fmt.printf("DEBUG: NNUE Initialized: %v\n", nnue.is_initialized)

@@ -80,6 +80,15 @@ def parse_stats(output: str) -> dict[str, int | str]:
                 }:
                     stats[f"moveorder_{key}"] = int(value)
                     continue
+                if line.startswith("info string stats search ") and key in {
+                    "beta_cutoffs",
+                    "quiet_beta",
+                    "capture_beta",
+                    "capture_hist_updates",
+                    "capture_hist_maluses",
+                }:
+                    stats[f"search_{key}"] = int(value)
+                    continue
                 if key not in stats:
                     stats[key] = int(value)
 
@@ -137,6 +146,11 @@ def print_summary(rows: list[dict[str, int | str]]) -> None:
     total_lmr = sum(int(row.get("lmr", 0)) for row in rows)
     total_lmr_research = sum(int(row.get("lmr_research", 0)) for row in rows)
     total_pvs_research = sum(int(row.get("pvs_research", 0)) for row in rows)
+    total_beta_cutoffs = sum(int(row.get("search_beta_cutoffs", 0)) for row in rows)
+    total_quiet_beta = sum(int(row.get("search_quiet_beta", 0)) for row in rows)
+    total_capture_beta = sum(int(row.get("search_capture_beta", 0)) for row in rows)
+    total_capture_hist_updates = sum(int(row.get("search_capture_hist_updates", 0)) for row in rows)
+    total_capture_hist_maluses = sum(int(row.get("search_capture_hist_maluses", 0)) for row in rows)
     total_nmp_tries = sum(int(row.get("nmp_tries", 0)) for row in rows)
     total_nmp_cutoffs = sum(int(row.get("nmp_cutoffs", 0)) for row in rows)
     total_probcut_tries = sum(int(row.get("probcut_tries", 0)) for row in rows)
@@ -176,6 +190,10 @@ def print_summary(rows: list[dict[str, int | str]]) -> None:
         print(f"root_pv_legal_pct:   {pct(total_root_pv_first_legal, total_root_pv_ordered):.1f}")
     print(f"lmr_research_pct:    {lmr_research_pct:.1f}")
     print(f"pvs_researches:      {total_pvs_research}")
+    print(f"quiet_beta_pct:      {pct(total_quiet_beta, total_beta_cutoffs):.1f}")
+    print(f"capture_beta_pct:    {pct(total_capture_beta, total_beta_cutoffs):.1f}")
+    print(f"capture_hist_updates:{total_capture_hist_updates}")
+    print(f"capture_hist_maluses:{total_capture_hist_maluses}")
     print(f"nmp_cut_pct:         {pct(total_nmp_cutoffs, total_nmp_tries):.1f}")
     print(f"probcut_cut_pct:     {pct(total_probcut_cutoffs, total_probcut_tries):.1f}")
     print(f"see_calls:           {sum(int(row.get('see', 0)) for row in rows)}")
