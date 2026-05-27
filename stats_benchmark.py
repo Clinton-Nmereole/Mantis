@@ -70,6 +70,16 @@ def parse_stats(output: str) -> dict[str, int | str]:
                 if line.startswith("info string stats ttmove ") and key in {"probes", "hits", "invalid", "ordered"}:
                     stats[f"ttmove_{key}"] = int(value)
                     continue
+                if line.startswith("info string stats moveorder ") and key in {
+                    "tt_first",
+                    "tt_first_legal",
+                    "tt_legal_rejects",
+                    "root_pv_ordered",
+                    "root_pv_first",
+                    "root_pv_first_legal",
+                }:
+                    stats[f"moveorder_{key}"] = int(value)
+                    continue
                 if key not in stats:
                     stats[key] = int(value)
 
@@ -135,6 +145,11 @@ def print_summary(rows: list[dict[str, int | str]]) -> None:
     total_hash_hits = sum(int(row.get("ttmove_hits", 0)) for row in rows)
     total_hash_ordered = sum(int(row.get("ttmove_ordered", 0)) for row in rows)
     total_depth_misses = sum(int(row.get("depth_misses", 0)) for row in rows)
+    total_tt_first = sum(int(row.get("moveorder_tt_first", 0)) for row in rows)
+    total_tt_first_legal = sum(int(row.get("moveorder_tt_first_legal", 0)) for row in rows)
+    total_root_pv_ordered = sum(int(row.get("moveorder_root_pv_ordered", 0)) for row in rows)
+    total_root_pv_first = sum(int(row.get("moveorder_root_pv_first", 0)) for row in rows)
+    total_root_pv_first_legal = sum(int(row.get("moveorder_root_pv_first_legal", 0)) for row in rows)
 
     nps = total_nodes * 1000 // total_time if total_time > 0 else 0
     qnode_pct = pct(total_qnodes, total_nodes)
@@ -154,6 +169,11 @@ def print_summary(rows: list[dict[str, int | str]]) -> None:
     if total_hash_probes > 0:
         print(f"hash_move_hit_pct:   {pct(total_hash_hits, total_hash_probes):.1f}")
         print(f"hash_move_ordered:   {total_hash_ordered}")
+        print(f"hash_first_pct:      {pct(total_tt_first, total_hash_ordered):.1f}")
+        print(f"hash_first_legal_pct:{pct(total_tt_first_legal, total_hash_ordered):.1f}")
+    if total_root_pv_ordered > 0:
+        print(f"root_pv_first_pct:   {pct(total_root_pv_first, total_root_pv_ordered):.1f}")
+        print(f"root_pv_legal_pct:   {pct(total_root_pv_first_legal, total_root_pv_ordered):.1f}")
     print(f"lmr_research_pct:    {lmr_research_pct:.1f}")
     print(f"pvs_researches:      {total_pvs_research}")
     print(f"nmp_cut_pct:         {pct(total_nmp_cutoffs, total_nmp_tries):.1f}")

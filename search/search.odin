@@ -108,6 +108,12 @@ SearchStats :: struct {
 	tt_move_hits:       u64,
 	tt_move_invalid:    u64,
 	tt_move_ordered:    u64,
+	tt_move_first:      u64,
+	tt_move_first_legal: u64,
+	tt_move_legal_rejects: u64,
+	root_pv_ordered:    u64,
+	root_pv_first:      u64,
+	root_pv_first_legal: u64,
 	tt_same_key_updates: u64,
 	tt_same_key_kept:   u64,
 	tt_replacements:    u64,
@@ -226,6 +232,15 @@ print_search_stats :: proc() {
 		stat_load(&search_stats.tt_deeper_replaces),
 	)
 	fmt.printf(
+		"info string stats moveorder tt_first=%d tt_first_legal=%d tt_legal_rejects=%d root_pv_ordered=%d root_pv_first=%d root_pv_first_legal=%d\n",
+		stat_load(&search_stats.tt_move_first),
+		stat_load(&search_stats.tt_move_first_legal),
+		stat_load(&search_stats.tt_move_legal_rejects),
+		stat_load(&search_stats.root_pv_ordered),
+		stat_load(&search_stats.root_pv_first),
+		stat_load(&search_stats.root_pv_first_legal),
+	)
+	fmt.printf(
 		"info string stats prune nmp=%d/%d rfp=%d razor=%d/%d probcut=%d/%d futility=%d lmp=%d qdelta=%d qsee=%d\n",
 		stat_load(&search_stats.nmp_cutoffs),
 		stat_load(&search_stats.nmp_tries),
@@ -249,6 +264,13 @@ print_search_stats :: proc() {
 		stat_load(&search_stats.aspiration_fail_high),
 	)
 	os.flush(os.stdout)
+}
+
+same_move :: proc(a, b: moves.Move) -> bool {
+	return !moves.is_empty_move(a) &&
+		a.source == b.source &&
+		a.target == b.target &&
+		a.promoted == b.promoted
 }
 
 // Initialize a SearchThread
@@ -701,6 +723,9 @@ negamax :: proc(
 
 	// Move Ordering
 	sort_moves(st, &move_list, b, tt_move, ply, prev_move)
+	if !moves.is_empty_move(tt_move) && move_list.count > 0 && same_move(move_list.moves[0], tt_move) {
+		stat_add(&search_stats.tt_move_first)
+	}
 
 	// Singular Extensions
 	// Test if TT move is "singularly" better than all alternatives
@@ -797,8 +822,14 @@ negamax :: proc(
 		king_sq := board.get_king_square(b, 1 - b.side)
 		if board.is_square_attacked(b, king_sq, b.side) {
 			board.unmake_move(b, &state)
+			if same_move(move_list.moves[i], tt_move) {
+				stat_add(&search_stats.tt_move_legal_rejects)
+			}
 			stat_add(&search_stats.legal_rejects)
 			continue
+		}
+		if legal_moves == 0 && same_move(move_list.moves[i], tt_move) {
+			stat_add(&search_stats.tt_move_first_legal)
 		}
 
 		// Update NNUE Accumulators (state holds the old board for reference)
@@ -1339,14 +1370,26 @@ search_position :: proc(
 				break // No more moves to search
 			}
 
-			// Sort root moves so central pawns/e4/d4 are searched first
-			sort_moves(st, &move_list, b, moves.Move{}, 0, moves.Move{})
+			root_tt_move := moves.Move{}
+			if pv_index == 0 {
+				root_tt_move = best_move
+				if moves.is_empty_move(root_tt_move) {
+					root_tt_move = prev_completed_best_move
+				}
+			}
+
+			// Sort root moves, preserving the previous completed PV move first.
+			sort_moves(st, &move_list, b, root_tt_move, 0, moves.Move{})
+			if !moves.is_empty_move(root_tt_move) && move_list.count > 0 && same_move(move_list.moves[0], root_tt_move) {
+				stat_add(&search_stats.root_pv_first)
+			}
 
 			best_score := -eval.INF
 			current_best_move: moves.Move
 			found_move := false
 
 			current_alpha := alpha
+			root_pv_first_legal_counted := false
 
 			for i in 0 ..< move_list.count {
 				// Abort root move loop if search was stopped (time limit or external stop)
@@ -1368,6 +1411,10 @@ search_position :: proc(
 					board.unmake_move(b, &state)
 					stat_add(&search_stats.legal_rejects)
 					continue
+				}
+				if !root_pv_first_legal_counted && i == 0 && same_move(move_list.moves[i], root_tt_move) {
+					stat_add(&search_stats.root_pv_first_legal)
+					root_pv_first_legal_counted = true
 				}
 
 				nnue.update_accumulators(&state, b, move_list.moves[i])
@@ -1437,6 +1484,10 @@ search_position :: proc(
 							stat_add(&search_stats.legal_rejects)
 							continue
 						}
+						if !root_pv_first_legal_counted && i == 0 && same_move(move_list.moves[i], root_tt_move) {
+							stat_add(&search_stats.root_pv_first_legal)
+							root_pv_first_legal_counted = true
+						}
 
 						nnue.update_accumulators(&state, b, move_list.moves[i])
 						child_pv: PV_Line
@@ -1495,6 +1546,10 @@ search_position :: proc(
 							board.unmake_move(b, &state)
 							stat_add(&search_stats.legal_rejects)
 							continue
+						}
+						if !root_pv_first_legal_counted && i == 0 && same_move(move_list.moves[i], root_tt_move) {
+							stat_add(&search_stats.root_pv_first_legal)
+							root_pv_first_legal_counted = true
 						}
 
 						nnue.update_accumulators(&state, b, move_list.moves[i])

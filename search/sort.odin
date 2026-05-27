@@ -19,6 +19,9 @@ score_move :: proc(
 	   move.target == tt_move.target &&
 	   move.promoted == tt_move.promoted {
 		stat_add(&search_stats.tt_move_ordered)
+		if ply == 0 {
+			stat_add(&search_stats.root_pv_ordered)
+		}
 		return params.hash_move_score
 	}
 
