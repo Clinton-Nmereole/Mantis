@@ -274,6 +274,20 @@ get_total_nodes :: proc() -> u64 {
 	return sync.atomic_load(&total_nodes)
 }
 
+has_non_pawn_material :: proc(b: ^board.Board, side: int) -> bool {
+	offset := side * 6
+	return (b.bitboards[offset + constants.KNIGHT] |
+		b.bitboards[offset + constants.BISHOP] |
+		b.bitboards[offset + constants.ROOK] |
+		b.bitboards[offset + constants.QUEEN]) != 0
+}
+
+move_gives_check_after_make :: proc(b: ^board.Board) -> bool {
+	attacker := 1 - b.side
+	king_sq := board.get_king_square(b, b.side)
+	return board.is_square_attacked(b, king_sq, attacker)
+}
+
 // Negamax Alpha-Beta Search
 negamax :: proc(
 	st: ^SearchThread,
@@ -290,9 +304,11 @@ negamax :: proc(
 	count_nodes(st)
 
 	// TT Probe
-	tt_score, tt_hit := probe_tt(b.hash, alpha, beta, depth, ply)
-	if tt_hit {
-		return tt_score
+	if moves.is_empty_move(excluded_move) {
+		tt_score, tt_hit := probe_tt(b.hash, alpha, beta, depth, ply)
+		if tt_hit {
+			return tt_score
+		}
 	}
 
 	// Syzygy WDL Probe (during search, for exact endgame scores)
@@ -360,7 +376,10 @@ negamax :: proc(
 	// 1. Not in PV node (use is_pv flag)
 	// 2. Not in check
 	// 3. Deep enough
-	can_null_move := !is_pv && !in_check && depth >= params.nmp_min_depth
+	can_null_move := !is_pv &&
+		!in_check &&
+		depth >= params.nmp_min_depth &&
+		has_non_pawn_material(b, b.side)
 
 	if can_null_move {
 		// Make null move
@@ -524,6 +543,8 @@ negamax :: proc(
 	best_score := -eval.INF
 	current_alpha := alpha
 	best_move: moves.Move
+	quiet_moves_searched: [64]moves.Move
+	quiet_moves_count := 0
 
 	// Futility Pruning - pre-compute for move loop
 	do_futility := false
@@ -576,18 +597,20 @@ negamax :: proc(
 
 		// Update NNUE Accumulators (state holds the old board for reference)
 		nnue.update_accumulators(&state, b, move_list.moves[i])
+		gives_check := move_gives_check_after_make(b)
 
 		// Late Move Pruning (LMP)
 		// Skip quiet moves that are late in the move list.
 		// Only prune if we've already searched enough moves without finding a good one.
 		if !is_pv && !in_check && legal_moves >= lmp_threshold &&
-		   !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
+		   !gives_check && !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
 			board.unmake_move(b, &state)
 			continue
 		}
 
 		// Futility Pruning - skip quiet moves that can't raise alpha
-		if do_futility && legal_moves > 0 && !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
+		if do_futility && legal_moves > 0 && !gives_check &&
+		   !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
 			board.unmake_move(b, &state)
 			continue
 		}
@@ -718,6 +741,9 @@ negamax :: proc(
 			if !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
 				store_killer(st, move_list.moves[i], ply)
 				update_history(st, move_list.moves[i], effective_depth, true)
+				for j in 0 ..< quiet_moves_count {
+					update_history(st, quiet_moves_searched[j], effective_depth, false)
+				}
 
 				// Store as counter move if we have a previous move
 				if !moves.is_empty_move(prev_move) {
@@ -728,6 +754,12 @@ negamax :: proc(
 				}
 			}
 			break
+		}
+
+		if !move_list.moves[i].capture && move_list.moves[i].promoted == -1 &&
+		   quiet_moves_count < len(quiet_moves_searched) {
+			quiet_moves_searched[quiet_moves_count] = move_list.moves[i]
+			quiet_moves_count += 1
 		}
 	}
 
@@ -907,6 +939,7 @@ search_position :: proc(
 ) {
 	// fmt.println("DEBUG: Entering search_position")
 	st.nodes = 0
+	sync.atomic_store(&total_nodes, 0)
 	clear_killers(st) // Clear killer moves for new search
 	clear_history(st) // Clear history table for new search
 	clear_counter_moves(st) // Clear counter moves for new search
