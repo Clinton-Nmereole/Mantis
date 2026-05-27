@@ -64,7 +64,12 @@ score_move :: proc(
 		attacker_value := constants.PIECE_VALUES[attacker_piece]
 
 		if victim_piece != -1 {
-			score = params.capture_base_score + victim_value - attacker_value
+			see_score := see_capture(b, move)
+			if see_score >= 0 {
+				score = params.capture_base_score + see_score + victim_value - attacker_value / 16
+			} else {
+				score = see_score
+			}
 		}
 	}
 

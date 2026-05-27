@@ -6,6 +6,7 @@ import "../eval"
 import "../moves"
 import "../nnue"
 import "../tb"
+import "../utils"
 import "../zobrist"
 import "core:fmt"
 import "core:math"
@@ -812,34 +813,101 @@ negamax :: proc(
 	return best_score
 }
 
-// Simplified Static Exchange Evaluation
-// Returns estimated material balance for a capture
-// Negative = losing capture, Positive = winning capture
+attackers_to_square :: proc(b: ^board.Board, square: int, occ: u64, side: int) -> u64 {
+	target := u64(1) << u64(square)
+	offset := side * 6
+
+	attackers: u64 = 0
+	if side == constants.WHITE {
+		attackers |= ((target >> 9) & ~constants.FILE_H) & b.bitboards[constants.PAWN]
+		attackers |= ((target >> 7) & ~constants.FILE_A) & b.bitboards[constants.PAWN]
+	} else {
+		attackers |= ((target << 9) & ~constants.FILE_A) & b.bitboards[constants.PAWN + 6]
+		attackers |= ((target << 7) & ~constants.FILE_H) & b.bitboards[constants.PAWN + 6]
+	}
+
+	attackers |= moves.get_knight_attacks_bitboard(square) & b.bitboards[offset + constants.KNIGHT]
+	attackers |= moves.get_king_attacks_bitboard(square) & b.bitboards[offset + constants.KING]
+	attackers |= moves.get_bishop_attacks(square, occ) &
+		(b.bitboards[offset + constants.BISHOP] | b.bitboards[offset + constants.QUEEN])
+	attackers |= moves.get_rook_attacks(square, occ) &
+		(b.bitboards[offset + constants.ROOK] | b.bitboards[offset + constants.QUEEN])
+
+	return attackers & occ
+}
+
+least_valuable_attacker :: proc(b: ^board.Board, attackers: u64, side: int) -> (piece_type: int, square: int, found: bool) {
+	offset := side * 6
+	for pt in constants.PAWN ..= constants.KING {
+		bb := attackers & b.bitboards[offset + pt]
+		if bb != 0 {
+			return pt, utils.get_lsb_index(bb), true
+		}
+	}
+	return 0, 0, false
+}
+
+// Static Exchange Evaluation. Returns the material result of the capture
+// after both sides make their best recaptures on the target square.
 see_capture :: proc(b: ^board.Board, move: moves.Move) -> int {
-	// Get victim value
+	if !move.capture {
+		return 0
+	}
+
 	victim_value := 0
 	if move.en_passant {
 		victim_value = constants.PIECE_VALUES[constants.PAWN]
 	} else {
-		// Find captured piece
-		victim_idx := b.mailbox[move.target]
-		if victim_idx != -1 {
-			victim_piece := victim_idx % 6
-			victim_value = constants.PIECE_VALUES[victim_piece]
+		victim_idx := int(b.mailbox[move.target])
+		if victim_idx == -1 {
+			return 0
+		}
+		victim_value = constants.PIECE_VALUES[victim_idx % 6]
+	}
+
+	moved_piece := move.piece
+	if move.promoted != -1 {
+		moved_piece = move.promoted
+	}
+
+	gain: [32]int
+	depth := 0
+	gain[0] = victim_value
+
+	occ := b.occupancies[constants.BOTH]
+	occ &~= u64(1) << u64(move.source)
+	if move.en_passant {
+		ep_sq := b.side == constants.WHITE ? move.target - 8 : move.target + 8
+		occ &~= u64(1) << u64(ep_sq)
+		occ |= u64(1) << u64(move.target)
+	}
+
+	side := 1 - b.side
+	captured_value := constants.PIECE_VALUES[moved_piece]
+
+	for depth + 1 < len(gain) {
+		attackers := attackers_to_square(b, move.target, occ, side)
+		attacker_piece, attacker_sq, found := least_valuable_attacker(b, attackers, side)
+		if !found {
+			break
+		}
+
+		depth += 1
+		gain[depth] = captured_value - gain[depth - 1]
+
+		occ &~= u64(1) << u64(attacker_sq)
+		captured_value = constants.PIECE_VALUES[attacker_piece]
+		side = 1 - side
+	}
+
+	for depth > 0 {
+		depth -= 1
+		if -gain[depth + 1] < gain[depth] {
+			gain[depth] = -gain[depth + 1]
 		}
 	}
 
-	// Get attacker value
-	attacker_piece := move.piece % 6
-	attacker_value := constants.PIECE_VALUES[attacker_piece]
-
-	// Simple SEE: If target is defended, assume we lose our attacker
-	if board.is_square_attacked(b, move.target, 1 - b.side) {
-		return victim_value - attacker_value
-	}
-
-	// Free capture
-	return victim_value
+	return gain[0]
 }
 
 // Quiescence Search
