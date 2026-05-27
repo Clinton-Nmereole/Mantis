@@ -43,3 +43,6 @@ test_crash*.py
 test_divergence.py
 test_illegal.py
 test_parse_castle.py
+
+#Executables
+test_make_unmake
