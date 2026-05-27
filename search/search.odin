@@ -288,6 +288,10 @@ move_gives_check_after_make :: proc(b: ^board.Board) -> bool {
 	return board.is_square_attacked(b, king_sq, attacker)
 }
 
+is_mate_window :: proc(alpha, beta: int) -> bool {
+	return abs(alpha) >= eval.MATE - MAX_PLY || abs(beta) >= eval.MATE - MAX_PLY
+}
+
 // Negamax Alpha-Beta Search
 negamax :: proc(
 	st: ^SearchThread,
@@ -360,7 +364,8 @@ negamax :: proc(
 	}
 
 	// Razoring - drop into quiescence if position is hopeless
-	if !is_pv && !in_check && depth <= params.razor_max_depth {
+	if !is_pv && !in_check && !is_mate_window(alpha, beta) &&
+	   depth <= params.razor_max_depth && moves.is_empty_move(excluded_move) {
 		razor_margin := params.razor_margin * depth
 		if static_eval + razor_margin < alpha {
 			// Position is so bad even with margin, just do quiescence
@@ -379,7 +384,10 @@ negamax :: proc(
 	can_null_move := !is_pv &&
 		!in_check &&
 		depth >= params.nmp_min_depth &&
-		has_non_pawn_material(b, b.side)
+		has_non_pawn_material(b, b.side) &&
+		moves.is_empty_move(excluded_move) &&
+		!is_mate_window(alpha, beta) &&
+		static_eval >= beta
 
 	if can_null_move {
 		// Make null move
@@ -395,6 +403,10 @@ negamax :: proc(
 
 		// Adaptive reduction - more aggressive at deeper depths
 		nmp_reduction := params.nmp_reduction_base + effective_depth / params.nmp_reduction_div
+		null_depth := effective_depth - 1 - nmp_reduction
+		if null_depth < 1 {
+			null_depth = 1
+		}
 
 		// Search null move at reduced depth
 		null_pv: PV_Line
@@ -403,7 +415,7 @@ negamax :: proc(
 			&null_board,
 			-beta,
 			-beta + 1,
-			effective_depth - 1 - nmp_reduction,
+			null_depth,
 			ply + 1,
 			&null_pv,
 			{}, // no excluded move
@@ -418,7 +430,8 @@ negamax :: proc(
 
 	// Reverse Futility Pruning (RFP) / Static Null Move Pruning
 	// If position is so good that even with a margin, we're above beta, prune
-	if !is_pv && !in_check && effective_depth <= params.rfp_depth && moves.is_empty_move(excluded_move) {
+	if !is_pv && !in_check && !is_mate_window(alpha, beta) &&
+	   effective_depth <= params.rfp_depth && moves.is_empty_move(excluded_move) {
 		// Margin based on depth
 		rfp_margin := params.rfp_margin * effective_depth
 
@@ -434,9 +447,12 @@ negamax :: proc(
 	// Probcut
 	// If the position is good enough that even a reduced-depth tactical search
 	// would fail high, we can prune safely.
-	if !is_pv && !in_check && effective_depth >= params.probcut_depth &&
-	   abs(beta) < eval.MATE && moves.is_empty_move(excluded_move) {
+	if !is_pv && !in_check && !is_mate_window(alpha, beta) &&
+	   effective_depth >= params.probcut_depth && moves.is_empty_move(excluded_move) {
 		probcut_beta := beta + params.probcut_margin
+		if probcut_beta >= eval.MATE - MAX_PLY {
+			probcut_beta = eval.MATE - MAX_PLY - 1
+		}
 		if static_eval >= probcut_beta {
 			// Try a few tactical moves at reduced depth
 			tactical_list: moves.MoveList
@@ -462,12 +478,16 @@ negamax :: proc(
 				}
 
 				nnue.update_accumulators(&t_state, b, tactical_list.moves[j])
+				probcut_depth := effective_depth - params.probcut_reduce
+				if probcut_depth < 1 {
+					probcut_depth = 1
+				}
 				probcut_score := -negamax(
 					st,
 					b,
 					-probcut_beta,
 					-probcut_beta + 1,
-					effective_depth - params.probcut_reduce,
+					probcut_depth,
 					ply + 1,
 					&PV_Line{},
 					{},
@@ -549,9 +569,10 @@ negamax :: proc(
 	// Futility Pruning - pre-compute for move loop
 	do_futility := false
 	futility_value := 0
-	if !is_pv && !in_check && depth <= params.futility_max_depth {
+	if !is_pv && !in_check && !is_mate_window(alpha, beta) &&
+	   depth <= params.futility_max_depth && moves.is_empty_move(excluded_move) {
 		futility_margin := params.futility_margin * depth
-		futility_value = eval.evaluate(b) + futility_margin
+		futility_value = static_eval + futility_margin
 		if futility_value < alpha {
 			do_futility = true
 		}
@@ -562,7 +583,8 @@ negamax :: proc(
 	// The idea: if we've searched the best moves and none raised alpha,
 	// the remaining quiet moves are unlikely to help.
 	lmp_threshold := 9999 // Default: effectively disabled
-	if !is_pv && !in_check && depth <= params.lmp_max_depth {
+	if !is_pv && !in_check && !is_mate_window(alpha, beta) &&
+	   depth <= params.lmp_max_depth && moves.is_empty_move(excluded_move) {
 		// Threshold grows with depth: deeper = search more moves
 		lmp_threshold = params.lmp_base + depth * depth / params.lmp_div
 	}
@@ -643,6 +665,7 @@ negamax :: proc(
 			reduction := 0
 
 			if combined_depth >= params.lmr_min_depth &&
+			   !gives_check &&
 			   !move_list.moves[i].capture &&
 			   move_list.moves[i].promoted == -1 {
 				// Base reduction from precomputed logarithmic table
