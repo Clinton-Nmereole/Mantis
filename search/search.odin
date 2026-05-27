@@ -969,10 +969,15 @@ search_position :: proc(
 	// Aspiration Windows - narrower for faster convergence
 	prev_score := 0
 
-	// Dynamic time-scaling state
-	time_factor: f64 = 1.0
-	best_move_stable_count: int = 0
+	// Dynamic time-management state
 	prev_best_move: moves.Move
+	previous_completed_score := 0
+	have_completed_score := false
+	best_move_changes := 0
+	largest_score_drop := 0
+	aspiration_failures := 0
+	previous_depth_ms := 0
+	last_depth_ms := 0
 
 	// MultiPV storage - track best N moves
 	multi_pv_results: [dynamic]MultiPV_Result
@@ -982,6 +987,8 @@ search_position :: proc(
 	prev_completed_best_move: moves.Move  // Save last fully completed depth's best move
 	depth_completed := true
 	for current_depth in 1 ..= depth {
+		depth_start := time.now()
+
 		// Save best move before attempting this depth (for recovery if aborted)
 		prev_completed_best_move = best_move
 		depth_completed = true
@@ -1109,6 +1116,7 @@ search_position :: proc(
 				initial_pv := best_pv
 
 				if best_score <= alpha {
+					aspiration_failures += 1
 					// Failed low - re-search with lower bound
 					alpha = -eval.INF
 					best_score = -eval.INF
@@ -1165,6 +1173,7 @@ search_position :: proc(
 						}
 					}
 				} else if best_score >= beta {
+					aspiration_failures += 1
 					// Failed high - re-search with upper bound
 					beta = eval.INF
 					best_score = -eval.INF
@@ -1261,6 +1270,9 @@ search_position :: proc(
 		os.flush(os.stdout)
 		duration := time.since(start_time)
 		ms := time.duration_milliseconds(duration)
+		depth_elapsed := int(time.duration_milliseconds(time.since(depth_start)))
+		previous_depth_ms = last_depth_ms
+		last_depth_ms = depth_elapsed
 		os.flush(os.stdout)
 
 		nps := u64(0)
@@ -1274,6 +1286,18 @@ search_position :: proc(
 			// Depth aborted: restore best_move from previous completed depth, stop search
 			best_move = prev_completed_best_move
 			break
+		}
+
+		if len(multi_pv_results) > 0 {
+			current_score := multi_pv_results[0].score
+			if have_completed_score {
+				score_drop := previous_completed_score - current_score
+				if score_drop > largest_score_drop {
+					largest_score_drop = score_drop
+				}
+			}
+			previous_completed_score = current_score
+			have_completed_score = true
 		}
 
 		if output_bestmove {
@@ -1327,20 +1351,12 @@ search_position :: proc(
 			sync.atomic_store(&search_control.ponder_mode, i32(0))
 		}
 
-		// Dynamic time scaling based on best-move stability
-		// NOTE: Disabled for movetime (user wants exactly N milliseconds)
-		if use_time_management && !search_limits.is_movetime {
-			if best_move.source == prev_best_move.source &&
-			   best_move.target == prev_best_move.target {
-				best_move_stable_count += 1
-				// Best move stable → reduce time factor (stop earlier)
-				time_factor -= 0.15
-				if time_factor < 0.5 { time_factor = 0.5 }
-			} else {
-				// Best move changed → increase time factor (search longer)
-				best_move_stable_count = 0
-				time_factor += 0.4
-				if time_factor > 2.0 { time_factor = 2.0 }
+		if use_time_management && !search_limits.is_movetime && !moves.is_empty_move(best_move) {
+			if !moves.is_empty_move(prev_best_move) &&
+			   (best_move.source != prev_best_move.source ||
+			    best_move.target != prev_best_move.target ||
+			    best_move.promoted != prev_best_move.promoted) {
+				best_move_changes += 1
 			}
 			prev_best_move = best_move
 		}
@@ -1349,16 +1365,14 @@ search_position :: proc(
 		// Skip time check if still in ponder mode (infinite search)
 		is_pondering := sync.atomic_load(&search_control.ponder_mode)
 		if is_pondering == 0 && use_time_management {
-			should_stop_deepening := false
-			if search_limits.is_movetime {
-				// Movetime: stop deepening when >50% time used.
-				// The hard limit (should_stop) already guarantees we won't exceed movetime.
-				// This check prevents starting a depth that will certainly be aborted.
-				should_stop_deepening = elapsed_ms(search_limits) > search_limits.max_time / 2
-			} else {
-				should_stop_deepening = exceeded_scaled_optimal(search_limits, time_factor)
-			}
-			if should_stop_deepening {
+			if !should_start_next_depth(
+				search_limits,
+				last_depth_ms,
+				previous_depth_ms,
+				best_move_changes,
+				largest_score_drop,
+				aspiration_failures,
+			) {
 				break // Stop deepening, but the current depth was already completed
 			}
 		}

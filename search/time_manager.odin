@@ -13,10 +13,13 @@ TimeControl :: struct {
 }
 
 SearchLimits :: struct {
-	max_time:     int, // Hard abort limit (ms)
-	optimal_time: int, // Target time (ms)
+	soft_time:    int, // Target budget (ms)
+	hard_time:    int, // Absolute abort limit (ms)
+	max_time:     int, // Backward-compatible alias for hard_time
+	optimal_time: int, // Backward-compatible alias for soft_time
 	start_time:   time.Time,
 	is_movetime:  bool, // True for go movetime N (no dynamic scaling)
+	is_infinite:  bool,
 }
 
 // Global search limits
@@ -32,6 +35,8 @@ calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> Search
 		mt := tc.movetime - overhead
 		if mt < 1 { mt = 1 }
 		return SearchLimits{
+			soft_time    = mt,
+			hard_time    = mt,
 			max_time     = mt,
 			optimal_time = mt,
 			start_time   = time.now(),
@@ -42,9 +47,12 @@ calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> Search
 	// infinite search
 	if tc.infinite {
 		return SearchLimits{
+			soft_time    = 999_999_999,
+			hard_time    = 999_999_999,
 			max_time     = 999_999_999,
 			optimal_time = 999_999_999,
 			start_time   = time.now(),
+			is_infinite  = true,
 		}
 	}
 
@@ -66,6 +74,8 @@ calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> Search
 		if max_limit > optimal * 3 { max_limit = optimal * 3 }
 		if max_limit > available / 2 { max_limit = available / 2 }
 		return SearchLimits{
+			soft_time    = optimal,
+			hard_time    = max_limit,
 			max_time     = max_limit,
 			optimal_time = optimal,
 			start_time   = time.now(),
@@ -124,6 +134,8 @@ calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> Search
 	}
 
 	return SearchLimits{
+		soft_time    = optimal,
+		hard_time    = max_limit,
 		max_time     = max_limit,
 		optimal_time = optimal,
 		start_time   = time.now(),
@@ -137,19 +149,73 @@ elapsed_ms :: proc(limits: SearchLimits) -> int {
 
 // Check if we should stop searching (hard limit)
 should_stop :: proc(limits: SearchLimits) -> bool {
-	return elapsed_ms(limits) >= limits.max_time
+	if limits.is_infinite { return false }
+	return elapsed_ms(limits) >= limits.hard_time
 }
 
-// Check if we've exceeded the base optimal time.
-// The caller scales optimal_time dynamically, so this is the
-// *unscaled* baseline.  Use exceeded_scaled_optimal for the
-// dynamically-adjusted target.
+// Check if we've exceeded the base soft budget.
 exceeded_optimal :: proc(limits: SearchLimits) -> bool {
-	return elapsed_ms(limits) >= limits.optimal_time
+	return elapsed_ms(limits) >= limits.soft_time
 }
 
-// Check against a scaled optimal time (for dynamic scaling)
-exceeded_scaled_optimal :: proc(limits: SearchLimits, factor: f64) -> bool {
-	scaled := int(f64(limits.optimal_time) * factor)
-	return elapsed_ms(limits) >= scaled
+time_budget_with_instability :: proc(
+	limits: SearchLimits,
+	best_move_changes: int,
+	score_drop: int,
+	aspiration_failures: int,
+) -> int {
+	if limits.is_movetime || limits.is_infinite {
+		return limits.hard_time
+	}
+
+	budget := limits.soft_time
+
+	// Spend extra time when the search is unstable, but never beyond hard_time.
+	budget += limits.soft_time * best_move_changes / 4
+	budget += limits.soft_time * aspiration_failures / 3
+
+	if score_drop >= 150 {
+		budget += limits.soft_time
+	} else if score_drop >= 75 {
+		budget += limits.soft_time / 2
+	} else if score_drop >= 35 {
+		budget += limits.soft_time / 4
+	}
+
+	if budget > limits.hard_time { budget = limits.hard_time }
+	if budget < 1 { budget = 1 }
+	return budget
+}
+
+project_next_depth_time :: proc(last_depth_ms: int, previous_depth_ms: int) -> int {
+	if last_depth_ms <= 0 { return 1 }
+	if previous_depth_ms <= 0 {
+		return last_depth_ms * 3
+	}
+
+	growth := f64(last_depth_ms) / f64(previous_depth_ms)
+	if growth < 1.5 { growth = 1.5 }
+	if growth > 6.0 { growth = 6.0 }
+
+	projected := int(f64(last_depth_ms) * growth)
+	if projected < last_depth_ms + 1 { projected = last_depth_ms + 1 }
+	return projected
+}
+
+should_start_next_depth :: proc(
+	limits: SearchLimits,
+	last_depth_ms: int,
+	previous_depth_ms: int,
+	best_move_changes: int,
+	score_drop: int,
+	aspiration_failures: int,
+) -> bool {
+	if limits.is_infinite { return true }
+	if limits.is_movetime {
+		return elapsed_ms(limits) + project_next_depth_time(last_depth_ms, previous_depth_ms) < limits.hard_time
+	}
+
+	budget := time_budget_with_instability(limits, best_move_changes, score_drop, aspiration_failures)
+	projected := project_next_depth_time(last_depth_ms, previous_depth_ms)
+	return elapsed_ms(limits) + projected < budget
 }
