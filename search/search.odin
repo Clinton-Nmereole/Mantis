@@ -327,19 +327,57 @@ collect_qcaptures_from_full_order :: proc(st: ^SearchThread, b: ^board.Board, or
 	}
 }
 
-collect_qcaptures_from_compact_order :: proc(st: ^SearchThread, b: ^board.Board, order: ^QCaptureOrder) {
+order_qcaptures_from_full_order :: proc(
+	st: ^SearchThread,
+	b: ^board.Board,
+	move_list: ^moves.MoveList,
+	q_see_scores: ^[256]int,
+) -> int {
+	// Preserve the current full-list ordering exactly, but expose only the
+	// captures qsearch will actually search when the side is not in check.
 	full_list: moves.MoveList
 	board.generate_all_moves(b, &full_list)
 
-	move_list: moves.MoveList
+	scores: [256]int
+	see_scores: [256]int
+	order: [256]int
+
 	for i in 0 ..< full_list.count {
+		order[i] = i
+		see_score := SEE_SCORE_UNKNOWN
 		if full_list.moves[i].capture {
-			moves.append_move(&move_list, full_list.moves[i])
+			see_score = see_capture(b, full_list.moves[i])
+		}
+		see_scores[i] = see_score
+		scores[i] = score_move(st, full_list.moves[i], b, moves.Move{}, 0, moves.Move{}, see_score)
+	}
+
+	for i in 0 ..< full_list.count {
+		for j in i + 1 ..< full_list.count {
+			if scores[order[j]] > scores[order[i]] {
+				temp := order[i]
+				order[i] = order[j]
+				order[j] = temp
+			}
 		}
 	}
 
+	move_list.count = 0
+	for i in 0 ..< full_list.count {
+		idx := order[i]
+		if full_list.moves[idx].capture {
+			q_see_scores[move_list.count] = see_scores[idx]
+			moves.append_move(move_list, full_list.moves[idx])
+		}
+	}
+
+	return full_list.count
+}
+
+collect_qcaptures_from_projected_order :: proc(st: ^SearchThread, b: ^board.Board, order: ^QCaptureOrder) {
+	move_list: moves.MoveList
 	see_scores: [256]int
-	sort_moves(st, &move_list, b, see_scores = &see_scores)
+	order_qcaptures_from_full_order(st, b, &move_list, &see_scores)
 
 	for i in 0 ..< move_list.count {
 		qcapture_order_append(order, move_list.moves[i])
@@ -356,34 +394,34 @@ print_qcapture_mismatch :: proc(full_order, compact_order: ^QCaptureOrder, index
 		fmt.println("  full:    <none>")
 	}
 	if index < compact_order.count {
-		fmt.printf("  compact: ")
+		fmt.printf("  projected: ")
 		board.print_move(compact_order.moves[index])
 		fmt.println()
 	} else {
-		fmt.println("  compact: <none>")
+		fmt.println("  projected: <none>")
 	}
 }
 
 compare_qcapture_orders :: proc(st: ^SearchThread, b: ^board.Board, verbose: bool = false) -> bool {
 	full_order: QCaptureOrder
-	compact_order: QCaptureOrder
+	projected_order: QCaptureOrder
 
 	collect_qcaptures_from_full_order(st, b, &full_order)
-	collect_qcaptures_from_compact_order(st, b, &compact_order)
+	collect_qcaptures_from_projected_order(st, b, &projected_order)
 
-	if full_order.count != compact_order.count {
+	if full_order.count != projected_order.count {
 		if verbose {
-			fmt.printf("QCapture count mismatch: full=%d compact=%d fen=%s\n", full_order.count, compact_order.count, board.get_fen(b^))
-			print_qcapture_mismatch(&full_order, &compact_order, min(full_order.count, compact_order.count))
+			fmt.printf("QCapture count mismatch: full=%d projected=%d fen=%s\n", full_order.count, projected_order.count, board.get_fen(b^))
+			print_qcapture_mismatch(&full_order, &projected_order, min(full_order.count, projected_order.count))
 		}
 		return false
 	}
 
 	for i in 0 ..< full_order.count {
-		if !same_qcapture_move(full_order.moves[i], compact_order.moves[i]) {
+		if !same_qcapture_move(full_order.moves[i], projected_order.moves[i]) {
 			if verbose {
 				fmt.printf("fen=%s\n", board.get_fen(b^))
-				print_qcapture_mismatch(&full_order, &compact_order, i)
+				print_qcapture_mismatch(&full_order, &projected_order, i)
 			}
 			return false
 		}
@@ -1417,13 +1455,17 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 
 	move_list: moves.MoveList
 	// deferred delete removed: MoveList is stack-allocated
-	board.generate_all_moves(b, &move_list)
-	stat_add(&search_stats.movegen_calls)
-	stat_add(&search_stats.moves_generated, u64(move_list.count))
-
-	// Move Ordering for Quiescence
 	q_see_scores: [256]int
-	sort_moves(st, &move_list, b, see_scores = &q_see_scores)
+	if in_check {
+		board.generate_all_moves(b, &move_list)
+		stat_add(&search_stats.movegen_calls)
+		stat_add(&search_stats.moves_generated, u64(move_list.count))
+		sort_moves(st, &move_list, b, see_scores = &q_see_scores)
+	} else {
+		generated := order_qcaptures_from_full_order(st, b, &move_list, &q_see_scores)
+		stat_add(&search_stats.movegen_calls)
+		stat_add(&search_stats.moves_generated, u64(generated))
+	}
 
 	legal_moves := 0
 
