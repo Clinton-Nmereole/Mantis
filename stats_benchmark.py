@@ -91,6 +91,9 @@ def parse_stats(output: str) -> dict[str, int | str]:
                 }:
                     stats[f"search_{key}"] = int(value)
                     continue
+                if line.startswith("info string stats see ") and key in {"cache_hits", "qsee_prunes"}:
+                    stats[f"see_{key}"] = int(value)
+                    continue
                 if key not in stats:
                     stats[key] = int(value)
 
@@ -203,6 +206,7 @@ def print_summary(rows: list[dict[str, int | str]]) -> None:
     print(f"nmp_cut_pct:         {pct(total_nmp_cutoffs, total_nmp_tries):.1f}")
     print(f"probcut_cut_pct:     {pct(total_probcut_cutoffs, total_probcut_tries):.1f}")
     print(f"see_calls:           {sum(int(row.get('see', 0)) for row in rows)}")
+    print(f"see_cache_hits:      {sum(int(row.get('see_cache_hits', 0)) for row in rows)}")
     print(f"qsee_prunes:         {sum(int(row.get('qsee', 0)) for row in rows)}")
     print(f"futility_prunes:     {sum(int(row.get('futility', 0)) for row in rows)}")
     print(f"lmp_prunes:          {sum(int(row.get('lmp', 0)) for row in rows)}")

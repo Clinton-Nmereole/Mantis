@@ -4,6 +4,8 @@ import "../board"
 import "../constants"
 import "../moves"
 
+SEE_SCORE_UNKNOWN :: -1_000_000_000
+
 // Score a move for sorting
 score_move :: proc(
 	st: ^SearchThread,
@@ -12,6 +14,7 @@ score_move :: proc(
 	tt_move: moves.Move,
 	ply: int = 0,
 	prev_move: moves.Move = moves.Move{},
+	see_score: int = SEE_SCORE_UNKNOWN,
 ) -> int {
 	// 1. Hash Move (Highest Priority)
 	if !moves.is_empty_move(tt_move) &&
@@ -68,12 +71,15 @@ score_move :: proc(
 		attacker_value := constants.PIECE_VALUES[attacker_piece]
 
 		if victim_piece != -1 {
-			see_score := see_capture(b, move)
+			cached_see := see_score
+			if cached_see == SEE_SCORE_UNKNOWN {
+				cached_see = see_capture(b, move)
+			}
 			capture_hist := get_capture_history_score(st, move)
-			if see_score >= 0 {
-				score = params.capture_base_score + see_score + capture_hist / 4 + victim_value - attacker_value / 16
+			if cached_see >= 0 {
+				score = params.capture_base_score + cached_see + capture_hist / 4 + victim_value - attacker_value / 16
 			} else {
-				score = see_score + capture_hist / 16
+				score = cached_see + capture_hist / 16
 			}
 		}
 	}
@@ -134,13 +140,21 @@ sort_moves :: proc(
 	tt_move: moves.Move = moves.Move{},
 	ply: int = 0,
 	prev_move: moves.Move = moves.Move{},
+	see_scores: ^[256]int = nil,
 ) {
 	if move_list.count < 2 {return}
 
 	scores: [256]int
 
 	for i in 0 ..< move_list.count {
-		scores[i] = score_move(st, move_list.moves[i], b, tt_move, ply, prev_move)
+		see_score := SEE_SCORE_UNKNOWN
+		if see_scores != nil {
+			if move_list.moves[i].capture {
+				see_score = see_capture(b, move_list.moves[i])
+			}
+			see_scores[i] = see_score
+		}
+		scores[i] = score_move(st, move_list.moves[i], b, tt_move, ply, prev_move, see_score)
 	}
 
 	// Insertion Sort (Descending)
@@ -156,6 +170,12 @@ sort_moves :: proc(
 				temp_move := move_list.moves[i]
 				move_list.moves[i] = move_list.moves[j]
 				move_list.moves[j] = temp_move
+
+				if see_scores != nil {
+					temp_see := see_scores[i]
+					see_scores[i] = see_scores[j]
+					see_scores[j] = temp_see
+				}
 			}
 		}
 	}

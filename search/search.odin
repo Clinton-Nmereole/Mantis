@@ -138,6 +138,7 @@ SearchStats :: struct {
 	q_delta_prunes:     u64,
 	q_see_prunes:       u64,
 	see_calls:          u64,
+	see_cache_hits:     u64,
 	beta_cutoffs:       u64,
 	quiet_beta_cutoffs: u64,
 	capture_beta_cutoffs: u64,
@@ -203,6 +204,11 @@ print_search_stats :: proc() {
 		avg_moves,
 		stat_load(&search_stats.legal_rejects),
 		see_calls,
+	)
+	fmt.printf(
+		"info string stats see cache_hits=%d qsee_prunes=%d\n",
+		stat_load(&search_stats.see_cache_hits),
+		stat_load(&search_stats.q_see_prunes),
 	)
 	fmt.printf(
 		"info string stats tt probes=%d hits=%d hit_pct=%d cutoffs=%d cut_pct=%d stores=%d tb_probes=%d tb_hits=%d\n",
@@ -1253,7 +1259,8 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 	stat_add(&search_stats.moves_generated, u64(move_list.count))
 
 	// Move Ordering for Quiescence
-	sort_moves(st, &move_list, b)
+	q_see_scores: [256]int
+	sort_moves(st, &move_list, b, see_scores = &q_see_scores)
 
 	legal_moves := 0
 
@@ -1268,7 +1275,12 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 		// SEE Pruning - skip obviously losing captures
 		// Only apply to captures when not in check
 		if move_list.moves[i].capture && !in_check {
-			see_score := see_capture(b, move_list.moves[i])
+			see_score := q_see_scores[i]
+			if see_score == SEE_SCORE_UNKNOWN {
+				see_score = see_capture(b, move_list.moves[i])
+			} else {
+				stat_add(&search_stats.see_cache_hits)
+			}
 			if see_score < params.see_prune_threshold {
 				stat_add(&search_stats.q_see_prunes)
 				continue // Skip this losing capture
