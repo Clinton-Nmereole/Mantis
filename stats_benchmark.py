@@ -107,12 +107,21 @@ def parse_stats(output: str) -> dict[str, int | str]:
     return stats
 
 
-def run_position(binary: str, fen: str, depth: int, timeout: float, clear_hash: bool) -> tuple[dict[str, int | str], str, float]:
+def run_position(
+    binary: str,
+    fen: str,
+    depth: int,
+    timeout: float,
+    clear_hash: bool,
+    staged_picker: bool,
+) -> tuple[dict[str, int | str], str, float]:
     commands = [
         "uci",
         "setoption name SearchStats value true",
-        "isready",
     ]
+    if staged_picker:
+        commands.append("setoption name StagedMovePicker value true")
+    commands.append("isready")
     if clear_hash:
         commands.append("ucinewgame")
     commands.extend([
@@ -256,6 +265,7 @@ def main() -> int:
     parser.add_argument("--fen-file", type=Path, help="Optional file with one FEN per line")
     parser.add_argument("--csv", type=Path, help="Optional CSV output path")
     parser.add_argument("--keep-hash", action="store_true", help="Do not send ucinewgame between positions")
+    parser.add_argument("--staged-picker", action="store_true", help="Enable the StagedMovePicker UCI option")
     args = parser.parse_args()
 
     if args.fen_file:
@@ -279,6 +289,7 @@ def main() -> int:
                 args.depth,
                 args.timeout,
                 clear_hash=not args.keep_hash,
+                staged_picker=args.staged_picker,
             )
         except subprocess.CalledProcessError as exc:
             print(f"FAIL {index}: engine exited with {exc.returncode}\n{exc.output}", file=sys.stderr)

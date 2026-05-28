@@ -917,19 +917,21 @@ negamax :: proc(
 			board.generate_all_moves(b, &tactical_list)
 			stat_add(&search_stats.movegen_calls)
 			stat_add(&search_stats.moves_generated, u64(tactical_list.count))
-			sort_moves(st, &tactical_list, b, tt_move, ply, prev_move)
+			tactical_picker: MovePicker
+			init_move_picker(&tactical_picker, st, &tactical_list, b, tt_move, ply, prev_move)
 
-			for j in 0 ..< tactical_list.count {
-				if !tactical_list.moves[j].capture && tactical_list.moves[j].promoted == -1 {
+			tactical_move: moves.Move
+			for move_picker_next(&tactical_picker, &tactical_move) {
+				if !tactical_move.capture && tactical_move.promoted == -1 {
 					continue
 				}
 
-				if !board.is_castling_legal_now(b, tactical_list.moves[j]) {
+				if !board.is_castling_legal_now(b, tactical_move) {
 					continue
 				}
 
 				t_state: board.StateInfo
-				board.make_move_fast(b, tactical_list.moves[j], &t_state)
+				board.make_move_fast(b, tactical_move, &t_state)
 
 				king_sq := board.get_king_square(b, 1 - b.side)
 				if board.is_square_attacked(b, king_sq, b.side) {
@@ -938,7 +940,7 @@ negamax :: proc(
 					continue
 				}
 
-				nnue.update_accumulators(&t_state, b, tactical_list.moves[j])
+				nnue.update_accumulators(&t_state, b, tactical_move)
 				probcut_depth := effective_depth - params.probcut_reduce
 				if probcut_depth < 1 {
 					probcut_depth = 1
@@ -953,7 +955,7 @@ negamax :: proc(
 					&PV_Line{},
 					{},
 					false,
-					tactical_list.moves[j],
+					tactical_move,
 				)
 				board.unmake_move(b, &t_state)
 
@@ -981,9 +983,13 @@ negamax :: proc(
 	}
 
 	// Move Ordering
-	sort_moves(st, &move_list, b, tt_move, ply, prev_move)
-	if !moves.is_empty_move(tt_move) && move_list.count > 0 && same_move(move_list.moves[0], tt_move) {
-		stat_add(&search_stats.tt_move_first)
+	move_picker: MovePicker
+	init_move_picker(&move_picker, st, &move_list, b, tt_move, ply, prev_move)
+	if !moves.is_empty_move(tt_move) && move_list.count > 0 {
+		move_picker_prepare_current(&move_picker)
+		if same_move(move_list.moves[0], tt_move) {
+			stat_add(&search_stats.tt_move_first)
+		}
 	}
 
 	// Singular Extensions
@@ -1058,7 +1064,8 @@ negamax :: proc(
 		lmp_threshold = params.lmp_base + depth * depth / params.lmp_div
 	}
 
-	for i in 0 ..< move_list.count {
+	move: moves.Move
+	for move_picker_next(&move_picker, &move) {
 		// Check for stop signal between moves
 		if should_stop_search() {
 			break
@@ -1066,42 +1073,42 @@ negamax :: proc(
 
 		// Skip excluded move (for singular extensions)
 		if !moves.is_empty_move(excluded_move) &&
-		   move_list.moves[i].source == excluded_move.source &&
-		   move_list.moves[i].target == excluded_move.target &&
-		   move_list.moves[i].promoted == excluded_move.promoted {
+		   move.source == excluded_move.source &&
+		   move.target == excluded_move.target &&
+		   move.promoted == excluded_move.promoted {
 			continue
 		}
 
-		if !board.is_castling_legal_now(b, move_list.moves[i]) {
+		if !board.is_castling_legal_now(b, move) {
 			continue
 		}
 
 		state: board.StateInfo
-		board.make_move_fast(b, move_list.moves[i], &state)
+		board.make_move_fast(b, move, &state)
 
 		// Check legality: king of side that moved must not be in check
 		king_sq := board.get_king_square(b, 1 - b.side)
 		if board.is_square_attacked(b, king_sq, b.side) {
 			board.unmake_move(b, &state)
-			if same_move(move_list.moves[i], tt_move) {
+			if same_move(move, tt_move) {
 				stat_add(&search_stats.tt_move_legal_rejects)
 			}
 			stat_add(&search_stats.legal_rejects)
 			continue
 		}
-		if legal_moves == 0 && same_move(move_list.moves[i], tt_move) {
+		if legal_moves == 0 && same_move(move, tt_move) {
 			stat_add(&search_stats.tt_move_first_legal)
 		}
 
 		// Update NNUE Accumulators (state holds the old board for reference)
-		nnue.update_accumulators(&state, b, move_list.moves[i])
+		nnue.update_accumulators(&state, b, move)
 		gives_check := move_gives_check_after_make(b)
 
 		// Late Move Pruning (LMP)
 		// Skip quiet moves that are late in the move list.
 		// Only prune if we've already searched enough moves without finding a good one.
 		if !is_pv && !in_check && legal_moves >= lmp_threshold &&
-		   !gives_check && !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
+		   !gives_check && !move.capture && move.promoted == -1 {
 			board.unmake_move(b, &state)
 			stat_add(&search_stats.lmp_prunes)
 			continue
@@ -1109,7 +1116,7 @@ negamax :: proc(
 
 		// Futility Pruning - skip quiet moves that can't raise alpha
 		if do_futility && legal_moves > 0 && !gives_check &&
-		   !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
+		   !move.capture && move.promoted == -1 {
 			board.unmake_move(b, &state)
 			stat_add(&search_stats.futility_prunes)
 			continue
@@ -1133,7 +1140,7 @@ negamax :: proc(
 				&child_pv,
 				{}, // no excluded move
 				true, // is PV
-				move_list.moves[i], // prev_move for counter-moves
+				move, // prev_move for counter-moves
 			)
 		} else {
 			// Subsequent moves: PVS with LMR
@@ -1144,8 +1151,8 @@ negamax :: proc(
 
 			if combined_depth >= params.lmr_min_depth &&
 			   !gives_check &&
-			   !move_list.moves[i].capture &&
-			   move_list.moves[i].promoted == -1 {
+			   !move.capture &&
+			   move.promoted == -1 {
 				// Base reduction from precomputed logarithmic table
 				d_idx := combined_depth
 				if d_idx > 63 { d_idx = 63 }
@@ -1159,7 +1166,7 @@ negamax :: proc(
 				}
 
 				// History-based adjustment
-				history_score := get_history_score(st, move_list.moves[i])
+				history_score := get_history_score(st, move)
 				if history_score > params.lmr_history_good_thresh {
 					reduction += params.lmr_history_good_adj
 				} else if history_score < params.lmr_history_bad_thresh {
@@ -1185,7 +1192,7 @@ negamax :: proc(
 				&child_pv,
 				{}, // no excluded move
 				false, // not PV (null window)
-				move_list.moves[i], // prev_move for counter-moves
+				move, // prev_move for counter-moves
 			)
 
 			// Re-search if reduced search raised alpha
@@ -1202,7 +1209,7 @@ negamax :: proc(
 					&child_pv,
 					{}, // no excluded move
 					false, // not PV (null window)
-					move_list.moves[i], // prev_move for counter-moves
+					move, // prev_move for counter-moves
 				)
 			}
 
@@ -1219,7 +1226,7 @@ negamax :: proc(
 					&child_pv,
 					{}, // no excluded move
 					true, // is PV
-					move_list.moves[i], // prev_move for counter-moves
+					move, // prev_move for counter-moves
 				)
 			}
 		}
@@ -1229,11 +1236,11 @@ negamax :: proc(
 
 		if score > best_score {
 			best_score = score
-			best_move = move_list.moves[i]
+			best_move = move
 			// Update PV
-			pv_line.moves[0] = move_list.moves[i]
-			for i in 0 ..< child_pv.count {
-				pv_line.moves[i + 1] = child_pv.moves[i]
+			pv_line.moves[0] = move
+			for pv_i in 0 ..< child_pv.count {
+				pv_line.moves[pv_i + 1] = child_pv.moves[pv_i]
 			}
 			pv_line.count = child_pv.count + 1
 		}
@@ -1244,26 +1251,26 @@ negamax :: proc(
 
 		if current_alpha >= beta {
 			stat_add(&search_stats.beta_cutoffs)
-			if move_list.moves[i].capture || move_list.moves[i].promoted != -1 {
+			if move.capture || move.promoted != -1 {
 				stat_add(&search_stats.capture_beta_cutoffs)
-				update_capture_history(st, move_list.moves[i], effective_depth, true)
+				update_capture_history(st, move, effective_depth, true)
 				for j in 0 ..< capture_moves_count {
 					update_capture_history(st, capture_moves_searched[j], effective_depth, false)
 				}
 			}
 			// Beta Cutoff - store killer, history, and counter move for quiet moves
-			if !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
+			if !move.capture && move.promoted == -1 {
 				stat_add(&search_stats.quiet_beta_cutoffs)
-				store_killer(st, move_list.moves[i], ply)
-				update_history(st, move_list.moves[i], effective_depth, true)
+				store_killer(st, move, ply)
+				update_history(st, move, effective_depth, true)
 				for j in 0 ..< quiet_moves_count {
 					update_history(st, quiet_moves_searched[j], effective_depth, false)
 				}
 
 				// Store as counter move if we have a previous move
 				if !moves.is_empty_move(prev_move) {
-					store_counter_move(st, prev_move, move_list.moves[i])
-					store_continuation(st, prev_move, move_list.moves[i], effective_depth, true)
+					store_counter_move(st, prev_move, move)
+					store_continuation(st, prev_move, move, effective_depth, true)
 					for j in 0 ..< quiet_moves_count {
 						store_continuation(st, prev_move, quiet_moves_searched[j], effective_depth, false)
 					}
@@ -1272,13 +1279,13 @@ negamax :: proc(
 			break
 		}
 
-		if !move_list.moves[i].capture && move_list.moves[i].promoted == -1 &&
+		if !move.capture && move.promoted == -1 &&
 		   quiet_moves_count < len(quiet_moves_searched) {
-			quiet_moves_searched[quiet_moves_count] = move_list.moves[i]
+			quiet_moves_searched[quiet_moves_count] = move
 			quiet_moves_count += 1
-		} else if (move_list.moves[i].capture || move_list.moves[i].promoted != -1) &&
+		} else if (move.capture || move.promoted != -1) &&
 		          capture_moves_count < len(capture_moves_searched) {
-			capture_moves_searched[capture_moves_count] = move_list.moves[i]
+			capture_moves_searched[capture_moves_count] = move
 			capture_moves_count += 1
 		}
 	}
