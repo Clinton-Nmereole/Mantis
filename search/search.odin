@@ -813,6 +813,36 @@ move_gives_check_after_make :: proc(b: ^board.Board) -> bool {
 	return board.is_square_attacked(b, king_sq, attacker)
 }
 
+is_quiet_search_move :: proc(move: moves.Move) -> bool {
+	return !move.capture && move.promoted == -1
+}
+
+quiet_history_score :: proc(st: ^SearchThread, prev_move, move: moves.Move) -> int {
+	score := get_history_score(st, move)
+	if !moves.is_empty_move(prev_move) {
+		score += get_continuation_score(st, prev_move, move) / 16
+	}
+	return score
+}
+
+is_counter_response :: proc(st: ^SearchThread, prev_move, move: moves.Move) -> bool {
+	if moves.is_empty_move(prev_move) {return false}
+	counter := get_counter_move(st, prev_move)
+	return same_move(move, counter)
+}
+
+is_protected_quiet :: proc(
+	st: ^SearchThread,
+	prev_move, move: moves.Move,
+	ply: int,
+	history_score: int,
+) -> bool {
+	if !is_quiet_search_move(move) {return false}
+	if is_killer(st, move, ply) != 0 {return true}
+	if is_counter_response(st, prev_move, move) {return true}
+	return history_score > params.lmr_history_good_thresh
+}
+
 is_mate_window :: proc(alpha, beta: int) -> bool {
 	return abs(alpha) >= eval.MATE - MAX_PLY || abs(beta) >= eval.MATE - MAX_PLY
 }
@@ -1180,20 +1210,27 @@ negamax :: proc(
 		// Update NNUE Accumulators (state holds the old board for reference)
 		nnue.update_accumulators(&state, b, move)
 		gives_check := move_gives_check_after_make(b)
+		quiet_move := is_quiet_search_move(move)
+		history_score := 0
+		protected_quiet := false
+		if quiet_move {
+			history_score = quiet_history_score(st, prev_move, move)
+			protected_quiet = is_protected_quiet(st, prev_move, move, ply, history_score)
+		}
 
 		// Late Move Pruning (LMP)
 		// Skip quiet moves that are late in the move list.
 		// Only prune if we've already searched enough moves without finding a good one.
-		if !is_pv && !in_check && legal_moves >= lmp_threshold &&
-		   !gives_check && !move.capture && move.promoted == -1 {
+		if !is_pv && !in_check && legal_moves >= lmp_threshold && quiet_moves_count > 0 &&
+		   !gives_check && quiet_move && !protected_quiet {
 			board.unmake_move(b, &state)
 			stat_add(&search_stats.lmp_prunes)
 			continue
 		}
 
 		// Futility Pruning - skip quiet moves that can't raise alpha
-		if do_futility && legal_moves > 0 && !gives_check &&
-		   !move.capture && move.promoted == -1 {
+		if do_futility && quiet_moves_count > 0 && !gives_check &&
+		   quiet_move && !protected_quiet {
 			board.unmake_move(b, &state)
 			stat_add(&search_stats.futility_prunes)
 			continue
@@ -1228,8 +1265,7 @@ negamax :: proc(
 
 			if combined_depth >= params.lmr_min_depth &&
 			   !gives_check &&
-			   !move.capture &&
-			   move.promoted == -1 {
+			   quiet_move {
 				// Base reduction from precomputed logarithmic table
 				d_idx := combined_depth
 				if d_idx > 63 { d_idx = 63 }
@@ -1243,7 +1279,6 @@ negamax :: proc(
 				}
 
 				// History-based adjustment
-				history_score := get_history_score(st, move)
 				if history_score > params.lmr_history_good_thresh {
 					reduction += params.lmr_history_good_adj
 				} else if history_score < params.lmr_history_bad_thresh {
