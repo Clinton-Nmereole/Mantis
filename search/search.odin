@@ -292,6 +292,169 @@ same_move :: proc(a, b: moves.Move) -> bool {
 		a.promoted == b.promoted
 }
 
+same_qcapture_move :: proc(a, b: moves.Move) -> bool {
+	return a.source == b.source &&
+		a.target == b.target &&
+		a.piece == b.piece &&
+		a.promoted == b.promoted &&
+		a.capture == b.capture &&
+		a.en_passant == b.en_passant
+}
+
+QCaptureOrder :: struct {
+	moves: [256]moves.Move,
+	count: int,
+}
+
+qcapture_order_append :: proc(order: ^QCaptureOrder, move: moves.Move) {
+	if order.count < len(order.moves) {
+		order.moves[order.count] = move
+		order.count += 1
+	}
+}
+
+collect_qcaptures_from_full_order :: proc(st: ^SearchThread, b: ^board.Board, order: ^QCaptureOrder) {
+	move_list: moves.MoveList
+	board.generate_all_moves(b, &move_list)
+
+	see_scores: [256]int
+	sort_moves(st, &move_list, b, see_scores = &see_scores)
+
+	for i in 0 ..< move_list.count {
+		if move_list.moves[i].capture {
+			qcapture_order_append(order, move_list.moves[i])
+		}
+	}
+}
+
+collect_qcaptures_from_compact_order :: proc(st: ^SearchThread, b: ^board.Board, order: ^QCaptureOrder) {
+	full_list: moves.MoveList
+	board.generate_all_moves(b, &full_list)
+
+	move_list: moves.MoveList
+	for i in 0 ..< full_list.count {
+		if full_list.moves[i].capture {
+			moves.append_move(&move_list, full_list.moves[i])
+		}
+	}
+
+	see_scores: [256]int
+	sort_moves(st, &move_list, b, see_scores = &see_scores)
+
+	for i in 0 ..< move_list.count {
+		qcapture_order_append(order, move_list.moves[i])
+	}
+}
+
+print_qcapture_mismatch :: proc(full_order, compact_order: ^QCaptureOrder, index: int) {
+	fmt.printf("QCapture parity mismatch at index %d\n", index)
+	if index < full_order.count {
+		fmt.printf("  full:    ")
+		board.print_move(full_order.moves[index])
+		fmt.println()
+	} else {
+		fmt.println("  full:    <none>")
+	}
+	if index < compact_order.count {
+		fmt.printf("  compact: ")
+		board.print_move(compact_order.moves[index])
+		fmt.println()
+	} else {
+		fmt.println("  compact: <none>")
+	}
+}
+
+compare_qcapture_orders :: proc(st: ^SearchThread, b: ^board.Board, verbose: bool = false) -> bool {
+	full_order: QCaptureOrder
+	compact_order: QCaptureOrder
+
+	collect_qcaptures_from_full_order(st, b, &full_order)
+	collect_qcaptures_from_compact_order(st, b, &compact_order)
+
+	if full_order.count != compact_order.count {
+		if verbose {
+			fmt.printf("QCapture count mismatch: full=%d compact=%d fen=%s\n", full_order.count, compact_order.count, board.get_fen(b^))
+			print_qcapture_mismatch(&full_order, &compact_order, min(full_order.count, compact_order.count))
+		}
+		return false
+	}
+
+	for i in 0 ..< full_order.count {
+		if !same_qcapture_move(full_order.moves[i], compact_order.moves[i]) {
+			if verbose {
+				fmt.printf("fen=%s\n", board.get_fen(b^))
+				print_qcapture_mismatch(&full_order, &compact_order, i)
+			}
+			return false
+		}
+	}
+
+	return true
+}
+
+validate_qcapture_parity_node :: proc(
+	st: ^SearchThread,
+	b: ^board.Board,
+	depth: int,
+	checked: ^u64,
+	mismatches: ^u64,
+) -> bool {
+	king_sq := board.get_king_square(b, b.side)
+	in_check := board.is_square_attacked(b, king_sq, 1 - b.side)
+	if !in_check {
+		checked^ += 1
+		if !compare_qcapture_orders(st, b, true) {
+			mismatches^ += 1
+			return false
+		}
+	}
+
+	if depth <= 0 {
+		return true
+	}
+
+	move_list: moves.MoveList
+	board.generate_all_moves(b, &move_list)
+	for i in 0 ..< move_list.count {
+		if !board.is_castling_legal_now(b, move_list.moves[i]) {
+			continue
+		}
+
+		state: board.StateInfo
+		board.make_move_fast(b, move_list.moves[i], &state)
+
+		king_sq := board.get_king_square(b, 1 - b.side)
+		if board.is_square_attacked(b, king_sq, b.side) {
+			board.unmake_move(b, &state)
+			continue
+		}
+
+		if !validate_qcapture_parity_node(st, b, depth - 1, checked, mismatches) {
+			board.unmake_move(b, &state)
+			return false
+		}
+		board.unmake_move(b, &state)
+	}
+
+	return true
+}
+
+validate_qcapture_parity_test :: proc(fen: string, depth: int) {
+	b := board.parse_fen(fen)
+	st: SearchThread
+	init_search_thread(&st, 0)
+	defer free(st.continuation_history)
+
+	checked: u64 = 0
+	mismatches: u64 = 0
+	ok := validate_qcapture_parity_node(&st, &b, depth, &checked, &mismatches)
+	if ok {
+		fmt.printf("QCapture parity OK: positions=%d depth=%d\n", checked, depth)
+	} else {
+		fmt.printf("QCapture parity FAILED: checked=%d mismatches=%d depth=%d\n", checked, mismatches, depth)
+	}
+}
+
 // Initialize a SearchThread
 init_search_thread :: proc(st: ^SearchThread, id: int) {
 	st.thread_id = id

@@ -77,6 +77,19 @@ main :: proc() {
 		}
 	}
 
+	if len(args) >= 3 && args[1] == "validate-qcaptures" {
+		depth, ok := strconv.parse_int(args[2])
+		if ok && depth >= 0 {
+			search.init_search_params()
+			fen := "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+			if len(args) >= 5 && args[3] == "fen" {
+				fen = args[4]
+			}
+			search.validate_qcapture_parity_test(fen, depth)
+			return
+		}
+	}
+
 	if len(args) >= 3 && args[1] == "perft" {
 		depth, ok := strconv.parse_int(args[2])
 		if ok && depth >= 1 {

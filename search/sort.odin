@@ -142,8 +142,6 @@ sort_moves :: proc(
 	prev_move: moves.Move = moves.Move{},
 	see_scores: ^[256]int = nil,
 ) {
-	if move_list.count < 2 {return}
-
 	scores: [256]int
 
 	for i in 0 ..< move_list.count {
@@ -156,6 +154,8 @@ sort_moves :: proc(
 		}
 		scores[i] = score_move(st, move_list.moves[i], b, tt_move, ply, prev_move, see_score)
 	}
+
+	if move_list.count < 2 {return}
 
 	// Insertion Sort (Descending)
 	for i in 0 ..< move_list.count {
