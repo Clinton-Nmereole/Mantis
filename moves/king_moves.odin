@@ -125,3 +125,14 @@ get_king_attacks_bitboard :: proc(square: int) -> u64 {
 
 	return attacks
 }
+
+get_king_captures :: proc(king: u64, enemy_pieces: u64, move_list: ^MoveList) {
+	if king == 0 {return}
+
+	source := utils.get_lsb_index(king)
+	attacks := get_king_attacks_bitboard(source) & enemy_pieces
+	for attacks != 0 {
+		target := utils.pop_lsb(&attacks)
+		append_move(move_list, create_move(source, target, constants.KING, true))
+	}
+}

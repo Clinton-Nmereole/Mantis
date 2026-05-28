@@ -460,3 +460,39 @@ get_queen_moves :: proc(queens: u64, occupancy: u64, own_pieces: u64, move_list:
 		}
 	}
 }
+
+get_rook_captures :: proc(rooks: u64, occupancy: u64, enemy_pieces: u64, move_list: ^MoveList) {
+	bitboard := rooks
+	for bitboard != 0 {
+		source := utils.pop_lsb(&bitboard)
+		attacks := get_rook_attacks(source, occupancy) & enemy_pieces
+		for attacks != 0 {
+			target := utils.pop_lsb(&attacks)
+			append_move(move_list, create_move(source, target, constants.ROOK, true))
+		}
+	}
+}
+
+get_bishop_captures :: proc(bishops: u64, occupancy: u64, enemy_pieces: u64, move_list: ^MoveList) {
+	bitboard := bishops
+	for bitboard != 0 {
+		source := utils.pop_lsb(&bitboard)
+		attacks := get_bishop_attacks(source, occupancy) & enemy_pieces
+		for attacks != 0 {
+			target := utils.pop_lsb(&attacks)
+			append_move(move_list, create_move(source, target, constants.BISHOP, true))
+		}
+	}
+}
+
+get_queen_captures :: proc(queens: u64, occupancy: u64, enemy_pieces: u64, move_list: ^MoveList) {
+	bitboard := queens
+	for bitboard != 0 {
+		source := utils.pop_lsb(&bitboard)
+		attacks := get_queen_attacks(source, occupancy) & enemy_pieces
+		for attacks != 0 {
+			target := utils.pop_lsb(&attacks)
+			append_move(move_list, create_move(source, target, constants.QUEEN, true))
+		}
+	}
+}

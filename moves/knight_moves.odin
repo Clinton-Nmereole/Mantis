@@ -63,3 +63,15 @@ get_knight_moves :: proc(
 		}
 	}
 }
+
+get_knight_captures :: proc(knights: u64, enemy_pieces: u64, move_list: ^MoveList) {
+	bitboard := knights
+	for bitboard != 0 {
+		source := utils.pop_lsb(&bitboard)
+		attacks := get_knight_attacks_bitboard(source) & enemy_pieces
+		for attacks != 0 {
+			target := utils.pop_lsb(&attacks)
+			append_move(move_list, create_move(source, target, constants.KNIGHT, true))
+		}
+	}
+}

@@ -7,14 +7,27 @@ import "../moves"
 SEE_SCORE_UNKNOWN :: -1_000_000_000
 use_staged_move_picker: bool = false
 
+MOVE_PICKER_HASH_STAGE :: 0
+MOVE_PICKER_COUNTER_STAGE :: 1
+MOVE_PICKER_GOOD_CAPTURE_STAGE :: 2
+MOVE_PICKER_KILLER1_STAGE :: 3
+MOVE_PICKER_KILLER2_STAGE :: 4
+MOVE_PICKER_REST_STAGE :: 5
+MOVE_PICKER_DONE_STAGE :: 6
+
 MovePicker :: struct {
 	move_list:       ^moves.MoveList,
 	scores:          [256]int,
 	see_scores:      [256]int,
 	index:           int,
+	stage:           int,
 	staged:          bool,
 	has_see_scores:  bool,
 	current_ordered: bool,
+	st:              ^SearchThread,
+	tt_move:         moves.Move,
+	counter_move:    moves.Move,
+	ply:             int,
 }
 
 // Score a move for sorting
@@ -201,12 +214,21 @@ init_move_picker :: proc(
 	ply: int = 0,
 	prev_move: moves.Move = moves.Move{},
 	with_see_scores: bool = false,
+	force_full_sort: bool = false,
 ) {
 	mp.move_list = move_list
 	mp.index = 0
-	mp.staged = use_staged_move_picker
+	mp.stage = MOVE_PICKER_HASH_STAGE
+	mp.staged = use_staged_move_picker && !force_full_sort
 	mp.has_see_scores = with_see_scores
 	mp.current_ordered = false
+	mp.st = st
+	mp.tt_move = tt_move
+	mp.ply = ply
+	mp.counter_move = moves.Move{}
+	if !moves.is_empty_move(prev_move) {
+		mp.counter_move = get_counter_move(st, prev_move)
+	}
 
 	if !mp.staged {
 		if with_see_scores {
@@ -219,14 +241,75 @@ init_move_picker :: proc(
 
 	for i in 0 ..< move_list.count {
 		see_score := SEE_SCORE_UNKNOWN
+		if move_list.moves[i].capture &&
+		   !move_picker_same_move(move_list.moves[i], tt_move) &&
+		   !move_picker_same_move(move_list.moves[i], mp.counter_move) {
+			see_score = see_capture(b, move_list.moves[i])
+		}
 		if with_see_scores {
-			if move_list.moves[i].capture {
-				see_score = see_capture(b, move_list.moves[i])
-			}
 			mp.see_scores[i] = see_score
+		} else if move_list.moves[i].capture {
+			mp.see_scores[i] = see_score
+		} else {
+			mp.see_scores[i] = SEE_SCORE_UNKNOWN
 		}
 		mp.scores[i] = score_move(st, move_list.moves[i], b, tt_move, ply, prev_move, see_score)
 	}
+}
+
+move_picker_same_move :: proc(a, b: moves.Move) -> bool {
+	return !moves.is_empty_move(a) &&
+		a.source == b.source &&
+		a.target == b.target &&
+		a.promoted == b.promoted
+}
+
+move_picker_stage_match :: proc(mp: ^MovePicker, idx: int) -> bool {
+	move := mp.move_list.moves[idx]
+	switch mp.stage {
+	case MOVE_PICKER_HASH_STAGE:
+		return move_picker_same_move(move, mp.tt_move)
+	case MOVE_PICKER_COUNTER_STAGE:
+		return move_picker_same_move(move, mp.counter_move)
+	case MOVE_PICKER_GOOD_CAPTURE_STAGE:
+		if move.promoted != -1 {
+			return true
+		}
+		return move.capture && mp.see_scores[idx] >= 0
+	case MOVE_PICKER_KILLER1_STAGE:
+		return !move.capture && move.promoted == -1 && is_killer(mp.st, move, mp.ply) == 1
+	case MOVE_PICKER_KILLER2_STAGE:
+		return !move.capture && move.promoted == -1 && is_killer(mp.st, move, mp.ply) == 2
+	case MOVE_PICKER_REST_STAGE:
+		if move.capture && move.promoted == -1 {
+			return mp.see_scores[idx] < 0
+		}
+		return !move.capture && move.promoted == -1 && is_killer(mp.st, move, mp.ply) == 0
+	}
+	return false
+}
+
+move_picker_select_index :: proc(mp: ^MovePicker) -> int {
+	for mp.stage < MOVE_PICKER_DONE_STAGE {
+		best_idx := -1
+		best_score := -2_000_000_000
+		for i in mp.index ..< mp.move_list.count {
+			if !move_picker_stage_match(mp, i) {
+				continue
+			}
+			if best_idx == -1 || mp.scores[i] > best_score {
+				best_idx = i
+				best_score = mp.scores[i]
+			}
+		}
+
+		if best_idx != -1 {
+			return best_idx
+		}
+		mp.stage += 1
+	}
+
+	return -1
 }
 
 move_picker_prepare_current :: proc(mp: ^MovePicker) {
@@ -234,22 +317,23 @@ move_picker_prepare_current :: proc(mp: ^MovePicker) {
 	if !mp.staged || mp.current_ordered {return}
 
 	i := mp.index
-	for j in i + 1 ..< mp.move_list.count {
-		if mp.scores[j] > mp.scores[i] {
-			temp_score := mp.scores[i]
-			mp.scores[i] = mp.scores[j]
-			mp.scores[j] = temp_score
+	selected := move_picker_select_index(mp)
+	if selected == -1 {
+		mp.index = mp.move_list.count
+		return
+	}
+	if selected != i {
+		temp_score := mp.scores[i]
+		mp.scores[i] = mp.scores[selected]
+		mp.scores[selected] = temp_score
 
-			temp_move := mp.move_list.moves[i]
-			mp.move_list.moves[i] = mp.move_list.moves[j]
-			mp.move_list.moves[j] = temp_move
+		temp_move := mp.move_list.moves[i]
+		mp.move_list.moves[i] = mp.move_list.moves[selected]
+		mp.move_list.moves[selected] = temp_move
 
-			if mp.has_see_scores {
-				temp_see := mp.see_scores[i]
-				mp.see_scores[i] = mp.see_scores[j]
-				mp.see_scores[j] = temp_see
-			}
-		}
+		temp_see := mp.see_scores[i]
+		mp.see_scores[i] = mp.see_scores[selected]
+		mp.see_scores[selected] = temp_see
 	}
 
 	mp.current_ordered = true
@@ -263,9 +347,10 @@ move_picker_next :: proc(
 	if mp.index >= mp.move_list.count {return false}
 
 	move_picker_prepare_current(mp)
+	if mp.index >= mp.move_list.count {return false}
 	out_move^ = mp.move_list.moves[mp.index]
 	if out_see_score != nil {
-		if mp.has_see_scores {
+		if mp.has_see_scores || mp.staged {
 			out_see_score^ = mp.see_scores[mp.index]
 		} else {
 			out_see_score^ = SEE_SCORE_UNKNOWN

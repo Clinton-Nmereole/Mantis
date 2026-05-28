@@ -504,3 +504,95 @@ get_pawn_moves :: proc(
 		}
 	}
 }
+
+append_pawn_capture_move :: proc(move_list: ^MoveList, source, target: int, promotes: bool) {
+	if promotes {
+		append_move(move_list, Move{source, target, constants.PAWN, constants.QUEEN, true, false, false, false})
+		append_move(move_list, Move{source, target, constants.PAWN, constants.ROOK, true, false, false, false})
+		append_move(move_list, Move{source, target, constants.PAWN, constants.BISHOP, true, false, false, false})
+		append_move(move_list, Move{source, target, constants.PAWN, constants.KNIGHT, true, false, false, false})
+	} else {
+		append_move(move_list, create_move(source, target, constants.PAWN, true))
+	}
+}
+
+get_pawn_captures :: proc(
+	side: int,
+	pawns: u64,
+	enemy_pieces: u64,
+	en_passant_target: u64,
+	move_list: ^MoveList,
+) {
+	bitboard, attacks: u64
+	source, target: int
+
+	if side == constants.WHITE {
+		attacks = (pawns & ~constants.FILE_A) << 7
+		bitboard = attacks & enemy_pieces
+		for bitboard != 0 {
+			target = utils.pop_lsb(&bitboard)
+			source = target - 7
+			append_pawn_capture_move(move_list, source, target, target >= 56)
+		}
+
+		if en_passant_target != 0 {
+			bitboard = attacks & en_passant_target
+			for bitboard != 0 {
+				target = utils.pop_lsb(&bitboard)
+				source = target - 7
+				append_move(move_list, Move{source, target, constants.PAWN, -1, true, false, true, false})
+			}
+		}
+
+		attacks = (pawns & ~constants.FILE_H) << 9
+		bitboard = attacks & enemy_pieces
+		for bitboard != 0 {
+			target = utils.pop_lsb(&bitboard)
+			source = target - 9
+			append_pawn_capture_move(move_list, source, target, target >= 56)
+		}
+
+		if en_passant_target != 0 {
+			bitboard = attacks & en_passant_target
+			for bitboard != 0 {
+				target = utils.pop_lsb(&bitboard)
+				source = target - 9
+				append_move(move_list, Move{source, target, constants.PAWN, -1, true, false, true, false})
+			}
+		}
+	} else {
+		attacks = (pawns & ~constants.FILE_H) >> 7
+		bitboard = attacks & enemy_pieces
+		for bitboard != 0 {
+			target = utils.pop_lsb(&bitboard)
+			source = target + 7
+			append_pawn_capture_move(move_list, source, target, target <= 7)
+		}
+
+		if en_passant_target != 0 {
+			bitboard = attacks & en_passant_target
+			for bitboard != 0 {
+				target = utils.pop_lsb(&bitboard)
+				source = target + 7
+				append_move(move_list, Move{source, target, constants.PAWN, -1, true, false, true, false})
+			}
+		}
+
+		attacks = (pawns & ~constants.FILE_A) >> 9
+		bitboard = attacks & enemy_pieces
+		for bitboard != 0 {
+			target = utils.pop_lsb(&bitboard)
+			source = target + 9
+			append_pawn_capture_move(move_list, source, target, target <= 7)
+		}
+
+		if en_passant_target != 0 {
+			bitboard = attacks & en_passant_target
+			for bitboard != 0 {
+				target = utils.pop_lsb(&bitboard)
+				source = target + 9
+				append_move(move_list, Move{source, target, constants.PAWN, -1, true, false, true, false})
+			}
+		}
+	}
+}

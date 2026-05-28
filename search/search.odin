@@ -327,14 +327,15 @@ collect_qcaptures_from_full_order :: proc(st: ^SearchThread, b: ^board.Board, or
 	}
 }
 
-order_qcaptures_from_full_order :: proc(
+order_qcaptures_from_full_order_cached :: proc(
 	st: ^SearchThread,
 	b: ^board.Board,
 	move_list: ^moves.MoveList,
 	q_see_scores: ^[256]int,
+	capture_list: ^moves.MoveList,
+	capture_scores: ^[256]int,
+	capture_see_scores: ^[256]int,
 ) -> int {
-	// Preserve the current full-list ordering exactly, but expose only the
-	// captures qsearch will actually search when the side is not in check.
 	full_list: moves.MoveList
 	board.generate_all_moves(b, &full_list)
 
@@ -345,11 +346,27 @@ order_qcaptures_from_full_order :: proc(
 	for i in 0 ..< full_list.count {
 		order[i] = i
 		see_score := SEE_SCORE_UNKNOWN
+		score := 0
 		if full_list.moves[i].capture {
-			see_score = see_capture(b, full_list.moves[i])
+			cached_idx := -1
+			for j in 0 ..< capture_list.count {
+				if same_qcapture_move(full_list.moves[i], capture_list.moves[j]) {
+					cached_idx = j
+					break
+				}
+			}
+			if cached_idx != -1 {
+				see_score = capture_see_scores[cached_idx]
+				score = capture_scores[cached_idx]
+			} else {
+				see_score = see_capture(b, full_list.moves[i])
+				score = score_move(st, full_list.moves[i], b, moves.Move{}, 0, moves.Move{}, see_score)
+			}
+		} else {
+			score = score_move(st, full_list.moves[i], b, moves.Move{}, 0, moves.Move{}, see_score)
 		}
 		see_scores[i] = see_score
-		scores[i] = score_move(st, full_list.moves[i], b, moves.Move{}, 0, moves.Move{}, see_score)
+		scores[i] = score
 	}
 
 	for i in 0 ..< full_list.count {
@@ -374,10 +391,70 @@ order_qcaptures_from_full_order :: proc(
 	return full_list.count
 }
 
+order_qcaptures_from_capture_generator :: proc(
+	st: ^SearchThread,
+	b: ^board.Board,
+	move_list: ^moves.MoveList,
+	q_see_scores: ^[256]int,
+) -> int {
+	board.generate_capture_moves(b, move_list)
+
+	scores: [256]int
+	has_duplicate_scores := false
+	for i in 0 ..< move_list.count {
+		see_score := see_capture(b, move_list.moves[i])
+		q_see_scores[i] = see_score
+		scores[i] = score_move(st, move_list.moves[i], b, moves.Move{}, 0, moves.Move{}, see_score)
+
+		for j in 0 ..< i {
+			if scores[j] == scores[i] {
+				has_duplicate_scores = true
+			}
+		}
+	}
+
+	if has_duplicate_scores {
+		// The full exchange sort is not stable: high-scoring quiets can
+		// indirectly reorder equal-scored captures, so ties need fallback.
+		capture_list := move_list^
+		capture_scores := scores
+		capture_see_scores := q_see_scores^
+		return order_qcaptures_from_full_order_cached(
+			st,
+			b,
+			move_list,
+			q_see_scores,
+			&capture_list,
+			&capture_scores,
+			&capture_see_scores,
+		)
+	}
+
+	for i in 0 ..< move_list.count {
+		for j in i + 1 ..< move_list.count {
+			if scores[j] > scores[i] {
+				temp_score := scores[i]
+				scores[i] = scores[j]
+				scores[j] = temp_score
+
+				temp_move := move_list.moves[i]
+				move_list.moves[i] = move_list.moves[j]
+				move_list.moves[j] = temp_move
+
+				temp_see := q_see_scores[i]
+				q_see_scores[i] = q_see_scores[j]
+				q_see_scores[j] = temp_see
+			}
+		}
+	}
+
+	return move_list.count
+}
+
 collect_qcaptures_from_projected_order :: proc(st: ^SearchThread, b: ^board.Board, order: ^QCaptureOrder) {
 	move_list: moves.MoveList
 	see_scores: [256]int
-	order_qcaptures_from_full_order(st, b, &move_list, &see_scores)
+	order_qcaptures_from_capture_generator(st, b, &move_list, &see_scores)
 
 	for i in 0 ..< move_list.count {
 		qcapture_order_append(order, move_list.moves[i])
@@ -984,7 +1061,7 @@ negamax :: proc(
 
 	// Move Ordering
 	move_picker: MovePicker
-	init_move_picker(&move_picker, st, &move_list, b, tt_move, ply, prev_move)
+	init_move_picker(&move_picker, st, &move_list, b, tt_move, ply, prev_move, false, is_pv)
 	if !moves.is_empty_move(tt_move) && move_list.count > 0 {
 		move_picker_prepare_current(&move_picker)
 		if same_move(move_list.moves[0], tt_move) {
@@ -1469,7 +1546,7 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 		stat_add(&search_stats.moves_generated, u64(move_list.count))
 		sort_moves(st, &move_list, b, see_scores = &q_see_scores)
 	} else {
-		generated := order_qcaptures_from_full_order(st, b, &move_list, &q_see_scores)
+		generated := order_qcaptures_from_capture_generator(st, b, &move_list, &q_see_scores)
 		stat_add(&search_stats.movegen_calls)
 		stat_add(&search_stats.moves_generated, u64(generated))
 	}

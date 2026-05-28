@@ -358,6 +358,37 @@ generate_all_moves :: proc(board: ^Board, move_list: ^moves.MoveList) {
 	moves.get_queen_moves(queens, occupancy, own_pieces, move_list)
 }
 
+generate_capture_moves :: proc(board: ^Board, move_list: ^moves.MoveList) {
+	side := board.side
+	occupancy := board.occupancies[constants.BOTH]
+	enemy_pieces := board.occupancies[1 - side]
+
+	pawns :=
+		(side == constants.WHITE) ? board.bitboards[constants.PAWN] : board.bitboards[constants.PAWN + 6]
+	ep_target := (board.en_passant != -1) ? (1 << u64(board.en_passant)) : u64(0)
+	moves.get_pawn_captures(side, pawns, enemy_pieces, ep_target, move_list)
+
+	knights :=
+		(side == constants.WHITE) ? board.bitboards[constants.KNIGHT] : board.bitboards[constants.KNIGHT + 6]
+	moves.get_knight_captures(knights, enemy_pieces, move_list)
+
+	king :=
+		(side == constants.WHITE) ? board.bitboards[constants.KING] : board.bitboards[constants.KING + 6]
+	moves.get_king_captures(king, enemy_pieces, move_list)
+
+	rooks :=
+		(side == constants.WHITE) ? board.bitboards[constants.ROOK] : board.bitboards[constants.ROOK + 6]
+	moves.get_rook_captures(rooks, occupancy, enemy_pieces, move_list)
+
+	bishops :=
+		(side == constants.WHITE) ? board.bitboards[constants.BISHOP] : board.bitboards[constants.BISHOP + 6]
+	moves.get_bishop_captures(bishops, occupancy, enemy_pieces, move_list)
+
+	queens :=
+		(side == constants.WHITE) ? board.bitboards[constants.QUEEN] : board.bitboards[constants.QUEEN + 6]
+	moves.get_queen_captures(queens, occupancy, enemy_pieces, move_list)
+}
+
 // Perft Function
 perft :: proc(b: ^Board, depth: int) -> u64 {
 	if depth == 0 {return 1}
