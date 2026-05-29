@@ -141,6 +141,24 @@ remaining issue is not just one unsafe non-PV pruning rule. It is likely the
 state feedback around aspiration, TT/history updates, and skipped full searches
 for fail-low root moves.
 
+## State-Neutral Root-PVS Probe Retry
+
+`mantis_root_pvs_neutral` ran final-depth-only root PVS with a TT snapshot and
+cloned `SearchThread` for every root null probe, restoring before either
+pruning or full re-searching.
+
+Result: rejected.
+
+| Candidate | Best Move Changes | Nodes | Time | Max Score Delta |
+| --- | ---: | ---: | ---: | ---: |
+| `mantis_root_pvs_neutral` | 3/44 | +7.84% | +482.17% | 132 cp |
+
+This rules out null-probe TT/history mutation as the sole cause. The remaining
+divergence is likely from skipping the full search of fail-low root moves
+itself: those skipped searches normally contribute TT/history/countermove state
+used by later root moves. Full TT snapshots also make this approach far too
+expensive to be useful as an optimization.
+
 The safer future route is now:
 
 1. Do not spend more time on root PVS until the underlying PV/non-PV score
@@ -148,10 +166,9 @@ The safer future route is now:
 2. Use `trace-root` on positions with root-PVS best-move churn and inspect any
    `MISS_FAIL_HIGH` rows before changing search behavior.
 3. Do not enable root PVS from these attempts.
-4. Next, build a state-neutral root-PVS probe experiment that snapshots TT and
-   clones root search state for null probes, then restores before either
-   pruning or full re-searching. This will separate true score instability from
-   search-state pollution.
+4. Next, audit the exact TT/history/countermove state dependence from skipped
+   fail-low root moves, or defer root PVS and move to a different search
+   optimization with a better risk/reward profile.
 5. Require zero best-move changes and a small score-delta ceiling before any
    version is accepted.
 
