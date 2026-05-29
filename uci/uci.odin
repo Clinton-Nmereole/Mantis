@@ -468,7 +468,7 @@ BENCH_FENS := []string {
 	"8/2P5/8/4k3/3N4/4K3/8/8 w - - 0 1",
 	"6k1/5p2/6p1/8/7p/7P/6PK/8 w - - 0 1",
 	"8/8/8/8/1k6/p3R3/1K6/8 w - - 0 1",
-	"r1b5/ppp2kpp/8/4p3/2B1n3/2N5/PPP2PPP/R1B1K2R w KQ - 4 13",
+	"r1b5/ppp2kpp/8/4p3/2B1n3/2N5/PPP2PPP/R1B1K2R b KQ - 4 13",
 	"8/8/8/8/4k3/8/4K3/8 w - - 0 1",
 	"8/8/1Pk5/8/2K5/8/8/8 w - - 0 1",
 	"8/5pk1/r6p/8/2Q5/3q4/P4PPP/6K1 w - - 0 1",
