@@ -279,11 +279,18 @@ def parse_stats(output: str) -> dict[str, int | str]:
 def run_position(
     binary: str,
     fen: str,
-    depth: int,
+    depth: int | None,
     timeout: float,
     clear_hash: bool,
     staged_picker: bool,
+    movetime_ms: int | None = None,
 ) -> tuple[dict[str, int | str], str, float]:
+    if depth is None and movetime_ms is None:
+        raise ValueError("either depth or movetime_ms must be provided")
+    if depth is not None and movetime_ms is not None:
+        raise ValueError("depth and movetime_ms are mutually exclusive")
+
+    go_command = f"go movetime {movetime_ms}" if movetime_ms is not None else f"go depth {depth}"
     commands = [
         "uci",
         "setoption name SearchStats value true",
@@ -295,7 +302,7 @@ def run_position(
         commands.append("ucinewgame")
     commands.extend([
         f"position fen {fen}",
-        f"go depth {depth}",
+        go_command,
         "quit",
     ])
     command = "\n".join(commands) + "\n"
@@ -429,6 +436,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", default="./mantis", help="Path to Mantis binary")
     parser.add_argument("--depth", type=int, default=6, help="Fixed search depth")
+    parser.add_argument("--movetime", type=int, help="Search each position with UCI go movetime N milliseconds")
     parser.add_argument("--limit", type=int, default=0, help="Only run the first N benchmark FENs")
     parser.add_argument("--timeout", type=float, default=60.0, help="Timeout per position in seconds")
     parser.add_argument("--fen-file", type=Path, help="Optional file with one FEN per line")
@@ -437,6 +445,10 @@ def main() -> int:
     parser.add_argument("--staged-picker", action="store_true", help="Enable the StagedMovePicker UCI option")
     parser.add_argument("--validate-only", action="store_true", help="Validate selected FENs and exit")
     args = parser.parse_args()
+    if args.depth <= 0:
+        parser.error("--depth must be positive")
+    if args.movetime is not None and args.movetime <= 0:
+        parser.error("--movetime must be positive")
 
     if args.fen_file:
         fens = [
@@ -460,16 +472,21 @@ def main() -> int:
         print(f"FEN validation OK: {len(fens)} positions")
         return 0
 
+    depth = None if args.movetime is not None else args.depth
+    mode = "movetime" if args.movetime is not None else "depth"
+    limit_value = args.movetime if args.movetime is not None else args.depth
+
     rows: list[dict[str, int | str]] = []
     for index, fen in enumerate(fens, start=1):
         try:
             stats, _output, wall_ms = run_position(
                 args.binary,
                 fen,
-                args.depth,
+                depth,
                 args.timeout,
                 clear_hash=not args.keep_hash,
                 staged_picker=args.staged_picker,
+                movetime_ms=args.movetime,
             )
         except subprocess.CalledProcessError as exc:
             print(f"FAIL {index}: engine exited with {exc.returncode}\n{exc.output}", file=sys.stderr)
@@ -480,11 +497,14 @@ def main() -> int:
 
         stats["index"] = index
         stats["fen"] = fen
+        stats["mode"] = mode
+        stats["limit"] = limit_value
         stats["wall_ms"] = int(wall_ms)
         rows.append(stats)
 
         print(
             f"{index:2d}/{len(fens):2d} "
+            f"depth={int(stats.get('depth', 0)):2d} "
             f"nodes={int(stats.get('nodes', 0)):8d} "
             f"time={int(stats.get('time_ms', 0)):5d}ms "
             f"q={float(stats.get('qnode_pct', 0)):4.0f}% "

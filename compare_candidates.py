@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare two Mantis binaries across benchmark FENs and depths."""
+"""Compare two Mantis binaries across benchmark FENs and search budgets."""
 
 from __future__ import annotations
 
@@ -60,11 +60,14 @@ def load_fens(args: argparse.Namespace) -> list[str]:
 def run_one(
     binary: str,
     fen: str,
-    depth: int,
+    mode: str,
+    limit_value: int,
     timeout: float,
     keep_hash: bool,
     staged_picker: bool,
 ) -> dict[str, Any]:
+    depth = limit_value if mode == "depth" else None
+    movetime_ms = limit_value if mode == "movetime" else None
     stats, _output, wall_ms = stats_benchmark.run_position(
         binary,
         fen,
@@ -72,6 +75,7 @@ def run_one(
         timeout,
         clear_hash=not keep_hash,
         staged_picker=staged_picker,
+        movetime_ms=movetime_ms,
     )
     stats["wall_ms"] = int(wall_ms)
     return stats
@@ -81,12 +85,14 @@ def compare_position(
     args: argparse.Namespace,
     fen: str,
     index: int,
-    depth: int,
+    mode: str,
+    limit_value: int,
 ) -> dict[str, Any]:
     base = run_one(
         args.baseline,
         fen,
-        depth,
+        mode,
+        limit_value,
         args.timeout,
         args.keep_hash,
         args.baseline_staged_picker,
@@ -94,7 +100,8 @@ def compare_position(
     cand = run_one(
         args.candidate,
         fen,
-        depth,
+        mode,
+        limit_value,
         args.timeout,
         args.keep_hash,
         args.candidate_staged_picker,
@@ -108,12 +115,17 @@ def compare_position(
     elapsed_delta = time_delta(base, cand)
 
     return {
-        "depth": depth,
+        "mode": mode,
+        "limit": limit_value,
+        "depth": limit_value if mode == "depth" else "",
+        "movetime_ms": limit_value if mode == "movetime" else "",
         "index": index,
         "fen": fen,
         "base_best": base_best,
         "cand_best": cand_best,
         "bestmove_changed": int(base_best != cand_best),
+        "base_depth": int_stat(base, "depth"),
+        "cand_depth": int_stat(cand, "depth"),
         "base_score_cp": int_stat(base, "score_cp"),
         "cand_score_cp": int_stat(cand, "score_cp"),
         "score_delta_cp": score_delta(base, cand),
@@ -136,17 +148,22 @@ def compare_position(
     }
 
 
-def print_depth_summary(depth: int, rows: list[dict[str, Any]]) -> None:
+def print_limit_summary(mode: str, limit_value: int, rows: list[dict[str, Any]]) -> None:
     changed = [row for row in rows if int(row["bestmove_changed"]) != 0]
     base_nodes = sum(int(row["base_nodes"]) for row in rows)
     cand_nodes = sum(int(row["cand_nodes"]) for row in rows)
     base_time = sum(int(row["base_time_ms"]) for row in rows)
     cand_time = sum(int(row["cand_time_ms"]) for row in rows)
     score_swing = sum(abs(int(row["score_delta_cp"])) for row in rows)
+    base_depth = sum(int(row["base_depth"]) for row in rows)
+    cand_depth = sum(int(row["cand_depth"]) for row in rows)
+    label = f"Depth {limit_value}" if mode == "depth" else f"Movetime {limit_value}ms"
 
-    print(f"\n=== Depth {depth} Summary ===", flush=True)
+    print(f"\n=== {label} Summary ===", flush=True)
     print(f"positions:        {len(rows)}", flush=True)
     print(f"bestmove_changes: {len(changed)}", flush=True)
+    if mode == "movetime" and rows:
+        print(f"avg_depth:        {base_depth / len(rows):.2f} -> {cand_depth / len(rows):.2f}", flush=True)
     print(f"nodes:            {base_nodes} -> {cand_nodes} ({pct_delta(cand_nodes - base_nodes, base_nodes):+.2f}%)", flush=True)
     print(f"time_ms:          {base_time} -> {cand_time} ({pct_delta(cand_time - base_time, base_time):+.2f}%)", flush=True)
     print(f"abs_score_delta:  {score_swing} cp", flush=True)
@@ -180,7 +197,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", required=True, help="Reference Mantis binary")
     parser.add_argument("--candidate", required=True, help="Candidate Mantis binary")
-    parser.add_argument("--depths", type=int, nargs="+", default=[6, 7, 8], help="Depths to compare")
+    parser.add_argument("--depths", type=int, nargs="+", help="Fixed depths to compare")
+    parser.add_argument("--movetimes", type=int, nargs="+", help="UCI movetime budgets, in milliseconds, to compare")
     parser.add_argument("--limit", type=int, default=0, help="Only run the first N benchmark FENs")
     parser.add_argument("--timeout", type=float, default=90.0, help="Timeout per engine/position in seconds")
     parser.add_argument("--fen-file", type=Path, help="Optional file with one FEN per line")
@@ -190,6 +208,10 @@ def main() -> int:
     parser.add_argument("--candidate-staged-picker", action="store_true", help="Enable StagedMovePicker on candidate")
     parser.add_argument("--fail-on-bestmove-change", action="store_true", help="Exit nonzero if any bestmove changes")
     args = parser.parse_args()
+    if args.depths and any(depth <= 0 for depth in args.depths):
+        parser.error("--depths values must be positive")
+    if args.movetimes and any(movetime <= 0 for movetime in args.movetimes):
+        parser.error("--movetimes values must be positive")
 
     try:
         fens = load_fens(args)
@@ -198,33 +220,44 @@ def main() -> int:
         return 1
     all_rows: list[dict[str, Any]] = []
     total_changes = 0
+    limits: list[tuple[str, int]] = []
+    if args.depths:
+        limits.extend(("depth", depth) for depth in args.depths)
+    if args.movetimes:
+        limits.extend(("movetime", movetime) for movetime in args.movetimes)
+    if not limits:
+        limits.extend(("depth", depth) for depth in [6, 7, 8])
 
-    for depth in args.depths:
-        depth_rows: list[dict[str, Any]] = []
+    for mode, limit_value in limits:
+        limit_rows: list[dict[str, Any]] = []
         for index, fen in enumerate(fens, start=1):
             try:
-                row = compare_position(args, fen, index, depth)
+                row = compare_position(args, fen, index, mode, limit_value)
             except subprocess.CalledProcessError as exc:
-                print(f"FAIL depth={depth} index={index}: engine exited with {exc.returncode}\n{exc.output}", file=sys.stderr)
+                print(f"FAIL {mode}={limit_value} index={index}: engine exited with {exc.returncode}\n{exc.output}", file=sys.stderr)
                 return 1
             except subprocess.TimeoutExpired as exc:
-                print(f"FAIL depth={depth} index={index}: timed out after {args.timeout}s\n{exc.output}", file=sys.stderr)
+                print(f"FAIL {mode}={limit_value} index={index}: timed out after {args.timeout}s\n{exc.output}", file=sys.stderr)
                 return 1
 
-            depth_rows.append(row)
+            limit_rows.append(row)
             all_rows.append(row)
             marker = "!" if int(row["bestmove_changed"]) else " "
+            depth_note = ""
+            if mode == "movetime":
+                depth_note = f" depth={int(row['base_depth'])}->{int(row['cand_depth'])}"
             print(
-                f"{marker} depth={depth} {index:2d}/{len(fens):2d} "
+                f"{marker} {mode}={limit_value} {index:2d}/{len(fens):2d} "
                 f"{row['base_best']}->{row['cand_best']} "
                 f"score={int(row['score_delta_cp']):+5d} "
                 f"nodes={int(row['node_delta']):+8d} "
-                f"time={int(row['time_delta_ms']):+6d}ms",
+                f"time={int(row['time_delta_ms']):+6d}ms"
+                f"{depth_note}",
                 flush=True,
             )
 
-        print_depth_summary(depth, depth_rows)
-        total_changes += sum(int(row["bestmove_changed"]) for row in depth_rows)
+        print_limit_summary(mode, limit_value, limit_rows)
+        total_changes += sum(int(row["bestmove_changed"]) for row in limit_rows)
 
     if args.csv:
         write_csv(args.csv, all_rows)
