@@ -53,6 +53,7 @@ def load_fens(args: argparse.Namespace) -> list[str]:
 
     if args.limit > 0:
         fens = fens[: args.limit]
+    stats_benchmark.validate_fens(fens)
     return fens
 
 
@@ -190,7 +191,11 @@ def main() -> int:
     parser.add_argument("--fail-on-bestmove-change", action="store_true", help="Exit nonzero if any bestmove changes")
     args = parser.parse_args()
 
-    fens = load_fens(args)
+    try:
+        fens = load_fens(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     all_rows: list[dict[str, Any]] = []
     total_changes = 0
 

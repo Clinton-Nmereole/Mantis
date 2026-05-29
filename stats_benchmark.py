@@ -16,6 +16,11 @@ from pathlib import Path
 STAT_RE = re.compile(r"([a-zA-Z_]+)=([0-9]+)")
 RATIO_RE = re.compile(r"([a-zA-Z_]+)=([0-9]+)/([0-9]+)")
 FEN_RE = re.compile(r'"([^"]+)"')
+WHITE = "w"
+BLACK = "b"
+WHITE_PIECES = set("PNBRQK")
+BLACK_PIECES = set("pnbrqk")
+FEN_PIECES = WHITE_PIECES | BLACK_PIECES
 
 
 def load_bench_fens(source: Path) -> list[str]:
@@ -39,6 +44,170 @@ def load_bench_fens(source: Path) -> list[str]:
     if not fens:
         raise RuntimeError(f"No FENs found in BENCH_FENS block in {source}")
     return fens
+
+
+def square(file: int, rank: int) -> int:
+    return rank * 8 + file
+
+
+def parse_fen_board(fen: str) -> tuple[list[str | None], str, list[str]]:
+    parts = fen.split()
+    errors: list[str] = []
+    board: list[str | None] = [None] * 64
+
+    if len(parts) != 6:
+        errors.append(f"expected 6 FEN fields, got {len(parts)}")
+        return board, WHITE, errors
+
+    placement, side_to_move, castling, en_passant, halfmove, fullmove = parts
+
+    if side_to_move not in {WHITE, BLACK}:
+        errors.append(f"invalid side to move: {side_to_move}")
+
+    ranks = placement.split("/")
+    if len(ranks) != 8:
+        errors.append(f"piece placement has {len(ranks)} ranks")
+        return board, side_to_move, errors
+
+    for fen_rank, rank_text in enumerate(ranks):
+        rank = 7 - fen_rank
+        file = 0
+        for char in rank_text:
+            if char.isdigit():
+                if char == "0":
+                    errors.append("rank contains zero-width digit")
+                    continue
+                file += int(char)
+                continue
+            if char not in FEN_PIECES:
+                errors.append(f"invalid piece character: {char}")
+                continue
+            if file >= 8:
+                errors.append(f"rank {8 - fen_rank} has too many squares")
+                continue
+            board[square(file, rank)] = char
+            file += 1
+        if file != 8:
+            errors.append(f"rank {8 - fen_rank} has {file} squares")
+
+    if castling != "-" and any(char not in "KQkq" for char in castling):
+        errors.append(f"invalid castling rights: {castling}")
+    if en_passant != "-":
+        if len(en_passant) != 2 or en_passant[0] not in "abcdefgh" or en_passant[1] not in "36":
+            errors.append(f"invalid en passant square: {en_passant}")
+    if not halfmove.isdigit():
+        errors.append(f"invalid halfmove clock: {halfmove}")
+    if not fullmove.isdigit() or int(fullmove) < 1:
+        errors.append(f"invalid fullmove number: {fullmove}")
+
+    return board, side_to_move, errors
+
+
+def piece_side(piece: str | None) -> str | None:
+    if piece is None:
+        return None
+    return WHITE if piece in WHITE_PIECES else BLACK
+
+
+def find_piece(board: list[str | None], piece: str) -> list[int]:
+    return [index for index, value in enumerate(board) if value == piece]
+
+
+def side_piece(piece: str, side: str, white_piece: str) -> bool:
+    return piece == white_piece if side == WHITE else piece == white_piece.lower()
+
+
+def attacks_square(board: list[str | None], side: str, target: int) -> bool:
+    target_file = target % 8
+    target_rank = target // 8
+
+    pawn_rank = target_rank - 1 if side == WHITE else target_rank + 1
+    for pawn_file in (target_file - 1, target_file + 1):
+        if 0 <= pawn_file < 8 and 0 <= pawn_rank < 8:
+            piece = board[square(pawn_file, pawn_rank)]
+            if piece is not None and side_piece(piece, side, "P"):
+                return True
+
+    for df, dr in ((1, 2), (2, 1), (2, -1), (1, -2), (-1, -2), (-2, -1), (-2, 1), (-1, 2)):
+        file = target_file + df
+        rank = target_rank + dr
+        if 0 <= file < 8 and 0 <= rank < 8:
+            piece = board[square(file, rank)]
+            if piece is not None and side_piece(piece, side, "N"):
+                return True
+
+    for df in (-1, 0, 1):
+        for dr in (-1, 0, 1):
+            if df == 0 and dr == 0:
+                continue
+            file = target_file + df
+            rank = target_rank + dr
+            if 0 <= file < 8 and 0 <= rank < 8:
+                piece = board[square(file, rank)]
+                if piece is not None and side_piece(piece, side, "K"):
+                    return True
+
+    directions = (
+        (1, 0, "RQ"),
+        (-1, 0, "RQ"),
+        (0, 1, "RQ"),
+        (0, -1, "RQ"),
+        (1, 1, "BQ"),
+        (1, -1, "BQ"),
+        (-1, 1, "BQ"),
+        (-1, -1, "BQ"),
+    )
+    for df, dr, attackers in directions:
+        file = target_file + df
+        rank = target_rank + dr
+        while 0 <= file < 8 and 0 <= rank < 8:
+            piece = board[square(file, rank)]
+            if piece is not None:
+                if piece_side(piece) == side and piece.upper() in attackers:
+                    return True
+                break
+            file += df
+            rank += dr
+
+    return False
+
+
+def validate_fen(fen: str) -> list[str]:
+    board, side_to_move, errors = parse_fen_board(fen)
+    if errors:
+        return errors
+
+    white_kings = find_piece(board, "K")
+    black_kings = find_piece(board, "k")
+    if len(white_kings) != 1:
+        errors.append(f"expected 1 white king, got {len(white_kings)}")
+    if len(black_kings) != 1:
+        errors.append(f"expected 1 black king, got {len(black_kings)}")
+    if errors:
+        return errors
+
+    for index, piece in enumerate(board):
+        rank = index // 8
+        if piece in {"P", "p"} and rank in {0, 7}:
+            errors.append("pawn on first or eighth rank")
+            break
+
+    opponent_king = black_kings[0] if side_to_move == WHITE else white_kings[0]
+    if attacks_square(board, side_to_move, opponent_king):
+        errors.append("side to move attacks the opponent king")
+
+    return errors
+
+
+def validate_fens(fens: list[str]) -> None:
+    invalid: list[str] = []
+    for index, fen in enumerate(fens, start=1):
+        errors = validate_fen(fen)
+        if errors:
+            invalid.append(f"{index}: {'; '.join(errors)} | {fen}")
+    if invalid:
+        detail = "\n".join(invalid)
+        raise ValueError(f"Invalid benchmark FENs:\n{detail}")
 
 
 def parse_stats(output: str) -> dict[str, int | str]:
@@ -266,6 +435,7 @@ def main() -> int:
     parser.add_argument("--csv", type=Path, help="Optional CSV output path")
     parser.add_argument("--keep-hash", action="store_true", help="Do not send ucinewgame between positions")
     parser.add_argument("--staged-picker", action="store_true", help="Enable the StagedMovePicker UCI option")
+    parser.add_argument("--validate-only", action="store_true", help="Validate selected FENs and exit")
     args = parser.parse_args()
 
     if args.fen_file:
@@ -279,6 +449,16 @@ def main() -> int:
 
     if args.limit > 0:
         fens = fens[: args.limit]
+
+    try:
+        validate_fens(fens)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if args.validate_only:
+        print(f"FEN validation OK: {len(fens)} positions")
+        return 0
 
     rows: list[dict[str, int | str]] = []
     for index, fen in enumerate(fens, start=1):
