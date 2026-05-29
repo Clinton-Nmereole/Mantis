@@ -212,7 +212,7 @@ should_start_next_depth :: proc(
 ) -> bool {
 	if limits.is_infinite { return true }
 	if limits.is_movetime {
-		return elapsed_ms(limits) + project_next_depth_time(last_depth_ms, previous_depth_ms) < limits.hard_time
+		return limits.hard_time - elapsed_ms(limits) > 5
 	}
 
 	budget := time_budget_with_instability(limits, best_move_changes, score_drop, aspiration_failures)
