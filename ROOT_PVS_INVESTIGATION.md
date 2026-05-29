@@ -99,16 +99,41 @@ null-window probe even though their wide-window scores raise alpha. The depth-8
 opening churn is probably not this same local root-child failure; it points
 back toward TT/aspiration/search-state interaction.
 
+## Child Probe Findings
+
+`trace-root-child` is now available for focused ablation at one root move:
+
+```sh
+./mantis_rfp_root_guard trace-root-child 6 c1b2 fen "r4rk1/1pp2ppp/2p2n2/p2b4/8/3P2P1/P1P2P1P/R1B1R1K1 w - - 0 22"
+```
+
+Before the RFP guard, the failing null probes returned after two nodes and did
+not use TT cutoffs, LMR, futility pruning, or LMP. They did use reverse
+futility pruning at the root child:
+
+| Move | Full Score | Baseline Null | No RFP Null | Finding |
+| --- | ---: | ---: | ---: | --- |
+| `c2c3` | `-1621` | `-1976` | `-1817` | Disabling RFP makes the null probe raise alpha. |
+| `c1b2` | `-1342` | `-1730` | `-1620` | Disabling RFP makes the null probe raise alpha. |
+
+The fix is intentionally narrow: RFP is skipped at `ply == 1`. Root children
+are PV-significant even when a root-PVS implementation probes later moves with
+a null window. This guard leaves the accepted full-window root search unchanged
+but removes this local root-PVS fail-low trap. After the guard:
+
+```text
+trace-root depth 6 endgame: misses=0, researches=3
+```
+
 The safer future route is now:
 
 1. Do not spend more time on root PVS until the underlying PV/non-PV score
    stability is improved.
 2. Use `trace-root` on positions with root-PVS best-move churn and inspect any
    `MISS_FAIL_HIGH` rows before changing search behavior.
-3. For the confirmed endgame miss, instrument the non-PV child search around
-   TT cutoffs, LMR, futility, and LMP to find why the null-window score fails
-   low.
-4. For the depth-8 opening churn, audit TT bound storage/replacement and
+3. Retry the safest root-PVS experiment with the RFP root-child guard in place,
+   starting with final-depth-only root PVS.
+4. For remaining depth-8 opening churn, audit TT bound storage/replacement and
    aspiration re-search state; root PVS should be retried only after the trace
    shows null-window probes are reliable.
 5. Require zero best-move changes and a small score-delta ceiling before any

@@ -128,6 +128,27 @@ main :: proc() {
 		}
 	}
 
+	if len(args) >= 4 && args[1] == "trace-root-child" {
+		depth, ok := strconv.parse_int(args[2])
+		if ok && depth >= 1 {
+			target_move := args[3]
+			fen := START_FEN
+			fen_alloc := ""
+			if len(args) >= 6 && args[4] == "fen" {
+				if len(args) == 6 {
+					fen = args[5]
+				} else {
+					fen_alloc = strings.join(args[5:], " ")
+					defer delete(fen_alloc)
+					fen = fen_alloc
+				}
+			}
+			init_cli_search_runtime()
+			search.trace_root_child_diagnostics(fen, depth, target_move)
+			return
+		}
+	}
+
 	if len(args) >= 3 && args[1] == "perft" {
 		depth, ok := strconv.parse_int(args[2])
 		if ok && depth >= 1 {

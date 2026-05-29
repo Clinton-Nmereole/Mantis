@@ -92,6 +92,19 @@ last_completed_best_move: moves.Move
 last_completed_best_score: int
 last_completed_depth: int
 
+SearchDebugOptions :: struct {
+	disable_tt_cutoffs: bool,
+	disable_lmr:        bool,
+	disable_futility:   bool,
+	disable_lmp:        bool,
+	disable_nmp:        bool,
+	disable_rfp:        bool,
+	disable_razor:      bool,
+	disable_probcut:    bool,
+}
+
+search_debug_options: SearchDebugOptions
+
 SearchStats :: struct {
 	nodes:              u64,
 	qnodes:             u64,
@@ -603,6 +616,144 @@ restore_tt :: proc(snapshot: []TTBucket) {
 	mem.copy(&tt[0], &snapshot[0], count * size_of(TTBucket))
 }
 
+move_matches_uci :: proc(move: moves.Move, move_text: string) -> bool {
+	if len(move_text) < 4 {
+		return false
+	}
+
+	sf := int(move_text[0] - 'a')
+	sr := int(move_text[1] - '1')
+	tf := int(move_text[2] - 'a')
+	tr := int(move_text[3] - '1')
+	if sf < 0 || sf > 7 || sr < 0 || sr > 7 || tf < 0 || tf > 7 || tr < 0 || tr > 7 {
+		return false
+	}
+
+	if move.source != sr * 8 + sf || move.target != tr * 8 + tf {
+		return false
+	}
+
+	if len(move_text) >= 5 {
+		promoted := -1
+		switch move_text[4] {
+		case 'n':
+			promoted = constants.KNIGHT
+		case 'b':
+			promoted = constants.BISHOP
+		case 'r':
+			promoted = constants.ROOK
+		case 'q':
+			promoted = constants.QUEEN
+		}
+		return move.promoted == promoted
+	}
+
+	return true
+}
+
+refresh_trace_accumulators :: proc(b: ^board.Board) {
+	if nnue.sfnnv14_active {
+		nnue.refresh_sfnnv14_accumulators(b)
+	} else if nnue.is_initialized {
+		b.accumulators[constants.WHITE] = nnue.compute_accumulator(b, constants.WHITE)
+		b.accumulators[constants.BLACK] = nnue.compute_accumulator(b, constants.BLACK)
+	}
+}
+
+print_probe_variant :: proc(
+	name: string,
+	st: ^SearchThread,
+	b: ^board.Board,
+	tt_snapshot: []TTBucket,
+	depth: int,
+	alpha_before: int,
+	options: SearchDebugOptions,
+	full_window: bool = false,
+) {
+	restore_tt(tt_snapshot)
+	probe_st := clone_search_thread(st)
+	defer free(probe_st.continuation_history)
+	probe_st.nodes = 0
+
+	prev_options := search_debug_options
+	prev_stats_enabled := search_stats_enabled
+	search_debug_options = options
+	search_stats_enabled = true
+	reset_search_stats()
+
+	child_pv: PV_Line
+	child_alpha := -alpha_before - 1
+	child_beta := -alpha_before
+	probe_is_pv := false
+	if full_window {
+		child_alpha = -eval.INF
+		child_beta = eval.INF
+		probe_is_pv = true
+	}
+
+	score := -negamax(
+		&probe_st,
+		b,
+		child_alpha,
+		child_beta,
+		depth - 1,
+		1,
+		&child_pv,
+		{},
+		probe_is_pv,
+	)
+
+	nodes := stat_load(&search_stats.nodes)
+	tt_cutoffs := stat_load(&search_stats.tt_cutoffs)
+	tt_exact := stat_load(&search_stats.tt_exact_cutoffs)
+	tt_alpha := stat_load(&search_stats.tt_alpha_cutoffs)
+	tt_beta := stat_load(&search_stats.tt_beta_cutoffs)
+	lmr := stat_load(&search_stats.lmr_searches)
+	lmr_research := stat_load(&search_stats.lmr_researches)
+	futility := stat_load(&search_stats.futility_prunes)
+	lmp := stat_load(&search_stats.lmp_prunes)
+	nmp_tries := stat_load(&search_stats.nmp_tries)
+	nmp_cutoffs := stat_load(&search_stats.nmp_cutoffs)
+	rfp := stat_load(&search_stats.rfp_cutoffs)
+	razor_tries := stat_load(&search_stats.razor_tries)
+	razor_cutoffs := stat_load(&search_stats.razor_cutoffs)
+	probcut_tries := stat_load(&search_stats.probcut_tries)
+	probcut_cutoffs := stat_load(&search_stats.probcut_cutoffs)
+	qnodes := stat_load(&search_stats.qnodes)
+
+	search_debug_options = prev_options
+	search_stats_enabled = prev_stats_enabled
+
+	raised := "no"
+	if score > alpha_before {
+		raised = "yes"
+	}
+
+	fmt.printf(
+		"variant=%s score=%d raises_alpha=%s nodes=%d qnodes=%d tt_cutoffs=%d(exact=%d alpha=%d beta=%d) nmp=%d/%d rfp=%d razor=%d/%d probcut=%d/%d lmr=%d lmr_research=%d futility=%d lmp=%d\n",
+		name,
+		score,
+		raised,
+		nodes,
+		qnodes,
+		tt_cutoffs,
+		tt_exact,
+		tt_alpha,
+		tt_beta,
+		nmp_cutoffs,
+		nmp_tries,
+		rfp,
+		razor_cutoffs,
+		razor_tries,
+		probcut_cutoffs,
+		probcut_tries,
+		lmr,
+		lmr_research,
+		futility,
+		lmp,
+	)
+}
+
 trace_root_move_scores :: proc(fen: string, depth: int) {
 	if depth < 1 {
 		fmt.println("Root trace FAILED: depth must be at least 1")
@@ -610,12 +761,7 @@ trace_root_move_scores :: proc(fen: string, depth: int) {
 	}
 
 	b := board.parse_fen(fen)
-	if nnue.sfnnv14_active {
-		nnue.refresh_sfnnv14_accumulators(&b)
-	} else if nnue.is_initialized {
-		b.accumulators[constants.WHITE] = nnue.compute_accumulator(&b, constants.WHITE)
-		b.accumulators[constants.BLACK] = nnue.compute_accumulator(&b, constants.BLACK)
-	}
+	refresh_trace_accumulators(&b)
 
 	st: SearchThread
 	init_search_thread(&st, 0)
@@ -777,6 +923,172 @@ trace_root_move_scores :: proc(fen: string, depth: int) {
 		fmt.printf("(none)")
 	}
 	fmt.printf(" best_score=%d misses=%d researches=%d\n", best_score, misses, researches)
+}
+
+trace_root_child_diagnostics :: proc(fen: string, depth: int, target_move_text: string) {
+	if depth < 1 {
+		fmt.println("Root child trace FAILED: depth must be at least 1")
+		return
+	}
+
+	b := board.parse_fen(fen)
+	refresh_trace_accumulators(&b)
+	st: SearchThread
+	init_search_thread(&st, 0)
+	defer free(st.continuation_history)
+
+	reset_search_control()
+	sync.atomic_store(&total_nodes, 0)
+	st.nodes = 0
+
+	warmup_best_move: moves.Move
+	warmup_score := 0
+	warmup_depth := 0
+	if depth > 1 {
+		search_position(&st, &b, depth - 1, 1, output_bestmove = false)
+		warmup_best_move = last_completed_best_move
+		warmup_score = last_completed_best_score
+		warmup_depth = last_completed_depth
+		reset_search_control()
+	}
+
+	move_list: moves.MoveList
+	board.generate_all_moves(&b, &move_list)
+	root_tt_move := warmup_best_move
+	if moves.is_empty_move(root_tt_move) {
+		root_tt_move = get_tt_move(b.hash)
+	}
+	sort_moves(&st, &move_list, &b, root_tt_move, 0, moves.Move{})
+
+	current_alpha := -eval.INF
+	legal_moves := 0
+	target_found := false
+
+	for i in 0 ..< move_list.count {
+		move := move_list.moves[i]
+		if !board.is_castling_legal_now(&b, move) {
+			continue
+		}
+
+		state: board.StateInfo
+		board.make_move_fast(&b, move, &state)
+		king_sq := board.get_king_square(&b, 1 - b.side)
+		if board.is_square_attacked(&b, king_sq, b.side) {
+			board.unmake_move(&b, &state)
+			continue
+		}
+
+		nnue.update_accumulators(&state, &b, move)
+
+		if move_matches_uci(move, target_move_text) {
+			target_found = true
+			alpha_before := current_alpha
+			if alpha_before <= -eval.INF / 2 {
+				fmt.println("Root child trace FAILED: target is first legal move, no root null-window alpha exists")
+				board.unmake_move(&b, &state)
+				break
+			}
+
+			fmt.printf(
+				"Root child trace depth=%d warmup_depth=%d warmup_score=%d target=%s index=%d alpha_before=%d warmup_best=",
+				depth,
+				warmup_depth,
+				warmup_score,
+				target_move_text,
+				legal_moves + 1,
+				alpha_before,
+			)
+			if !moves.is_empty_move(root_tt_move) {
+				board.print_move(root_tt_move)
+			} else {
+				fmt.printf("(none)")
+			}
+			fmt.printf(" fen=%s\n", fen)
+
+			tt_snapshot := snapshot_tt()
+			print_probe_variant("full", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{}, true)
+			print_probe_variant("baseline", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{})
+			print_probe_variant("no_tt", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_tt_cutoffs = true})
+			print_probe_variant("no_lmr", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_lmr = true})
+			print_probe_variant("no_futility", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_futility = true})
+			print_probe_variant("no_lmp", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_lmp = true})
+			print_probe_variant("no_nmp", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_nmp = true})
+			print_probe_variant("no_rfp", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_rfp = true})
+			print_probe_variant("no_razor", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_razor = true})
+			print_probe_variant("no_probcut", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_probcut = true})
+			print_probe_variant(
+				"no_early_pruning",
+				&st,
+				&b,
+				tt_snapshot,
+				depth,
+				alpha_before,
+				SearchDebugOptions {
+					disable_nmp     = true,
+					disable_rfp     = true,
+					disable_razor   = true,
+					disable_probcut = true,
+				},
+			)
+			print_probe_variant(
+				"no_tt_lmr_futility_lmp",
+				&st,
+				&b,
+				tt_snapshot,
+				depth,
+				alpha_before,
+				SearchDebugOptions {
+					disable_tt_cutoffs = true,
+					disable_lmr        = true,
+					disable_futility   = true,
+					disable_lmp        = true,
+				},
+			)
+			print_probe_variant(
+				"no_all_prune_reduce",
+				&st,
+				&b,
+				tt_snapshot,
+				depth,
+				alpha_before,
+				SearchDebugOptions {
+					disable_tt_cutoffs = true,
+					disable_lmr        = true,
+					disable_futility   = true,
+					disable_lmp        = true,
+					disable_nmp        = true,
+					disable_rfp        = true,
+					disable_razor      = true,
+					disable_probcut    = true,
+				},
+			)
+			restore_tt(tt_snapshot)
+			delete(tt_snapshot)
+			board.unmake_move(&b, &state)
+			break
+		}
+
+		child_pv: PV_Line
+		full_score := -negamax(
+			&st,
+			&b,
+			-eval.INF,
+			eval.INF,
+			depth - 1,
+			1,
+			&child_pv,
+		)
+		board.unmake_move(&b, &state)
+
+		if full_score > current_alpha {
+			current_alpha = full_score
+		}
+		legal_moves += 1
+	}
+
+	if !target_found {
+		fmt.printf("Root child trace FAILED: target move %s was not legal in root position\n", target_move_text)
+	}
 }
 
 // Initialize a SearchThread
@@ -1046,7 +1358,7 @@ negamax :: proc(
 	count_nodes(st)
 
 	// TT Probe
-	if moves.is_empty_move(excluded_move) {
+	if moves.is_empty_move(excluded_move) && !search_debug_options.disable_tt_cutoffs {
 		tt_score, tt_hit := probe_tt(b.hash, alpha, beta, depth, ply)
 		if tt_hit {
 			stat_add(&search_stats.tt_cutoffs)
@@ -1106,7 +1418,8 @@ negamax :: proc(
 	}
 
 	// Razoring - drop into quiescence if position is hopeless
-	if !is_pv && !in_check && !is_mate_window(alpha, beta) &&
+	if !search_debug_options.disable_razor &&
+	   !is_pv && !in_check && !is_mate_window(alpha, beta) &&
 	   depth <= params.razor_max_depth && moves.is_empty_move(excluded_move) {
 		razor_margin := params.razor_margin * depth
 		if static_eval + razor_margin < alpha {
@@ -1125,7 +1438,8 @@ negamax :: proc(
 	// 1. Not in PV node (use is_pv flag)
 	// 2. Not in check
 	// 3. Deep enough
-	can_null_move := !is_pv &&
+	can_null_move := !search_debug_options.disable_nmp &&
+		!is_pv &&
 		!in_check &&
 		depth >= params.nmp_min_depth &&
 		has_non_pawn_material(b, b.side) &&
@@ -1176,7 +1490,11 @@ negamax :: proc(
 
 	// Reverse Futility Pruning (RFP) / Static Null Move Pruning
 	// If position is so good that even with a margin, we're above beta, prune
-	if !is_pv && !in_check && !is_mate_window(alpha, beta) &&
+	// Skip ply 1: root children are PV-significant even when a root-PVS probe
+	// searches them with a null window.
+	if !search_debug_options.disable_rfp &&
+	   ply > 1 &&
+	   !is_pv && !in_check && !is_mate_window(alpha, beta) &&
 	   effective_depth <= params.rfp_depth && moves.is_empty_move(excluded_move) {
 		// Margin based on depth
 		rfp_margin := params.rfp_margin * effective_depth
@@ -1194,7 +1512,8 @@ negamax :: proc(
 	// Probcut
 	// If the position is good enough that even a reduced-depth tactical search
 	// would fail high, we can prune safely.
-	if !is_pv && !in_check && !is_mate_window(alpha, beta) &&
+	if !search_debug_options.disable_probcut &&
+	   !is_pv && !in_check && !is_mate_window(alpha, beta) &&
 	   effective_depth >= params.probcut_depth && moves.is_empty_move(excluded_move) {
 		probcut_beta := beta + params.probcut_margin
 		if probcut_beta >= eval.MATE - MAX_PLY {
@@ -1334,7 +1653,8 @@ negamax :: proc(
 	// Futility Pruning - pre-compute for move loop
 	do_futility := false
 	futility_value := 0
-	if !is_pv && !in_check && !is_mate_window(alpha, beta) &&
+	if !search_debug_options.disable_futility &&
+	   !is_pv && !in_check && !is_mate_window(alpha, beta) &&
 	   depth <= params.futility_max_depth && moves.is_empty_move(excluded_move) {
 		futility_margin := params.futility_margin * depth
 		futility_value = static_eval + futility_margin
@@ -1348,7 +1668,8 @@ negamax :: proc(
 	// The idea: if we've searched the best moves and none raised alpha,
 	// the remaining quiet moves are unlikely to help.
 	lmp_threshold := 9999 // Default: effectively disabled
-	if !is_pv && !in_check && !is_mate_window(alpha, beta) &&
+	if !search_debug_options.disable_lmp &&
+	   !is_pv && !in_check && !is_mate_window(alpha, beta) &&
 	   depth <= params.lmp_max_depth && moves.is_empty_move(excluded_move) {
 		// Threshold grows with depth: deeper = search more moves
 		lmp_threshold = params.lmp_base + depth * depth / params.lmp_div
@@ -1444,7 +1765,8 @@ negamax :: proc(
 			// Use precomputed table + standard adjustments.
 			reduction := 0
 
-			if combined_depth >= params.lmr_min_depth &&
+			if !search_debug_options.disable_lmr &&
+			   combined_depth >= params.lmr_min_depth &&
 			   !gives_check &&
 			   quiet_move {
 				// Base reduction from precomputed logarithmic table
