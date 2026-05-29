@@ -41,6 +41,16 @@ def pct_delta(delta: int, base: int) -> float:
     return 100.0 * delta / base
 
 
+def limit_label(mode: str, limit_value: Any) -> str:
+    if mode == "depth":
+        return f"Depth {limit_value}"
+    if mode == "movetime":
+        return f"Movetime {limit_value}ms"
+    if mode == "clock":
+        return f"Clock {stats_benchmark.clock_label(limit_value)}"
+    return f"{mode}={limit_value}"
+
+
 def load_fens(args: argparse.Namespace) -> list[str]:
     if args.fen_file:
         fens = [
@@ -61,13 +71,14 @@ def run_one(
     binary: str,
     fen: str,
     mode: str,
-    limit_value: int,
+    limit_value: Any,
     timeout: float,
     keep_hash: bool,
     staged_picker: bool,
 ) -> dict[str, Any]:
     depth = limit_value if mode == "depth" else None
     movetime_ms = limit_value if mode == "movetime" else None
+    clock_ms = limit_value if mode == "clock" else None
     stats, _output, wall_ms = stats_benchmark.run_position(
         binary,
         fen,
@@ -76,6 +87,7 @@ def run_one(
         clear_hash=not keep_hash,
         staged_picker=staged_picker,
         movetime_ms=movetime_ms,
+        clock_ms=clock_ms,
     )
     stats["wall_ms"] = int(wall_ms)
     return stats
@@ -86,7 +98,7 @@ def compare_position(
     fen: str,
     index: int,
     mode: str,
-    limit_value: int,
+    limit_value: Any,
 ) -> dict[str, Any]:
     base = run_one(
         args.baseline,
@@ -116,9 +128,10 @@ def compare_position(
 
     return {
         "mode": mode,
-        "limit": limit_value,
+        "limit": stats_benchmark.clock_label(limit_value) if mode == "clock" else limit_value,
         "depth": limit_value if mode == "depth" else "",
         "movetime_ms": limit_value if mode == "movetime" else "",
+        "clock": stats_benchmark.clock_label(limit_value) if mode == "clock" else "",
         "index": index,
         "fen": fen,
         "base_best": base_best,
@@ -148,7 +161,7 @@ def compare_position(
     }
 
 
-def print_limit_summary(mode: str, limit_value: int, rows: list[dict[str, Any]]) -> None:
+def print_limit_summary(mode: str, limit_value: Any, rows: list[dict[str, Any]]) -> None:
     changed = [row for row in rows if int(row["bestmove_changed"]) != 0]
     base_nodes = sum(int(row["base_nodes"]) for row in rows)
     cand_nodes = sum(int(row["cand_nodes"]) for row in rows)
@@ -157,12 +170,12 @@ def print_limit_summary(mode: str, limit_value: int, rows: list[dict[str, Any]])
     score_swing = sum(abs(int(row["score_delta_cp"])) for row in rows)
     base_depth = sum(int(row["base_depth"]) for row in rows)
     cand_depth = sum(int(row["cand_depth"]) for row in rows)
-    label = f"Depth {limit_value}" if mode == "depth" else f"Movetime {limit_value}ms"
+    label = limit_label(mode, limit_value)
 
     print(f"\n=== {label} Summary ===", flush=True)
     print(f"positions:        {len(rows)}", flush=True)
     print(f"bestmove_changes: {len(changed)}", flush=True)
-    if mode == "movetime" and rows:
+    if mode in {"movetime", "clock"} and rows:
         print(f"avg_depth:        {base_depth / len(rows):.2f} -> {cand_depth / len(rows):.2f}", flush=True)
     print(f"nodes:            {base_nodes} -> {cand_nodes} ({pct_delta(cand_nodes - base_nodes, base_nodes):+.2f}%)", flush=True)
     print(f"time_ms:          {base_time} -> {cand_time} ({pct_delta(cand_time - base_time, base_time):+.2f}%)", flush=True)
@@ -199,6 +212,14 @@ def main() -> int:
     parser.add_argument("--candidate", required=True, help="Candidate Mantis binary")
     parser.add_argument("--depths", type=int, nargs="+", help="Fixed depths to compare")
     parser.add_argument("--movetimes", type=int, nargs="+", help="UCI movetime budgets, in milliseconds, to compare")
+    parser.add_argument(
+        "--clock",
+        type=int,
+        nargs=4,
+        metavar=("WTIME", "BTIME", "WINC", "BINC"),
+        help="Add one UCI clock budget to compare, in milliseconds",
+    )
+    parser.add_argument("--movestogo", type=int, default=0, help="Optional UCI movestogo value for --clock")
     parser.add_argument("--limit", type=int, default=0, help="Only run the first N benchmark FENs")
     parser.add_argument("--timeout", type=float, default=90.0, help="Timeout per engine/position in seconds")
     parser.add_argument("--fen-file", type=Path, help="Optional file with one FEN per line")
@@ -212,6 +233,14 @@ def main() -> int:
         parser.error("--depths values must be positive")
     if args.movetimes and any(movetime <= 0 for movetime in args.movetimes):
         parser.error("--movetimes values must be positive")
+    if args.clock:
+        wtime, btime, winc, binc = args.clock
+        if wtime <= 0 or btime <= 0:
+            parser.error("--clock WTIME and BTIME must be positive")
+        if winc < 0 or binc < 0:
+            parser.error("--clock WINC and BINC must be non-negative")
+    if args.movestogo < 0:
+        parser.error("--movestogo must be non-negative")
 
     try:
         fens = load_fens(args)
@@ -220,11 +249,23 @@ def main() -> int:
         return 1
     all_rows: list[dict[str, Any]] = []
     total_changes = 0
-    limits: list[tuple[str, int]] = []
+    limits: list[tuple[str, Any]] = []
     if args.depths:
         limits.extend(("depth", depth) for depth in args.depths)
     if args.movetimes:
         limits.extend(("movetime", movetime) for movetime in args.movetimes)
+    if args.clock:
+        wtime, btime, winc, binc = args.clock
+        limits.append((
+            "clock",
+            {
+                "wtime": wtime,
+                "btime": btime,
+                "winc": winc,
+                "binc": binc,
+                "movestogo": args.movestogo,
+            },
+        ))
     if not limits:
         limits.extend(("depth", depth) for depth in [6, 7, 8])
 
@@ -244,10 +285,10 @@ def main() -> int:
             all_rows.append(row)
             marker = "!" if int(row["bestmove_changed"]) else " "
             depth_note = ""
-            if mode == "movetime":
+            if mode in {"movetime", "clock"}:
                 depth_note = f" depth={int(row['base_depth'])}->{int(row['cand_depth'])}"
             print(
-                f"{marker} {mode}={limit_value} {index:2d}/{len(fens):2d} "
+                f"{marker} {limit_label(mode, limit_value)} {index:2d}/{len(fens):2d} "
                 f"{row['base_best']}->{row['cand_best']} "
                 f"score={int(row['score_delta_cp']):+5d} "
                 f"nodes={int(row['node_delta']):+8d} "

@@ -210,6 +210,26 @@ def validate_fens(fens: list[str]) -> None:
         raise ValueError(f"Invalid benchmark FENs:\n{detail}")
 
 
+def clock_label(clock: dict[str, int]) -> str:
+    label = (
+        f"wtime={clock['wtime']} btime={clock['btime']} "
+        f"winc={clock['winc']} binc={clock['binc']}"
+    )
+    if clock.get("movestogo", 0) > 0:
+        label += f" movestogo={clock['movestogo']}"
+    return label
+
+
+def clock_go_command(clock: dict[str, int]) -> str:
+    command = (
+        f"go wtime {clock['wtime']} btime {clock['btime']} "
+        f"winc {clock['winc']} binc {clock['binc']}"
+    )
+    if clock.get("movestogo", 0) > 0:
+        command += f" movestogo {clock['movestogo']}"
+    return command
+
+
 def parse_stats(output: str) -> dict[str, int | str]:
     stats: dict[str, int | str] = {}
     for line in output.splitlines():
@@ -284,13 +304,26 @@ def run_position(
     clear_hash: bool,
     staged_picker: bool,
     movetime_ms: int | None = None,
+    clock_ms: dict[str, int] | None = None,
 ) -> tuple[dict[str, int | str], str, float]:
-    if depth is None and movetime_ms is None:
-        raise ValueError("either depth or movetime_ms must be provided")
-    if depth is not None and movetime_ms is not None:
-        raise ValueError("depth and movetime_ms are mutually exclusive")
+    modes = sum(
+        1
+        for enabled in (
+            depth is not None,
+            movetime_ms is not None,
+            clock_ms is not None,
+        )
+        if enabled
+    )
+    if modes != 1:
+        raise ValueError("provide exactly one of depth, movetime_ms, or clock_ms")
 
-    go_command = f"go movetime {movetime_ms}" if movetime_ms is not None else f"go depth {depth}"
+    if clock_ms is not None:
+        go_command = clock_go_command(clock_ms)
+    elif movetime_ms is not None:
+        go_command = f"go movetime {movetime_ms}"
+    else:
+        go_command = f"go depth {depth}"
     commands = [
         "uci",
         "setoption name SearchStats value true",
@@ -437,6 +470,11 @@ def main() -> int:
     parser.add_argument("--binary", default="./mantis", help="Path to Mantis binary")
     parser.add_argument("--depth", type=int, default=6, help="Fixed search depth")
     parser.add_argument("--movetime", type=int, help="Search each position with UCI go movetime N milliseconds")
+    parser.add_argument("--wtime", type=int, help="White clock remaining for UCI clock mode, in milliseconds")
+    parser.add_argument("--btime", type=int, help="Black clock remaining for UCI clock mode, in milliseconds")
+    parser.add_argument("--winc", type=int, default=0, help="White increment for UCI clock mode, in milliseconds")
+    parser.add_argument("--binc", type=int, default=0, help="Black increment for UCI clock mode, in milliseconds")
+    parser.add_argument("--movestogo", type=int, default=0, help="Optional UCI movestogo value for clock mode")
     parser.add_argument("--limit", type=int, default=0, help="Only run the first N benchmark FENs")
     parser.add_argument("--timeout", type=float, default=60.0, help="Timeout per position in seconds")
     parser.add_argument("--fen-file", type=Path, help="Optional file with one FEN per line")
@@ -449,6 +487,18 @@ def main() -> int:
         parser.error("--depth must be positive")
     if args.movetime is not None and args.movetime <= 0:
         parser.error("--movetime must be positive")
+    clock_mode = args.wtime is not None or args.btime is not None
+    if clock_mode:
+        if args.movetime is not None:
+            parser.error("--movetime cannot be combined with clock mode")
+        if args.wtime is None or args.btime is None:
+            parser.error("--wtime and --btime are both required for clock mode")
+        if args.wtime <= 0 or args.btime <= 0:
+            parser.error("--wtime and --btime must be positive")
+    if args.winc < 0 or args.binc < 0:
+        parser.error("--winc and --binc must be non-negative")
+    if args.movestogo < 0:
+        parser.error("--movestogo must be non-negative")
 
     if args.fen_file:
         fens = [
@@ -472,9 +522,25 @@ def main() -> int:
         print(f"FEN validation OK: {len(fens)} positions")
         return 0
 
-    depth = None if args.movetime is not None else args.depth
-    mode = "movetime" if args.movetime is not None else "depth"
-    limit_value = args.movetime if args.movetime is not None else args.depth
+    clock_ms: dict[str, int] | None = None
+    if clock_mode:
+        clock_ms = {
+            "wtime": args.wtime,
+            "btime": args.btime,
+            "winc": args.winc,
+            "binc": args.binc,
+            "movestogo": args.movestogo,
+        }
+
+    depth = None if args.movetime is not None or clock_ms is not None else args.depth
+    mode = "clock" if clock_ms is not None else ("movetime" if args.movetime is not None else "depth")
+    limit_value: int | str
+    if clock_ms is not None:
+        limit_value = clock_label(clock_ms)
+    elif args.movetime is not None:
+        limit_value = args.movetime
+    else:
+        limit_value = args.depth
 
     rows: list[dict[str, int | str]] = []
     for index, fen in enumerate(fens, start=1):
@@ -487,6 +553,7 @@ def main() -> int:
                 clear_hash=not args.keep_hash,
                 staged_picker=args.staged_picker,
                 movetime_ms=args.movetime,
+                clock_ms=clock_ms,
             )
         except subprocess.CalledProcessError as exc:
             print(f"FAIL {index}: engine exited with {exc.returncode}\n{exc.output}", file=sys.stderr)
