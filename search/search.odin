@@ -88,6 +88,10 @@ SearchThread :: struct {
 // Global atomic node counter for UCI reporting
 total_nodes: u64 = 0
 
+last_completed_best_move: moves.Move
+last_completed_best_score: int
+last_completed_depth: int
+
 SearchStats :: struct {
 	nodes:              u64,
 	qnodes:             u64,
@@ -606,6 +610,13 @@ trace_root_move_scores :: proc(fen: string, depth: int) {
 	}
 
 	b := board.parse_fen(fen)
+	if nnue.sfnnv14_active {
+		nnue.refresh_sfnnv14_accumulators(&b)
+	} else if nnue.is_initialized {
+		b.accumulators[constants.WHITE] = nnue.compute_accumulator(&b, constants.WHITE)
+		b.accumulators[constants.BLACK] = nnue.compute_accumulator(&b, constants.BLACK)
+	}
+
 	st: SearchThread
 	init_search_thread(&st, 0)
 	defer free(st.continuation_history)
@@ -614,17 +625,32 @@ trace_root_move_scores :: proc(fen: string, depth: int) {
 	sync.atomic_store(&total_nodes, 0)
 	st.nodes = 0
 
+	warmup_best_move: moves.Move
+	warmup_score := 0
+	warmup_depth := 0
 	if depth > 1 {
 		search_position(&st, &b, depth - 1, 1, output_bestmove = false)
+		warmup_best_move = last_completed_best_move
+		warmup_score = last_completed_best_score
+		warmup_depth = last_completed_depth
 		reset_search_control()
 	}
 
 	move_list: moves.MoveList
 	board.generate_all_moves(&b, &move_list)
-	root_tt_move := get_tt_move(b.hash)
+	root_tt_move := warmup_best_move
+	if moves.is_empty_move(root_tt_move) {
+		root_tt_move = get_tt_move(b.hash)
+	}
 	sort_moves(&st, &move_list, &b, root_tt_move, 0, moves.Move{})
 
-	fmt.printf("Root trace depth=%d warmup_depth=%d fen=%s\n", depth, max(0, depth - 1), fen)
+	fmt.printf("Root trace depth=%d warmup_depth=%d warmup_score=%d warmup_best=", depth, warmup_depth, warmup_score)
+	if !moves.is_empty_move(root_tt_move) {
+		board.print_move(root_tt_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" fen=%s\n", fen)
 	fmt.println("idx move full null alpha_before delta nodes_full nodes_null action note")
 
 	current_alpha := -eval.INF
@@ -1818,6 +1844,11 @@ search_position :: proc(
 ) {
 	// fmt.println("DEBUG: Entering search_position")
 	st.nodes = 0
+	if st.thread_id == 0 {
+		last_completed_best_move = moves.Move{}
+		last_completed_best_score = 0
+		last_completed_depth = 0
+	}
 	sync.atomic_store(&total_nodes, 0)
 	reset_search_stats()
 	clear_killers(st) // Clear killer moves for new search
@@ -2210,6 +2241,11 @@ search_position :: proc(
 			}
 			previous_completed_score = current_score
 			have_completed_score = true
+			if st.thread_id == 0 {
+				last_completed_best_move = best_move
+				last_completed_best_score = current_score
+				last_completed_depth = current_depth
+			}
 		}
 
 		if output_bestmove {

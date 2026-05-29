@@ -78,15 +78,40 @@ same pre-move TT/search state. `MISS_FAIL_HIGH` marks a move where the
 wide-window score raises root alpha but the null-window probe would not have
 triggered a re-search.
 
+The trace must refresh NNUE accumulators after parsing the FEN and must sort
+the target-depth root moves with the previous completed depth's best move.
+Without both details, the diagnostic can disagree with normal UCI search order.
+
+## Trace Findings
+
+Using the corrected trace on the known churn positions:
+
+| FEN | Depth | Warmup Best | Exact Trace Best | Misses | Finding |
+| --- | ---: | --- | --- | ---: | --- |
+| `r4rk1/1pp2ppp/2p2n2/p2b4/8/3P2P1/P1P2P1P/R1B1R1K1 w - - 0 22` | 6 | `c2c4` | `c1b2` | 2 | Non-PV null-window root child can miss a fail-high. |
+| `rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1` | 8 | `g8f6` | `g8f6` | 0 | No local null-window miss in the corrected trace. |
+| `r1bqk2r/ppp2ppp/2n2n2/3pp3/1b1PP3/2N2N2/PPP2PPP/R1BQKB1R w KQkq - 5 6` | 8 | `e4d5` | `e4d5` | 0 | No local null-window miss in the corrected trace. |
+| `r1bq1rk1/1pp2ppp/p1np1n2/4p3/2PPP3/2N2N2/PP2BPPP/R1BQ1RK1 w - - 3 9` | 8 | `c1g5` | `c1g5` | 0 | No local null-window miss in the corrected trace. |
+
+The clearest local root-PVS bug is the depth-6 endgame case: after `c2c4`
+sets alpha, both `c2c3` and especially the accepted `c1b2` fail low in the
+null-window probe even though their wide-window scores raise alpha. The depth-8
+opening churn is probably not this same local root-child failure; it points
+back toward TT/aspiration/search-state interaction.
+
 The safer future route is now:
 
 1. Do not spend more time on root PVS until the underlying PV/non-PV score
    stability is improved.
 2. Use `trace-root` on positions with root-PVS best-move churn and inspect any
    `MISS_FAIL_HIGH` rows before changing search behavior.
-3. Audit TT bound storage/replacement and aspiration re-search first; root PVS
-   should be retried only after the trace shows null-window probes are reliable.
-4. Require zero best-move changes and a small score-delta ceiling before any
+3. For the confirmed endgame miss, instrument the non-PV child search around
+   TT cutoffs, LMR, futility, and LMP to find why the null-window score fails
+   low.
+4. For the depth-8 opening churn, audit TT bound storage/replacement and
+   aspiration re-search state; root PVS should be retried only after the trace
+   shows null-window probes are reliable.
+5. Require zero best-move changes and a small score-delta ceiling before any
    version is accepted.
 
 Recommended acceptance command for the next attempt:
