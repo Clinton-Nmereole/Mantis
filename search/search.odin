@@ -10,6 +10,7 @@ import "../utils"
 import "../zobrist"
 import "core:fmt"
 import "core:math"
+import "core:mem"
 import "core:os"
 import "core:sync"
 import "core:time"
@@ -568,6 +569,188 @@ validate_qcapture_parity_test :: proc(fen: string, depth: int) {
 	} else {
 		fmt.printf("QCapture parity FAILED: checked=%d mismatches=%d depth=%d\n", checked, mismatches, depth)
 	}
+}
+
+clone_search_thread :: proc(src: ^SearchThread) -> SearchThread {
+	dst := src^
+	if src.continuation_history != nil {
+		dst.continuation_history = new([6][64][6][64]int)
+		mem.copy(dst.continuation_history, src.continuation_history, size_of([6][64][6][64]int))
+	}
+	return dst
+}
+
+snapshot_tt :: proc() -> []TTBucket {
+	snapshot := make([]TTBucket, len(tt))
+	if len(tt) > 0 {
+		mem.copy(&snapshot[0], &tt[0], len(tt) * size_of(TTBucket))
+	}
+	return snapshot
+}
+
+restore_tt :: proc(snapshot: []TTBucket) {
+	if len(tt) == 0 || len(snapshot) == 0 {
+		return
+	}
+	count := len(tt)
+	if len(snapshot) < count {
+		count = len(snapshot)
+	}
+	mem.copy(&tt[0], &snapshot[0], count * size_of(TTBucket))
+}
+
+trace_root_move_scores :: proc(fen: string, depth: int) {
+	if depth < 1 {
+		fmt.println("Root trace FAILED: depth must be at least 1")
+		return
+	}
+
+	b := board.parse_fen(fen)
+	st: SearchThread
+	init_search_thread(&st, 0)
+	defer free(st.continuation_history)
+
+	reset_search_control()
+	sync.atomic_store(&total_nodes, 0)
+	st.nodes = 0
+
+	if depth > 1 {
+		search_position(&st, &b, depth - 1, 1, output_bestmove = false)
+		reset_search_control()
+	}
+
+	move_list: moves.MoveList
+	board.generate_all_moves(&b, &move_list)
+	root_tt_move := get_tt_move(b.hash)
+	sort_moves(&st, &move_list, &b, root_tt_move, 0, moves.Move{})
+
+	fmt.printf("Root trace depth=%d warmup_depth=%d fen=%s\n", depth, max(0, depth - 1), fen)
+	fmt.println("idx move full null alpha_before delta nodes_full nodes_null action note")
+
+	current_alpha := -eval.INF
+	best_score := -eval.INF
+	best_move: moves.Move
+	legal_moves := 0
+	misses := 0
+	researches := 0
+
+	for i in 0 ..< move_list.count {
+		move := move_list.moves[i]
+		if !board.is_castling_legal_now(&b, move) {
+			continue
+		}
+
+		state: board.StateInfo
+		board.make_move_fast(&b, move, &state)
+		king_sq := board.get_king_square(&b, 1 - b.side)
+		if board.is_square_attacked(&b, king_sq, b.side) {
+			board.unmake_move(&b, &state)
+			continue
+		}
+
+		nnue.update_accumulators(&state, &b, move)
+
+		alpha_before := current_alpha
+		null_score := 0
+		null_nodes: u64 = 0
+		ran_null := legal_moves > 0 && alpha_before > -eval.INF / 2
+		if ran_null {
+			tt_snapshot := snapshot_tt()
+			null_st := clone_search_thread(&st)
+			null_st.nodes = 0
+			null_pv: PV_Line
+			null_score = -negamax(
+				&null_st,
+				&b,
+				-alpha_before - 1,
+				-alpha_before,
+				depth - 1,
+				1,
+				&null_pv,
+				{}, // no excluded move
+				false, // null-window non-PV probe
+			)
+			null_nodes = null_st.nodes
+			if null_st.continuation_history != nil {
+				free(null_st.continuation_history)
+			}
+			restore_tt(tt_snapshot)
+			delete(tt_snapshot)
+		}
+
+		full_nodes_before := st.nodes
+		child_pv: PV_Line
+		full_score := -negamax(
+			&st,
+			&b,
+			-eval.INF,
+			eval.INF,
+			depth - 1,
+			1,
+			&child_pv,
+		)
+		full_nodes := st.nodes - full_nodes_before
+		board.unmake_move(&b, &state)
+
+		if full_score > best_score {
+			best_score = full_score
+			best_move = move
+		}
+
+		action := "first"
+		note := "ok"
+		delta := 0
+		if ran_null {
+			delta = full_score - null_score
+			if null_score > alpha_before {
+				action = "research"
+				researches += 1
+			} else {
+				action = "prune"
+			}
+			if full_score > alpha_before && null_score <= alpha_before {
+				note = "MISS_FAIL_HIGH"
+				misses += 1
+			}
+		}
+
+		fmt.printf("%2d ", legal_moves + 1)
+		board.print_move(move)
+		if ran_null {
+			fmt.printf(
+				" full=%d null=%d alpha=%d delta=%d nodes_full=%d nodes_null=%d action=%s note=%s\n",
+				full_score,
+				null_score,
+				alpha_before,
+				delta,
+				full_nodes,
+				null_nodes,
+				action,
+				note,
+			)
+		} else {
+			fmt.printf(
+				" full=%d null=NA alpha=NA delta=NA nodes_full=%d nodes_null=0 action=%s note=%s\n",
+				full_score,
+				full_nodes,
+				action,
+				note,
+			)
+		}
+
+		if full_score > current_alpha {
+			current_alpha = full_score
+		}
+		legal_moves += 1
+	}
+
+	fmt.printf("summary legal=%d best=", legal_moves)
+	if !moves.is_empty_move(best_move) {
+		board.print_move(best_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" best_score=%d misses=%d researches=%d\n", best_score, misses, researches)
 }
 
 // Initialize a SearchThread

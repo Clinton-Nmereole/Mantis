@@ -64,12 +64,26 @@ isolation.
 
 Do not enable root PVS globally yet.
 
+## Root Trace Tool
+
+`trace-root` is now available as a diagnostic command:
+
+```sh
+./mantis_root_trace trace-root 8 fen "r1bqk2r/ppp2ppp/2n2n2/3pp3/1b1PP3/2N2N2/PPP2PPP/R1BQKB1R w KQkq - 5 6"
+```
+
+It warms the TT to `depth - 1`, sorts the root moves, then prints each legal
+root move's wide-window score beside a synthetic null-window probe from the
+same pre-move TT/search state. `MISS_FAIL_HIGH` marks a move where the
+wide-window score raises root alpha but the null-window probe would not have
+triggered a re-search.
+
 The safer future route is now:
 
 1. Do not spend more time on root PVS until the underlying PV/non-PV score
    stability is improved.
-2. Build a root move score trace that can compare every root move's full-window
-   score against its null-window score from the same position and TT state.
+2. Use `trace-root` on positions with root-PVS best-move churn and inspect any
+   `MISS_FAIL_HIGH` rows before changing search behavior.
 3. Audit TT bound storage/replacement and aspiration re-search first; root PVS
    should be retried only after the trace shows null-window probes are reliable.
 4. Require zero best-move changes and a small score-delta ceiling before any
