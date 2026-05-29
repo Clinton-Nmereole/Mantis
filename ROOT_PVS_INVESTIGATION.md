@@ -125,17 +125,33 @@ but removes this local root-PVS fail-low trap. After the guard:
 trace-root depth 6 endgame: misses=0, researches=3
 ```
 
+## RFP Guard Root-PVS Retry
+
+Two final-depth-only root-PVS retries were tested after the RFP root-child
+guard:
+
+| Candidate | Root Child Probe | Best Move Changes | Nodes | Time | Max Score Delta | Result |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| `mantis_root_pvs_rfp_guard` | non-PV null-window | 5/44 | -3.56% | -22.97% | 168 cp | Rejected |
+| `mantis_root_pvs_pvnull_rfp_guard` | PV-safe null-window | 3/44 | +14.68% | -5.25% | 266 cp | Rejected |
+
+The RFP guard fixed the known local endgame miss, but root PVS still changes
+fixed-depth results. Even PV-safe null probes diverge, which suggests the
+remaining issue is not just one unsafe non-PV pruning rule. It is likely the
+state feedback around aspiration, TT/history updates, and skipped full searches
+for fail-low root moves.
+
 The safer future route is now:
 
 1. Do not spend more time on root PVS until the underlying PV/non-PV score
    stability is improved.
 2. Use `trace-root` on positions with root-PVS best-move churn and inspect any
    `MISS_FAIL_HIGH` rows before changing search behavior.
-3. Retry the safest root-PVS experiment with the RFP root-child guard in place,
-   starting with final-depth-only root PVS.
-4. For remaining depth-8 opening churn, audit TT bound storage/replacement and
-   aspiration re-search state; root PVS should be retried only after the trace
-   shows null-window probes are reliable.
+3. Do not enable root PVS from these attempts.
+4. Next, build a state-neutral root-PVS probe experiment that snapshots TT and
+   clones root search state for null probes, then restores before either
+   pruning or full re-searching. This will separate true score instability from
+   search-state pollution.
 5. Require zero best-move changes and a small score-delta ceiling before any
    version is accepted.
 
