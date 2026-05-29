@@ -168,6 +168,7 @@ def print_limit_summary(mode: str, limit_value: Any, rows: list[dict[str, Any]])
     base_time = sum(int(row["base_time_ms"]) for row in rows)
     cand_time = sum(int(row["cand_time_ms"]) for row in rows)
     score_swing = sum(abs(int(row["score_delta_cp"])) for row in rows)
+    max_score_swing = max((abs(int(row["score_delta_cp"])) for row in rows), default=0)
     base_depth = sum(int(row["base_depth"]) for row in rows)
     cand_depth = sum(int(row["cand_depth"]) for row in rows)
     label = limit_label(mode, limit_value)
@@ -180,6 +181,7 @@ def print_limit_summary(mode: str, limit_value: Any, rows: list[dict[str, Any]])
     print(f"nodes:            {base_nodes} -> {cand_nodes} ({pct_delta(cand_nodes - base_nodes, base_nodes):+.2f}%)", flush=True)
     print(f"time_ms:          {base_time} -> {cand_time} ({pct_delta(cand_time - base_time, base_time):+.2f}%)", flush=True)
     print(f"abs_score_delta:  {score_swing} cp", flush=True)
+    print(f"max_score_delta:  {max_score_swing} cp", flush=True)
 
     if changed:
         print("changed:", flush=True)
@@ -228,6 +230,11 @@ def main() -> int:
     parser.add_argument("--baseline-staged-picker", action="store_true", help="Enable StagedMovePicker on baseline")
     parser.add_argument("--candidate-staged-picker", action="store_true", help="Enable StagedMovePicker on candidate")
     parser.add_argument("--fail-on-bestmove-change", action="store_true", help="Exit nonzero if any bestmove changes")
+    parser.add_argument(
+        "--fail-on-score-delta",
+        type=int,
+        help="Exit nonzero if any absolute score delta exceeds this many centipawns",
+    )
     args = parser.parse_args()
     if args.depths and any(depth <= 0 for depth in args.depths):
         parser.error("--depths values must be positive")
@@ -241,6 +248,8 @@ def main() -> int:
             parser.error("--clock WINC and BINC must be non-negative")
     if args.movestogo < 0:
         parser.error("--movestogo must be non-negative")
+    if args.fail_on_score_delta is not None and args.fail_on_score_delta < 0:
+        parser.error("--fail-on-score-delta must be non-negative")
 
     try:
         fens = load_fens(args)
@@ -303,6 +312,26 @@ def main() -> int:
     if args.csv:
         write_csv(args.csv, all_rows)
         print(f"\nWrote CSV: {args.csv}", flush=True)
+
+    if args.fail_on_score_delta is not None:
+        score_violations = [
+            row for row in all_rows
+            if abs(int(row["score_delta_cp"])) > args.fail_on_score_delta
+        ]
+        if score_violations:
+            print(
+                f"\nFAIL: {len(score_violations)} score deltas exceeded "
+                f"{args.fail_on_score_delta} cp",
+                flush=True,
+            )
+            for row in score_violations:
+                print(
+                    f"  {row['mode']}={row['limit']} index={int(row['index'])}: "
+                    f"score_delta={int(row['score_delta_cp']):+d} "
+                    f"{row['base_best']}->{row['cand_best']} fen={row['fen']}",
+                    flush=True,
+                )
+            return 1
 
     if args.fail_on_bestmove_change and total_changes:
         print(f"\nFAIL: {total_changes} bestmove changes detected", flush=True)
