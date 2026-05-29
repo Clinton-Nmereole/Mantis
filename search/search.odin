@@ -817,32 +817,6 @@ is_quiet_search_move :: proc(move: moves.Move) -> bool {
 	return !move.capture && move.promoted == -1
 }
 
-quiet_history_score :: proc(st: ^SearchThread, prev_move, move: moves.Move) -> int {
-	score := get_history_score(st, move)
-	if !moves.is_empty_move(prev_move) {
-		score += get_continuation_score(st, prev_move, move) / 16
-	}
-	return score
-}
-
-is_counter_response :: proc(st: ^SearchThread, prev_move, move: moves.Move) -> bool {
-	if moves.is_empty_move(prev_move) {return false}
-	counter := get_counter_move(st, prev_move)
-	return same_move(move, counter)
-}
-
-is_protected_quiet :: proc(
-	st: ^SearchThread,
-	prev_move, move: moves.Move,
-	ply: int,
-	history_score: int,
-) -> bool {
-	if !is_quiet_search_move(move) {return false}
-	if is_killer(st, move, ply) != 0 {return true}
-	if is_counter_response(st, prev_move, move) {return true}
-	return history_score > params.lmr_history_good_thresh
-}
-
 is_mate_window :: proc(alpha, beta: int) -> bool {
 	return abs(alpha) >= eval.MATE - MAX_PLY || abs(beta) >= eval.MATE - MAX_PLY
 }
@@ -1212,25 +1186,23 @@ negamax :: proc(
 		gives_check := move_gives_check_after_make(b)
 		quiet_move := is_quiet_search_move(move)
 		history_score := 0
-		protected_quiet := false
 		if quiet_move {
-			history_score = quiet_history_score(st, prev_move, move)
-			protected_quiet = is_protected_quiet(st, prev_move, move, ply, history_score)
+			history_score = get_history_score(st, move)
 		}
 
 		// Late Move Pruning (LMP)
 		// Skip quiet moves that are late in the move list.
 		// Only prune if we've already searched enough moves without finding a good one.
 		if !is_pv && !in_check && legal_moves >= lmp_threshold && quiet_moves_count > 0 &&
-		   !gives_check && quiet_move && !protected_quiet {
+		   !gives_check && quiet_move {
 			board.unmake_move(b, &state)
 			stat_add(&search_stats.lmp_prunes)
 			continue
 		}
 
 		// Futility Pruning - skip quiet moves that can't raise alpha
-		if do_futility && quiet_moves_count > 0 && !gives_check &&
-		   quiet_move && !protected_quiet {
+		if do_futility && legal_moves > 0 && !gives_check &&
+		   quiet_move {
 			board.unmake_move(b, &state)
 			stat_add(&search_stats.futility_prunes)
 			continue
