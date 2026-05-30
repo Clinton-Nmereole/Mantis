@@ -144,3 +144,58 @@ Use `trace-order` on new bad-game positions before changing move ordering
 again. The next likely target is to separate genuine history values from
 hard-coded root opening bias so future opening fixes do not leak into tactical
 move ordering.
+
+## Follow-Up: Root Quiet Trace Harness
+
+Candidate: `./mantis_asp_retry`
+
+Change: add `root_quiet_trace.py`, a repeatable wrapper around `trace-order`
+that runs the benchmark FEN set, parses root quiet ordering components, and
+summarizes:
+
+- the highest non-TT quiet in each position,
+- watched wing-pawn quiets near the top of the order,
+- positive history fighting wing-pawn penalties,
+- early quiets dominated by hard-coded opening bias.
+
+Depth-7 run over all 44 benchmark FENs:
+
+```sh
+python3 root_quiet_trace.py --binary ./mantis_asp_retry --depth 7 --top 12
+```
+
+Result: the old `a2a3` opening-ordering failure is not currently a root
+ordering accident. In the known failure FENs, wing pawns remain low-ranked and
+penalized; when wing pawns appear at the top in the trace, they are TT/warmup
+moves already chosen by the previous search depth rather than quiet candidates
+being promoted by sorting.
+
+Notable depth-7 summary:
+
+```text
+Wing-pawn watch rows near the top:
+#34 rank=04 move=g2g3 total=-1196 hist=+4 opening=-1200
+#22 rank=25 move=a2a3 total=-286 hist=+14 opening=-300
+
+Positive history fighting wing-pawn penalties:
+#24 rank=27 move=a2a3 total=-826 hist=+374 opening=-1200
+#19 rank=28 move=a2a3 total=-843 hist=+357 opening=-1200
+#13 rank=31 move=a2a3 total=-1020 hist=+180 opening=-1200
+```
+
+The stats benchmark now also prints `asp_low`, `asp_high`, and `asp_retry`.
+A depth-9 fixed suite showed `asp_retry=1` over 44 positions, so the scoped
+aspiration retry remains a rare correction rather than a frequent search path.
+
+Depth 9 also surfaced two remaining `a2a3` best moves:
+
+```text
+16: r4rk1/ppp1qppp/2n1p3/3p4/1b1P4/2N1PN2/PP2BPPP/R2Q1RK1 w - - 2 9
+19: r1bq1rk1/1pp2ppp/p1np1n2/4p3/2PPP3/2N2N2/PP2BPPP/R1BQ1RK1 w - - 3 9
+```
+
+`trace-order` shows both are TT moves from the depth-8 warmup despite the
+`-1200` wing-pawn opening penalty. `trace-root` full-score diagnostics prefer
+other moves at depth 9 (`g2g3` in position 16 and `c4c5` in position 19), so
+the next target is root full-score versus normal root search divergence, not
+another root quiet-ordering tweak.

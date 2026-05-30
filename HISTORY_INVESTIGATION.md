@@ -588,6 +588,7 @@ without globally weakening existing maluses.
 Future work:
 
 - Stop increasing continuation-history weight for now; `/10` is unstable.
-- Track whether `asp_retry` appears in real games or longer fixed-depth suites.
-- Measure root quiet candidates with `trace-order` before changing history
-  weights again.
+- Investigate root full-score versus normal root search divergence on the two
+  depth-9 `a2a3` benchmark positions; root ordering is not the immediate cause.
+- Keep tracking whether `asp_retry` appears in real games or longer fixed-depth
+  suites. The depth-9 benchmark only hit it once across 44 positions.
