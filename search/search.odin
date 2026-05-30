@@ -1393,13 +1393,8 @@ update_capture_history :: proc(st: ^SearchThread, move: moves.Move, depth: int, 
 		stat_add(&search_stats.capture_history_updates)
 	}
 
-	st.capture_history[move.piece][move.target] += bonus
-	if st.capture_history[move.piece][move.target] > params.history_max {
-		st.capture_history[move.piece][move.target] = params.history_max
-	}
-	if st.capture_history[move.piece][move.target] < params.history_min {
-		st.capture_history[move.piece][move.target] = params.history_min
-	}
+	current := st.capture_history[move.piece][move.target]
+	st.capture_history[move.piece][move.target] = history_gravity_update(current, bonus)
 }
 
 get_capture_history_score :: proc(st: ^SearchThread, move: moves.Move) -> int {

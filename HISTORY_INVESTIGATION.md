@@ -44,6 +44,36 @@ r3kb1r/pppb1ppp/2np4/4p3/1PP1P3/5N2/PB3PPP/RN1QKB1R w KQkq - 2 9
 trace-order depth 6: d1d2 remains TT/root best, a2a3 total=-1128
 ```
 
+## Accepted: Gravity Capture-History Update
+
+Candidate: `./mantis_capture_gravity`
+
+Change: route capture-history updates through the same `history_gravity_update`
+helper used for quiet history. Continuation history was left unchanged.
+
+Result: accepted.
+
+| Compare | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 vs `mantis_history_gravity` | 0/44 | 0 cp | +0.00% |
+| depth 7 vs `mantis_history_gravity` | 0/44 | 0 cp | +0.00% |
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_capture_gravity` | Passed |
+| `python3 correctness_test.py --binary ./mantis_capture_gravity` | Passed |
+| `./mantis_capture_gravity validate-qcaptures 4` | Passed |
+
+The older-baseline depth-6 profile remains unchanged from the accepted quiet
+history candidate:
+
+```text
+mantis_movetime_fill vs mantis_capture_gravity depth 6:
+bestmove_changes=1/44, changed opening move b1c3 -> g1f3
+```
+
 ## Rejected: Symmetric Per-Depth Aging
 
 Change tested: call `age_history(st)` after every fully completed iterative
@@ -107,6 +137,5 @@ without globally weakening existing maluses.
 
 Future work:
 
-- Test the same gravity formula for capture history.
-- Consider continuation-history gravity only after capture history is stable.
+- Consider continuation-history gravity only after more measurement.
 - Measure root quiet candidates with `trace-order` before changing history.
