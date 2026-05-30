@@ -62,6 +62,7 @@ SearchParams :: struct {
 	history_min: int,
 	history_decay_numer: int,
 	history_decay_denom: int,
+	continuation_score_div: int,
 
 	// Move ordering scores
 	hash_move_score: int,
@@ -116,6 +117,7 @@ init_search_params :: proc() {
 		history_min            = -10000,
 		history_decay_numer    = 9,
 		history_decay_denom    = 10,
+		continuation_score_div = 14,
 		hash_move_score        = 20000,
 		counter_move_score     = 15000,
 		capture_base_score     = 10000,
@@ -141,7 +143,7 @@ SPSA :: struct {
 	iterations:   int,
 }
 
-// Number of scalar fields in SearchParams
+// Number of scalar fields exposed to SPSA
 NUM_PARAMS :: 35
 
 // Flatten SearchParams into a float slice for SPSA
@@ -183,6 +185,7 @@ params_to_slice :: proc(p: ^SearchParams, out: []f64) {
 	out[34] = f64(p.contempt)
 	// see_prune_threshold omitted — tends to be binary (skip/keep)
 	// history_max/min omitted — prevent overflow only
+	// continuation_score_div omitted — tested with strict search parity gates
 	// check_ext_max_ply omitted — structural safety limit
 }
 

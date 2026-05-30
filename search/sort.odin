@@ -166,12 +166,12 @@ score_move :: proc(
 						abs_raw_cont_score = -abs_raw_cont_score
 					}
 					stat_add(&search_stats.continuation_score_raw_abs_sum, u64(abs_raw_cont_score))
-					if abs_raw_cont_score < 16 {
+					if abs_raw_cont_score < params.continuation_score_div {
 						stat_add(&search_stats.continuation_score_raw_under_scale)
 					}
 				}
 
-				cont_score_for_stats := raw_cont_score / 16
+				cont_score_for_stats := raw_cont_score / params.continuation_score_div
 				if cont_score_for_stats != 0 {
 					stat_add(&search_stats.continuation_score_nonzero)
 					abs_cont_score := cont_score_for_stats
@@ -185,7 +185,7 @@ score_move :: proc(
 				}
 			}
 
-			hist += raw_cont_score / 16
+			hist += raw_cont_score / params.continuation_score_div
 		}
 
 		// Opening priority: prefer center pawn pushes at root only.

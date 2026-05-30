@@ -164,6 +164,63 @@ Conclusion: the read path is not dead. Raw continuation-history hits appear on
 hits are too small to survive the `/16` divisor. The active issue is muted
 signal strength, not missing write/read alignment.
 
+## Accepted: Conservative Continuation-History Divisor
+
+Candidate: `./mantis_cont_div14`
+
+Change: make the continuation-history ordering divisor explicit as
+`params.continuation_score_div`, and set it to `14` instead of the previous
+hard-coded `/16`. This is a deliberately mild amplification of the continuation
+signal.
+
+Result: accepted.
+
+| Compare | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 vs `mantis_cont_raw_stats` | 0/44 | 0 cp | +0.00% |
+| depth 7 vs `mantis_cont_raw_stats` | 0/44 | 0 cp | -0.00% |
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_cont_div14` | Passed |
+| `python3 correctness_test.py --binary ./mantis_cont_div14` | Passed |
+| `./mantis_cont_div14 validate-qcaptures 4` | Passed |
+
+Sample depth-6 benchmark over the first 8 positions:
+
+```text
+cont_raw_nonzero_pct:       11.9
+cont_raw_under_pct:         98.8
+cont_scaled_nonzero:         207
+cont_scaled_nonzero_pct:     0.1
+cont_store_result_under_pct: 81.9
+cont_store_visible:          619
+```
+
+This is intentionally small: the sample increases visible continuation scores
+from 163 to 207 without changing benchmark best moves or scores at depths 6/7.
+
+## Rejected: Aggressive Continuation-History Divisors
+
+Candidates: `./mantis_cont_div8`, `./mantis_cont_div12`
+
+Result: rejected under the strict gate.
+
+Both divisors changed the same sensitive opening benchmark at depth 7:
+
+```text
+r1bqkbnr/pp1ppppp/2n5/1Bp5/4P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3
+g1f3 -> b1c3, score_delta=-44
+```
+
+The `/8` candidate produced a much larger sample effect
+(`cont_scaled_nonzero_pct=1.2`), but the strict compare showed a score-losing
+move change. The `/12` candidate reduced the sample effect
+(`cont_scaled_nonzero_pct=0.2`) but still produced the same score-losing move
+change. Keep further continuation-history amplification gated by this FEN.
+
 ## Rejected: Symmetric Per-Depth Aging
 
 Change tested: call `age_history(st)` after every fully completed iterative
@@ -227,6 +284,7 @@ without globally weakening existing maluses.
 
 Future work:
 
-- Test a conservative continuation-history divisor experiment, such as `/8`,
-  under strict bestmove and score-delta gates.
-- Measure root quiet candidates with `trace-order` before changing history.
+- Trace continuation-history ordering on the sensitive opening FEN before any
+  further amplification.
+- Measure root quiet candidates with `trace-order` before changing history
+  weights again.

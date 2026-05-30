@@ -1515,7 +1515,7 @@ store_continuation :: proc(st: ^SearchThread, prev_move: moves.Move, curr_move: 
 		if abs_bonus < 0 {
 			abs_bonus = -abs_bonus
 		}
-		if abs_bonus < 16 {
+		if abs_bonus < params.continuation_score_div {
 			stat_add(&search_stats.continuation_store_bonus_under_scale)
 		} else {
 			stat_add(&search_stats.continuation_store_bonus_visible)
@@ -1534,7 +1534,7 @@ store_continuation :: proc(st: ^SearchThread, prev_move: moves.Move, curr_move: 
 		if abs_new_val < 0 {
 			abs_new_val = -abs_new_val
 		}
-		if abs_new_val < 16 {
+		if abs_new_val < params.continuation_score_div {
 			stat_add(&search_stats.continuation_store_result_under_scale)
 		} else {
 			stat_add(&search_stats.continuation_store_result_visible)
