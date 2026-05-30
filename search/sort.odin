@@ -14,6 +14,7 @@ MOVE_PICKER_KILLER1_STAGE :: 3
 MOVE_PICKER_KILLER2_STAGE :: 4
 MOVE_PICKER_REST_STAGE :: 5
 MOVE_PICKER_DONE_STAGE :: 6
+LATE_ROOT_PAWN_OPENING_BIAS_DIVISOR :: 4
 
 root_opening_bias_score :: proc(b: ^board.Board, move: moves.Move) -> int {
 	bias := 0
@@ -30,6 +31,9 @@ root_opening_bias_score :: proc(b: ^board.Board, move: moves.Move) -> int {
 		   target == 32 || target == 33 || target == 38 || target == 39 ||
 		   target == 40 || target == 41 || target == 46 || target == 47 {
 			bias -= 1200
+		}
+		if b.fullmove_number > 12 {
+			bias /= LATE_ROOT_PAWN_OPENING_BIAS_DIVISOR
 		}
 	} else if move.piece % 6 == constants.KNIGHT && b.fullmove_number <= 12 {
 		if target == 18 || target == 21 || target == 42 || target == 45 {bias += 350} // c3, f3, c6, f6
