@@ -529,6 +529,53 @@ r1bqkbnr/pp1ppppp/2n5/1Bp5/4P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3
 g1f3 -> a2a4, score_delta=-45
 ```
 
+## Accepted: Scoped Root Aspiration Beta Retry
+
+Candidate: `./mantis_asp_retry`
+
+Change: factor the root move pass into `run_root_search_pass`, then add one
+bounded retry for the specific PV fail-low guard case where the guard-triggered
+fail-low recovery returns at or above the old beta. The retry opens the upper
+bound while keeping the original aspiration alpha, resolving a clipped
+beta-bound score without making every ordinary aspiration failure more
+expensive.
+
+Sensitive FEN, depth 7:
+
+```text
+r1bqkbnr/pp1ppppp/2n5/1Bp5/4P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3
+```
+
+Trace result:
+
+```text
+reason=pv_fail_low_guard
+fail_low_research: best=g1f3 best_score=105 root_window=[-50000,105]
+retry_reason=fail_low_beta_bound
+fail_low_beta_retry: best=g1f3 best_score=114 root_window=[35,50000]
+```
+
+An unscoped version that retried every fail-low recovery beta-bound was
+rejected first. It changed `5/44` depth-6 best moves and added `+6.38%` nodes.
+The accepted version only retries when the previous PV failed low but a later
+move kept the initial aspiration pass nominally inside the window.
+
+Fixed-depth suite:
+
+| Compare vs `mantis_cont_div12_guard` | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 | 0/44 | 0 cp | +0.00% |
+| depth 7 | 0/44 | 9 cp | +0.16% |
+| depth 8 | 0/44 | 2 cp | +0.57% |
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_asp_retry` | Passed |
+| `python3 correctness_test.py --binary ./mantis_asp_retry` | Passed |
+| `./mantis_asp_retry validate-qcaptures 4` | Passed |
+
 ## Conclusion
 
 Do not enable blunt quiet-history aging.
@@ -541,7 +588,6 @@ without globally weakening existing maluses.
 Future work:
 
 - Stop increasing continuation-history weight for now; `/10` is unstable.
-- Add a bounded root aspiration retry loop if clipped beta-bound scores remain
-  common after fail-low recovery.
+- Track whether `asp_retry` appears in real games or longer fixed-depth suites.
 - Measure root quiet candidates with `trace-order` before changing history
   weights again.

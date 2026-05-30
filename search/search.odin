@@ -72,6 +72,16 @@ MultiPV_Result :: struct {
 	pv:    PV_Line,
 }
 
+RootSearchPassResult :: struct {
+	best_score:    int,
+	best_move:     moves.Move,
+	best_pv:       PV_Line,
+	found_move:    bool,
+	completed:     bool,
+	root_tt_seen:  bool,
+	root_tt_score: int,
+}
+
 
 // Thread-local search state
 SearchThread :: struct {
@@ -180,6 +190,7 @@ SearchStats :: struct {
 	continuation_store_result_visible: u64,
 	aspiration_fail_low:  u64,
 	aspiration_fail_high: u64,
+	aspiration_retries:   u64,
 }
 
 search_stats_enabled: bool = false
@@ -300,7 +311,7 @@ print_search_stats :: proc() {
 		stat_load(&search_stats.q_see_prunes),
 	)
 	fmt.printf(
-		"info string stats search beta_cutoffs=%d quiet_beta=%d capture_beta=%d capture_hist_updates=%d capture_hist_maluses=%d cont_updates=%d cont_maluses=%d lmr=%d lmr_research=%d pvs_research=%d asp_low=%d asp_high=%d\n",
+		"info string stats search beta_cutoffs=%d quiet_beta=%d capture_beta=%d capture_hist_updates=%d capture_hist_maluses=%d cont_updates=%d cont_maluses=%d lmr=%d lmr_research=%d pvs_research=%d asp_low=%d asp_high=%d asp_retry=%d\n",
 		stat_load(&search_stats.beta_cutoffs),
 		stat_load(&search_stats.quiet_beta_cutoffs),
 		stat_load(&search_stats.capture_beta_cutoffs),
@@ -313,6 +324,7 @@ print_search_stats :: proc() {
 		stat_load(&search_stats.pvs_researches),
 		stat_load(&search_stats.aspiration_fail_low),
 		stat_load(&search_stats.aspiration_fail_high),
+		stat_load(&search_stats.aspiration_retries),
 	)
 	fmt.printf(
 		"info string stats continuation cont_score_probes=%d cont_raw_nonzero=%d cont_raw_positive=%d cont_raw_negative=%d cont_raw_abs_sum=%d cont_raw_under_scale=%d cont_score_nonzero=%d cont_score_positive=%d cont_score_negative=%d cont_score_abs_sum=%d\n",
@@ -1814,12 +1826,29 @@ collect_continuation_div_trace :: proc(fen: string, depth: int, divisor: int) ->
 	reset_search_stats()
 
 	run_continuation_div_root_pass(&result, &st, &b, &move_list, depth, result.root_alpha, result.root_beta, "initial")
-	if result.best_score <= result.root_alpha {
+
+	pv_initial_score := -eval.INF
+	pv_initial_seen := false
+	if !moves.is_empty_move(root_tt_move) {
+		pv_idx := find_continuation_div_entry(&result, root_tt_move)
+		if pv_idx >= 0 {
+			pv_initial_seen = true
+			pv_initial_score = result.entries[pv_idx].score
+		}
+	}
+	pv_failed_low := pv_initial_seen && pv_initial_score <= result.initial_alpha
+
+	if result.best_score <= result.initial_alpha || (pv_failed_low && result.best_score < result.initial_beta) {
+		guard_forced_research := result.best_score > result.initial_alpha && pv_failed_low
 		reset_search_stats()
-		run_continuation_div_root_pass(&result, &st, &b, &move_list, depth, -eval.INF, result.root_beta, "fail_low_research")
-	} else if result.best_score >= result.root_beta {
+		run_continuation_div_root_pass(&result, &st, &b, &move_list, depth, -eval.INF, result.initial_beta, "fail_low_research")
+		if guard_forced_research && result.best_score >= result.initial_beta {
+			reset_search_stats()
+			run_continuation_div_root_pass(&result, &st, &b, &move_list, depth, result.initial_alpha, eval.INF, "fail_low_beta_retry")
+		}
+	} else if result.best_score >= result.initial_beta {
 		reset_search_stats()
-		run_continuation_div_root_pass(&result, &st, &b, &move_list, depth, result.root_alpha, eval.INF, "fail_high_research")
+		run_continuation_div_root_pass(&result, &st, &b, &move_list, depth, result.initial_alpha, eval.INF, "fail_high_research")
 	}
 
 	result.total_nodes = st.nodes
@@ -2087,8 +2116,18 @@ trace_root_aspiration :: proc(fen: string, depth: int, divisor: int) {
 		initial_alpha = alpha,
 		initial_beta  = beta,
 	}
+	retry := ContinuationDivTraceResult {
+		divisor       = divisor,
+		warmup_depth  = warmup_depth,
+		warmup_score  = warmup_score,
+		warmup_best   = warmup_best,
+		initial_alpha = alpha,
+		initial_beta  = beta,
+	}
 	research_needed := false
 	research_reason := "none"
+	retry_needed := false
+	retry_reason := "none"
 	if initial.best_score <= alpha {
 		research_needed = true
 		research_reason = "window_fail_low"
@@ -2099,6 +2138,12 @@ trace_root_aspiration :: proc(fen: string, depth: int, divisor: int) {
 		research_reason = "pv_fail_low_guard"
 		reset_search_stats()
 		run_continuation_div_root_pass(&research, &st, &b, &move_list, depth, -eval.INF, beta, "fail_low_research")
+		if research.best_score >= beta {
+			retry_needed = true
+			retry_reason = "fail_low_beta_bound"
+			reset_search_stats()
+			run_continuation_div_root_pass(&retry, &st, &b, &move_list, depth, alpha, eval.INF, "fail_low_beta_retry")
+		}
 	} else if initial.best_score >= beta {
 		research_needed = true
 		research_reason = "window_fail_high"
@@ -2133,6 +2178,12 @@ trace_root_aspiration :: proc(fen: string, depth: int, divisor: int) {
 		print_continuation_div_summary(&research)
 	} else {
 		fmt.println("research=none")
+	}
+	if retry_needed {
+		fmt.printf("retry_reason=%s\n", retry_reason)
+		print_continuation_div_summary(&retry)
+	} else {
+		fmt.println("retry=none")
 	}
 
 	fmt.println("idx move initial(score alpha nodes q tt lmp fut nmp rfp razor probcut lmr/re pvs) | research(score alpha nodes q tt lmp fut nmp rfp razor probcut lmr/re pvs) delta note")
@@ -3454,6 +3505,88 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 	return current_alpha
 }
 
+run_root_search_pass :: proc(
+	st: ^SearchThread,
+	b: ^board.Board,
+	move_list: ^moves.MoveList,
+	depth: int,
+	alpha: int,
+	beta: int,
+	root_tt_move: moves.Move,
+	pv_index: int,
+	root_pv_first_legal_counted: ^bool,
+) -> RootSearchPassResult {
+	result := RootSearchPassResult {
+		best_score    = -eval.INF,
+		completed     = true,
+		root_tt_score = -eval.INF,
+	}
+	current_alpha := alpha
+
+	for i in 0 ..< move_list.count {
+		if should_stop_search() {
+			result.completed = false
+			break
+		}
+
+		move := move_list.moves[i]
+		if !board.is_castling_legal_now(b, move) {
+			continue
+		}
+
+		state: board.StateInfo
+		board.make_move_fast(b, move, &state)
+
+		king_sq := board.get_king_square(b, 1 - b.side)
+		if board.is_square_attacked(b, king_sq, b.side) {
+			board.unmake_move(b, &state)
+			stat_add(&search_stats.legal_rejects)
+			continue
+		}
+		if !root_pv_first_legal_counted^ && i == 0 && same_move(move, root_tt_move) {
+			stat_add(&search_stats.root_pv_first_legal)
+			root_pv_first_legal_counted^ = true
+		}
+
+		nnue.update_accumulators(&state, b, move)
+
+		child_pv: PV_Line
+		score := -negamax(
+			st,
+			b,
+			-beta,
+			-current_alpha,
+			depth - 1,
+			1,
+			&child_pv,
+		)
+
+		board.unmake_move(b, &state)
+		if pv_index == 0 && !moves.is_empty_move(root_tt_move) && same_move(move, root_tt_move) {
+			result.root_tt_seen = true
+			result.root_tt_score = score
+		}
+
+		if score > result.best_score {
+			result.best_score = score
+			result.best_move = move
+			result.found_move = true
+
+			result.best_pv.moves[0] = move
+			for i in 0 ..< child_pv.count {
+				result.best_pv.moves[i + 1] = child_pv.moves[i]
+			}
+			result.best_pv.count = child_pv.count + 1
+		}
+
+		if score > current_alpha {
+			current_alpha = score
+		}
+	}
+
+	return result
+}
+
 // Root Search
 search_position :: proc(
 	st: ^SearchThread,
@@ -3546,7 +3679,6 @@ search_position :: proc(
 		}
 
 		for pv_index in 0 ..< pv_lines_to_search {
-			root_pv: PV_Line
 			alpha := -eval.INF
 			beta := eval.INF
 
@@ -3598,214 +3730,118 @@ search_position :: proc(
 			current_best_move: moves.Move
 			found_move := false
 
-			current_alpha := alpha
 			root_pv_first_legal_counted := false
-			root_tt_initial_seen := false
-			root_tt_initial_score := -eval.INF
-
-			for i in 0 ..< move_list.count {
-				// Abort root move loop if search was stopped (time limit or external stop)
-				if should_stop_search() {
-					depth_completed = false
-					break
-				}
-
-				if !board.is_castling_legal_now(b, move_list.moves[i]) {
-					continue
-				}
-
-				state: board.StateInfo
-				board.make_move_fast(b, move_list.moves[i], &state)
-
-				// Check legality
-				king_sq := board.get_king_square(b, 1 - b.side)
-				if board.is_square_attacked(b, king_sq, b.side) {
-					board.unmake_move(b, &state)
-					stat_add(&search_stats.legal_rejects)
-					continue
-				}
-				if !root_pv_first_legal_counted && i == 0 && same_move(move_list.moves[i], root_tt_move) {
-					stat_add(&search_stats.root_pv_first_legal)
-					root_pv_first_legal_counted = true
-				}
-
-				nnue.update_accumulators(&state, b, move_list.moves[i])
-
-				child_pv: PV_Line
-				score := -negamax(
-					st,
-					b,
-					-beta,
-					-current_alpha,
-					current_depth - 1,
-					1,
-					&child_pv,
-				)
-
-				board.unmake_move(b, &state)
-				if pv_index == 0 && !moves.is_empty_move(root_tt_move) && same_move(move_list.moves[i], root_tt_move) {
-					root_tt_initial_seen = true
-					root_tt_initial_score = score
-				}
-
-				if score > best_score {
-					best_score = score
-					current_best_move = move_list.moves[i]
-					found_move = true
-
-					// Update best PV line
-					best_pv.moves[0] = move_list.moves[i]
-					for i in 0 ..< child_pv.count {
-						best_pv.moves[i + 1] = child_pv.moves[i]
-					}
-					best_pv.count = child_pv.count + 1
-				}
-
-				if score > current_alpha {
-					current_alpha = score
-				}
+			initial_pass := run_root_search_pass(
+				st,
+				b,
+				&move_list,
+				current_depth,
+				alpha,
+				beta,
+				root_tt_move,
+				pv_index,
+				&root_pv_first_legal_counted,
+			)
+			best_score = initial_pass.best_score
+			current_best_move = initial_pass.best_move
+			best_pv = initial_pass.best_pv
+			found_move = initial_pass.found_move
+			if !initial_pass.completed {
+				depth_completed = false
 			}
 
 			// Re-search if outside aspiration window (first PV only)
-			if current_depth >= 5 && pv_index == 0 {
+			if depth_completed && current_depth >= 5 && pv_index == 0 {
+				window_alpha := alpha
+				window_beta := beta
 				initial_best_score := best_score
 				initial_best_move := current_best_move
 				initial_pv := best_pv
+				initial_found_move := found_move
 
-				root_tt_failed_low := root_tt_initial_seen && root_tt_initial_score <= alpha && best_score < beta
+				root_tt_failed_low := initial_pass.root_tt_seen && initial_pass.root_tt_score <= window_alpha && best_score < window_beta
+				guard_forced_fail_low := root_tt_failed_low && best_score > window_alpha
 				if best_score <= alpha || root_tt_failed_low {
 					aspiration_failures += 1
 					stat_add(&search_stats.aspiration_fail_low)
-					// Failed low - re-search with lower bound
 					alpha = -eval.INF
-					best_score = -eval.INF
-					current_alpha = alpha
+					research_pass := run_root_search_pass(
+						st,
+						b,
+						&move_list,
+						current_depth,
+						alpha,
+						beta,
+						root_tt_move,
+						pv_index,
+						&root_pv_first_legal_counted,
+					)
+					if research_pass.completed {
+						best_score = research_pass.best_score
+						current_best_move = research_pass.best_move
+						best_pv = research_pass.best_pv
+						found_move = research_pass.found_move
+					} else {
+						depth_completed = false
+					}
 
-					for i in 0 ..< move_list.count {
-						if should_stop_search() {
-							depth_completed = false
-							break
-						}
-
-						if !board.is_castling_legal_now(b, move_list.moves[i]) {
-							continue
-						}
-
-						state: board.StateInfo
-						board.make_move_fast(b, move_list.moves[i], &state)
-
-						// Check legality
-						king_sq := board.get_king_square(b, 1 - b.side)
-						if board.is_square_attacked(b, king_sq, b.side) {
-							board.unmake_move(b, &state)
-							stat_add(&search_stats.legal_rejects)
-							continue
-						}
-						if !root_pv_first_legal_counted && i == 0 && same_move(move_list.moves[i], root_tt_move) {
-							stat_add(&search_stats.root_pv_first_legal)
-							root_pv_first_legal_counted = true
-						}
-
-						nnue.update_accumulators(&state, b, move_list.moves[i])
-						child_pv: PV_Line
-						score := -negamax(
+					if depth_completed && guard_forced_fail_low && best_score >= beta {
+						aspiration_failures += 1
+						stat_add(&search_stats.aspiration_fail_high)
+						stat_add(&search_stats.aspiration_retries)
+						alpha = window_alpha
+						beta = eval.INF
+						retry_pass := run_root_search_pass(
 							st,
 							b,
-							-beta,
-							-current_alpha,
-							current_depth - 1,
-							1,
-							&child_pv,
+							&move_list,
+							current_depth,
+							alpha,
+							beta,
+							root_tt_move,
+							pv_index,
+							&root_pv_first_legal_counted,
 						)
-
-						board.unmake_move(b, &state)
-
-						if score > best_score {
-							best_score = score
-							current_best_move = move_list.moves[i]
-
-							// Update best PV line
-							best_pv.moves[0] = move_list.moves[i]
-							for i in 0 ..< child_pv.count {
-								best_pv.moves[i + 1] = child_pv.moves[i]
-							}
-							best_pv.count = child_pv.count + 1
-						}
-
-						if score > current_alpha {
-							current_alpha = score
+						if retry_pass.completed {
+							best_score = retry_pass.best_score
+							current_best_move = retry_pass.best_move
+							best_pv = retry_pass.best_pv
+							found_move = retry_pass.found_move
+						} else {
+							depth_completed = false
 						}
 					}
 				} else if best_score >= beta {
 					aspiration_failures += 1
 					stat_add(&search_stats.aspiration_fail_high)
-					// Failed high - re-search with upper bound
 					beta = eval.INF
-					best_score = -eval.INF
-					current_alpha = alpha
-
-					for i in 0 ..< move_list.count {
-						if should_stop_search() {
-							depth_completed = false
-							break
-						}
-
-						if !board.is_castling_legal_now(b, move_list.moves[i]) {
-							continue
-						}
-
-						state: board.StateInfo
-						board.make_move_fast(b, move_list.moves[i], &state)
-
-						// Check legality
-						king_sq := board.get_king_square(b, 1 - b.side)
-						if board.is_square_attacked(b, king_sq, b.side) {
-							board.unmake_move(b, &state)
-							stat_add(&search_stats.legal_rejects)
-							continue
-						}
-						if !root_pv_first_legal_counted && i == 0 && same_move(move_list.moves[i], root_tt_move) {
-							stat_add(&search_stats.root_pv_first_legal)
-							root_pv_first_legal_counted = true
-						}
-
-						nnue.update_accumulators(&state, b, move_list.moves[i])
-						child_pv: PV_Line
-						score := -negamax(
-							st,
-							b,
-							-beta,
-							-current_alpha,
-							current_depth - 1,
-							1,
-							&child_pv,
-						)
-
-						board.unmake_move(b, &state)
-
-						if score > best_score {
-							best_score = score
-							current_best_move = move_list.moves[i]
-
-							// Update best PV line
-							best_pv.moves[0] = move_list.moves[i]
-							for i in 0 ..< child_pv.count {
-								best_pv.moves[i + 1] = child_pv.moves[i]
-							}
-							best_pv.count = child_pv.count + 1
-						}
-
-						if score > current_alpha {
-							current_alpha = score
-						}
+					research_pass := run_root_search_pass(
+						st,
+						b,
+						&move_list,
+						current_depth,
+						alpha,
+						beta,
+						root_tt_move,
+						pv_index,
+						&root_pv_first_legal_counted,
+					)
+					if research_pass.completed {
+						best_score = research_pass.best_score
+						current_best_move = research_pass.best_move
+						best_pv = research_pass.best_pv
+						found_move = research_pass.found_move
+					} else {
+						depth_completed = false
 					}
 				}
 
 				// If search was stopped during re-search, restore initial results
-				if should_stop_search() {
+				if !depth_completed || should_stop_search() {
 					best_score = initial_best_score
 					current_best_move = initial_best_move
 					best_pv = initial_pv
+					found_move = initial_found_move
 				}
 			}
 
