@@ -153,20 +153,39 @@ score_move :: proc(
 		// 4. History score (for non-killer quiet moves)
 		hist := get_history_score(st, move)
 		if !moves.is_empty_move(prev_move) {
-			cont_score := get_continuation_score(st, prev_move, move) / 16
-			stat_add(&search_stats.continuation_score_probes)
-			if cont_score != 0 {
-				stat_add(&search_stats.continuation_score_nonzero)
-				abs_cont_score := cont_score
-				if cont_score > 0 {
-					stat_add(&search_stats.continuation_score_positive)
-				} else {
-					stat_add(&search_stats.continuation_score_negative)
-					abs_cont_score = -abs_cont_score
+			raw_cont_score := get_continuation_score(st, prev_move, move)
+			if search_stats_enabled {
+				stat_add(&search_stats.continuation_score_probes)
+				if raw_cont_score != 0 {
+					stat_add(&search_stats.continuation_score_raw_nonzero)
+					abs_raw_cont_score := raw_cont_score
+					if raw_cont_score > 0 {
+						stat_add(&search_stats.continuation_score_raw_positive)
+					} else {
+						stat_add(&search_stats.continuation_score_raw_negative)
+						abs_raw_cont_score = -abs_raw_cont_score
+					}
+					stat_add(&search_stats.continuation_score_raw_abs_sum, u64(abs_raw_cont_score))
+					if abs_raw_cont_score < 16 {
+						stat_add(&search_stats.continuation_score_raw_under_scale)
+					}
 				}
-				stat_add(&search_stats.continuation_score_abs_sum, u64(abs_cont_score))
+
+				cont_score_for_stats := raw_cont_score / 16
+				if cont_score_for_stats != 0 {
+					stat_add(&search_stats.continuation_score_nonzero)
+					abs_cont_score := cont_score_for_stats
+					if cont_score_for_stats > 0 {
+						stat_add(&search_stats.continuation_score_positive)
+					} else {
+						stat_add(&search_stats.continuation_score_negative)
+						abs_cont_score = -abs_cont_score
+					}
+					stat_add(&search_stats.continuation_score_abs_sum, u64(abs_cont_score))
+				}
 			}
-			hist += cont_score
+
+			hist += raw_cont_score / 16
 		}
 
 		// Opening priority: prefer center pawn pushes at root only.

@@ -165,10 +165,19 @@ SearchStats :: struct {
 	continuation_updates: u64,
 	continuation_maluses: u64,
 	continuation_score_probes: u64,
+	continuation_score_raw_nonzero: u64,
+	continuation_score_raw_positive: u64,
+	continuation_score_raw_negative: u64,
+	continuation_score_raw_abs_sum: u64,
+	continuation_score_raw_under_scale: u64,
 	continuation_score_nonzero: u64,
 	continuation_score_positive: u64,
 	continuation_score_negative: u64,
 	continuation_score_abs_sum: u64,
+	continuation_store_bonus_under_scale: u64,
+	continuation_store_bonus_visible: u64,
+	continuation_store_result_under_scale: u64,
+	continuation_store_result_visible: u64,
 	aspiration_fail_low:  u64,
 	aspiration_fail_high: u64,
 }
@@ -306,12 +315,24 @@ print_search_stats :: proc() {
 		stat_load(&search_stats.aspiration_fail_high),
 	)
 	fmt.printf(
-		"info string stats continuation cont_score_probes=%d cont_score_nonzero=%d cont_score_positive=%d cont_score_negative=%d cont_score_abs_sum=%d\n",
+		"info string stats continuation cont_score_probes=%d cont_raw_nonzero=%d cont_raw_positive=%d cont_raw_negative=%d cont_raw_abs_sum=%d cont_raw_under_scale=%d cont_score_nonzero=%d cont_score_positive=%d cont_score_negative=%d cont_score_abs_sum=%d\n",
 		stat_load(&search_stats.continuation_score_probes),
+		stat_load(&search_stats.continuation_score_raw_nonzero),
+		stat_load(&search_stats.continuation_score_raw_positive),
+		stat_load(&search_stats.continuation_score_raw_negative),
+		stat_load(&search_stats.continuation_score_raw_abs_sum),
+		stat_load(&search_stats.continuation_score_raw_under_scale),
 		stat_load(&search_stats.continuation_score_nonzero),
 		stat_load(&search_stats.continuation_score_positive),
 		stat_load(&search_stats.continuation_score_negative),
 		stat_load(&search_stats.continuation_score_abs_sum),
+	)
+	fmt.printf(
+		"info string stats continuation_store cont_store_bonus_under_scale=%d cont_store_bonus_visible=%d cont_store_result_under_scale=%d cont_store_result_visible=%d\n",
+		stat_load(&search_stats.continuation_store_bonus_under_scale),
+		stat_load(&search_stats.continuation_store_bonus_visible),
+		stat_load(&search_stats.continuation_store_result_under_scale),
+		stat_load(&search_stats.continuation_store_result_visible),
 	)
 	os.flush(os.stdout)
 }
@@ -1489,6 +1510,17 @@ store_continuation :: proc(st: ^SearchThread, prev_move: moves.Move, curr_move: 
 	} else {
 		stat_add(&search_stats.continuation_updates)
 	}
+	if search_stats_enabled {
+		abs_bonus := bonus
+		if abs_bonus < 0 {
+			abs_bonus = -abs_bonus
+		}
+		if abs_bonus < 16 {
+			stat_add(&search_stats.continuation_store_bonus_under_scale)
+		} else {
+			stat_add(&search_stats.continuation_store_bonus_visible)
+		}
+	}
 
 	// Update with clamping
 	old_val := st.continuation_history[prev_type][prev_move.target][curr_type][curr_move.target]
@@ -1497,6 +1529,17 @@ store_continuation :: proc(st: ^SearchThread, prev_move: moves.Move, curr_move: 
 	// Clamp to prevent overflow
 	if new_val > params.history_max {new_val = params.history_max}
 	if new_val < params.history_min {new_val = params.history_min}
+	if search_stats_enabled {
+		abs_new_val := new_val
+		if abs_new_val < 0 {
+			abs_new_val = -abs_new_val
+		}
+		if abs_new_val < 16 {
+			stat_add(&search_stats.continuation_store_result_under_scale)
+		} else {
+			stat_add(&search_stats.continuation_store_result_visible)
+		}
+	}
 
 	st.continuation_history[prev_type][prev_move.target][curr_type][curr_move.target] = new_val
 }

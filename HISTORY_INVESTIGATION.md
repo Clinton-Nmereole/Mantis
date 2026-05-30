@@ -117,6 +117,53 @@ continuation contribution after scaling. Do not retune continuation history
 yet; next step is to measure where the table is written versus where it is
 queried, because the update path is active while the read path is mostly cold.
 
+## Accepted: Raw Continuation-History Alignment Diagnostics
+
+Candidate: `./mantis_cont_raw_stats`
+
+Change: split continuation-history diagnostics into raw table hits versus
+scaled move-ordering contribution. Also track whether continuation writes and
+post-write table values are below the `/16` visibility threshold. Diagnostic
+arithmetic is guarded by `search_stats_enabled` so normal play avoids the extra
+stats work.
+
+Result: accepted as a diagnostic checkpoint.
+
+| Compare | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 vs `mantis_cont_stats` | 0/44 | 0 cp | +0.00% |
+| depth 7 vs `mantis_cont_stats` | 0/44 | 0 cp | +0.00% |
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_cont_raw_stats` | Passed |
+| `python3 correctness_test.py --binary ./mantis_cont_raw_stats` | Passed |
+| `./mantis_cont_raw_stats validate-qcaptures 4` | Passed |
+
+Sample depth-6 benchmark over the first 8 positions:
+
+```text
+cont_score_probes:        144135
+cont_raw_nonzero:          17142
+cont_raw_nonzero_pct:       11.9
+cont_raw_under_pct:         99.0
+cont_raw_pos_pct:            6.1
+cont_raw_neg_pct:           93.9
+cont_raw_avg_abs:            2.9
+cont_scaled_nonzero:         163
+cont_scaled_nonzero_pct:     0.1
+cont_store_bonus_under_pct:  99.6
+cont_store_result_under_pct: 83.9
+cont_store_visible:          549
+```
+
+Conclusion: the read path is not dead. Raw continuation-history hits appear on
+11.9% of quiet scoring probes in this opening sample, but 99.0% of those raw
+hits are too small to survive the `/16` divisor. The active issue is muted
+signal strength, not missing write/read alignment.
+
 ## Rejected: Symmetric Per-Depth Aging
 
 Change tested: call `age_history(st)` after every fully completed iterative
@@ -180,6 +227,6 @@ without globally weakening existing maluses.
 
 Future work:
 
-- Measure continuation-history write/read alignment before changing update
-  weights.
+- Test a conservative continuation-history divisor experiment, such as `/8`,
+  under strict bestmove and score-delta gates.
 - Measure root quiet candidates with `trace-order` before changing history.
