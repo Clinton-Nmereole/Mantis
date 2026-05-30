@@ -1180,6 +1180,7 @@ trace_child_continuation_order_scores :: proc(fen: string, depth: int, root_move
 		warmup_depth = last_completed_depth
 		reset_search_control()
 		b = root_board
+		refresh_trace_accumulators(&b)
 	}
 
 	root_list: moves.MoveList
@@ -1367,6 +1368,7 @@ trace_continuation_line_order_scores :: proc(
 		warmup_depth = last_completed_depth
 		reset_search_control()
 		b = root_board
+		refresh_trace_accumulators(&b)
 	}
 
 	root_list: moves.MoveList
@@ -1604,6 +1606,394 @@ trace_continuation_line_order_scores :: proc(
 	}
 
 	fmt.printf("summary legal=%d pseudo=%d\n", legal_moves, line_list.count)
+}
+
+ContinuationDivTraceEntry :: struct {
+	move:          moves.Move,
+	index:         int,
+	score:         int,
+	alpha_before:  int,
+	nodes:         u64,
+	qnodes:        u64,
+	tt_cutoffs:    u64,
+	lmp:           u64,
+	futility:      u64,
+	nmp_cutoffs:   u64,
+	rfp:           u64,
+	razor_cutoffs: u64,
+	probcut_cutoffs: u64,
+	lmr:           u64,
+	lmr_research:  u64,
+	pvs_research:  u64,
+}
+
+ContinuationDivTraceResult :: struct {
+	divisor:       int,
+	warmup_depth:  int,
+	warmup_score:  int,
+	warmup_best:   moves.Move,
+	root_alpha:    int,
+	root_beta:     int,
+	initial_alpha: int,
+	initial_beta:  int,
+	phase:         string,
+	best_move:     moves.Move,
+	best_score:    int,
+	total_nodes:   u64,
+	entries:       [256]ContinuationDivTraceEntry,
+	count:         int,
+}
+
+SearchCounterSnapshot :: struct {
+	qnodes:          u64,
+	tt_cutoffs:      u64,
+	lmp:             u64,
+	futility:        u64,
+	nmp_cutoffs:     u64,
+	rfp:             u64,
+	razor_cutoffs:   u64,
+	probcut_cutoffs: u64,
+	lmr:             u64,
+	lmr_research:    u64,
+	pvs_research:    u64,
+}
+
+search_counter_snapshot :: proc() -> SearchCounterSnapshot {
+	return SearchCounterSnapshot {
+		qnodes          = stat_load(&search_stats.qnodes),
+		tt_cutoffs      = stat_load(&search_stats.tt_cutoffs),
+		lmp             = stat_load(&search_stats.lmp_prunes),
+		futility        = stat_load(&search_stats.futility_prunes),
+		nmp_cutoffs     = stat_load(&search_stats.nmp_cutoffs),
+		rfp             = stat_load(&search_stats.rfp_cutoffs),
+		razor_cutoffs   = stat_load(&search_stats.razor_cutoffs),
+		probcut_cutoffs = stat_load(&search_stats.probcut_cutoffs),
+		lmr             = stat_load(&search_stats.lmr_searches),
+		lmr_research    = stat_load(&search_stats.lmr_researches),
+		pvs_research    = stat_load(&search_stats.pvs_researches),
+	}
+}
+
+run_continuation_div_root_pass :: proc(
+	result: ^ContinuationDivTraceResult,
+	st: ^SearchThread,
+	b: ^board.Board,
+	move_list: ^moves.MoveList,
+	depth: int,
+	alpha: int,
+	beta: int,
+	phase: string,
+) {
+	result.root_alpha = alpha
+	result.root_beta = beta
+	result.phase = phase
+	result.count = 0
+	result.best_move = moves.Move{}
+	result.best_score = -eval.INF
+
+	current_alpha := alpha
+	legal_moves := 0
+
+	for i in 0 ..< move_list.count {
+		move := move_list.moves[i]
+		if !board.is_castling_legal_now(b, move) {
+			continue
+		}
+
+		state: board.StateInfo
+		board.make_move_fast(b, move, &state)
+		king_sq := board.get_king_square(b, 1 - b.side)
+		if board.is_square_attacked(b, king_sq, b.side) {
+			board.unmake_move(b, &state)
+			continue
+		}
+
+		nnue.update_accumulators(&state, b, move)
+
+		alpha_before := current_alpha
+		nodes_before := st.nodes
+		counters_before := search_counter_snapshot()
+		child_pv: PV_Line
+		score := -negamax(
+			st,
+			b,
+			-beta,
+			-current_alpha,
+			depth - 1,
+			1,
+			&child_pv,
+		)
+		counters_after := search_counter_snapshot()
+		nodes := st.nodes - nodes_before
+		board.unmake_move(b, &state)
+
+		if legal_moves < len(result.entries) {
+			result.entries[legal_moves] = ContinuationDivTraceEntry {
+				move             = move,
+				index            = legal_moves + 1,
+				score            = score,
+				alpha_before     = alpha_before,
+				nodes            = nodes,
+				qnodes           = counters_after.qnodes - counters_before.qnodes,
+				tt_cutoffs       = counters_after.tt_cutoffs - counters_before.tt_cutoffs,
+				lmp              = counters_after.lmp - counters_before.lmp,
+				futility         = counters_after.futility - counters_before.futility,
+				nmp_cutoffs      = counters_after.nmp_cutoffs - counters_before.nmp_cutoffs,
+				rfp              = counters_after.rfp - counters_before.rfp,
+				razor_cutoffs    = counters_after.razor_cutoffs - counters_before.razor_cutoffs,
+				probcut_cutoffs  = counters_after.probcut_cutoffs - counters_before.probcut_cutoffs,
+				lmr              = counters_after.lmr - counters_before.lmr,
+				lmr_research     = counters_after.lmr_research - counters_before.lmr_research,
+				pvs_research     = counters_after.pvs_research - counters_before.pvs_research,
+			}
+			result.count += 1
+		}
+
+		if score > result.best_score {
+			result.best_score = score
+			result.best_move = move
+		}
+
+		if score > current_alpha {
+			current_alpha = score
+		}
+		legal_moves += 1
+	}
+}
+
+collect_continuation_div_trace :: proc(fen: string, depth: int, divisor: int) -> ContinuationDivTraceResult {
+	result := ContinuationDivTraceResult{divisor = divisor}
+	params.continuation_score_div = divisor
+	clear_tt()
+
+	root_board := board.parse_fen(fen)
+	b := root_board
+	refresh_trace_accumulators(&b)
+
+	st: SearchThread
+	init_search_thread(&st, 0)
+	defer free(st.continuation_history)
+
+	reset_search_control()
+	sync.atomic_store(&total_nodes, 0)
+	st.nodes = 0
+
+	if depth > 1 {
+		search_position(&st, &b, depth - 1, 1, output_bestmove = false)
+		result.warmup_best = last_completed_best_move
+		result.warmup_score = last_completed_best_score
+		result.warmup_depth = last_completed_depth
+		reset_search_control()
+		b = root_board
+		refresh_trace_accumulators(&b)
+	}
+
+	result.root_alpha = -eval.INF
+	result.root_beta = eval.INF
+	if depth >= 4 {
+		result.root_alpha = result.warmup_score - params.aspiration_window
+		result.root_beta = result.warmup_score + params.aspiration_window
+	}
+	result.initial_alpha = result.root_alpha
+	result.initial_beta = result.root_beta
+
+	move_list: moves.MoveList
+	board.generate_all_moves(&b, &move_list)
+	root_tt_move := result.warmup_best
+	if moves.is_empty_move(root_tt_move) {
+		root_tt_move = get_tt_move(b.hash)
+	}
+	sort_moves(&st, &move_list, &b, root_tt_move, 0, moves.Move{})
+
+	prev_stats_enabled := search_stats_enabled
+	prev_options := search_debug_options
+	search_debug_options = SearchDebugOptions{}
+	search_stats_enabled = true
+	reset_search_stats()
+
+	run_continuation_div_root_pass(&result, &st, &b, &move_list, depth, result.root_alpha, result.root_beta, "initial")
+	if result.best_score <= result.root_alpha {
+		reset_search_stats()
+		run_continuation_div_root_pass(&result, &st, &b, &move_list, depth, -eval.INF, result.root_beta, "fail_low_research")
+	} else if result.best_score >= result.root_beta {
+		reset_search_stats()
+		run_continuation_div_root_pass(&result, &st, &b, &move_list, depth, result.root_alpha, eval.INF, "fail_high_research")
+	}
+
+	result.total_nodes = st.nodes
+	search_stats_enabled = prev_stats_enabled
+	search_debug_options = prev_options
+
+	return result
+}
+
+find_continuation_div_entry :: proc(result: ^ContinuationDivTraceResult, move: moves.Move) -> int {
+	for i in 0 ..< result.count {
+		if same_move(result.entries[i].move, move) {
+			return i
+		}
+	}
+	return -1
+}
+
+print_continuation_div_summary :: proc(result: ^ContinuationDivTraceResult) {
+	fmt.printf(
+		"div=%d warmup_depth=%d warmup_score=%d initial_window=[%d,%d] phase=%s root_window=[%d,%d] best_score=%d total_nodes=%d warmup_best=",
+		result.divisor,
+		result.warmup_depth,
+		result.warmup_score,
+		result.initial_alpha,
+		result.initial_beta,
+		result.phase,
+		result.root_alpha,
+		result.root_beta,
+		result.best_score,
+		result.total_nodes,
+	)
+	if !moves.is_empty_move(result.warmup_best) {
+		board.print_move(result.warmup_best)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" best=")
+	if !moves.is_empty_move(result.best_move) {
+		board.print_move(result.best_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	status := "inside"
+	if result.best_score <= result.root_alpha {
+		status = "fail_low"
+	} else if result.best_score >= result.root_beta {
+		status = "fail_high"
+	}
+	fmt.printf(" aspiration=%s root_children=%d\n", status, result.count)
+}
+
+print_continuation_div_entry :: proc(prefix: string, entry: ^ContinuationDivTraceEntry) {
+	fmt.printf(
+		"%sidx=%d move=",
+		prefix,
+		entry.index,
+	)
+	board.print_move(entry.move)
+	fmt.printf(
+		" score=%d alpha=%d nodes=%d q=%d tt=%d lmp=%d fut=%d nmp=%d rfp=%d razor=%d probcut=%d lmr=%d/%d pvs=%d",
+		entry.score,
+		entry.alpha_before,
+		entry.nodes,
+		entry.qnodes,
+		entry.tt_cutoffs,
+		entry.lmp,
+		entry.futility,
+		entry.nmp_cutoffs,
+		entry.rfp,
+		entry.razor_cutoffs,
+		entry.probcut_cutoffs,
+		entry.lmr,
+		entry.lmr_research,
+		entry.pvs_research,
+	)
+}
+
+trace_continuation_divergence :: proc(fen: string, depth: int, div_a: int, div_b: int) {
+	if depth < 1 {
+		fmt.println("Continuation divergence trace FAILED: depth must be at least 1")
+		return
+	}
+	if div_a <= 0 || div_b <= 0 {
+		fmt.println("Continuation divergence trace FAILED: divisors must be positive")
+		return
+	}
+
+	original_div := params.continuation_score_div
+	result_a := collect_continuation_div_trace(fen, depth, div_a)
+	result_b := collect_continuation_div_trace(fen, depth, div_b)
+	params.continuation_score_div = original_div
+
+	fmt.printf("Continuation divergence trace depth=%d div_a=%d div_b=%d fen=%s\n", depth, div_a, div_b, fen)
+	print_continuation_div_summary(&result_a)
+	print_continuation_div_summary(&result_b)
+	if result_a.phase != result_b.phase {
+		fmt.printf("phase_divergence div%d=%s div%d=%s\n", div_a, result_a.phase, div_b, result_b.phase)
+	}
+
+	first_index_divergence := -1
+	first_score_divergence := -1
+	limit := result_a.count
+	if result_b.count < limit {
+		limit = result_b.count
+	}
+
+	for i in 0 ..< limit {
+		a := &result_a.entries[i]
+		b := &result_b.entries[i]
+		if first_index_divergence == -1 {
+			if !same_move(a.move, b.move) || a.score != b.score {
+				first_index_divergence = i
+			}
+		}
+		if first_score_divergence == -1 {
+			j := find_continuation_div_entry(&result_b, a.move)
+			if j >= 0 && result_b.entries[j].score != a.score {
+				first_score_divergence = i
+			}
+		}
+	}
+
+	if first_index_divergence >= 0 {
+		a := &result_a.entries[first_index_divergence]
+		b := &result_b.entries[first_index_divergence]
+		fmt.printf("first_index_divergence idx=%d div%d=", first_index_divergence + 1, div_a)
+		board.print_move(a.move)
+		fmt.printf(" score=%d div%d=", a.score, div_b)
+		board.print_move(b.move)
+		fmt.printf(" score=%d\n", b.score)
+	} else if result_a.count != result_b.count {
+		fmt.printf("first_index_divergence count div%d=%d div%d=%d\n", div_a, result_a.count, div_b, result_b.count)
+	} else {
+		fmt.println("first_index_divergence none")
+	}
+
+	if first_score_divergence >= 0 {
+		a := &result_a.entries[first_score_divergence]
+		j := find_continuation_div_entry(&result_b, a.move)
+		b := &result_b.entries[j]
+		fmt.printf("first_score_divergence move=")
+		board.print_move(a.move)
+		fmt.printf(
+			" div%d_idx=%d score=%d div%d_idx=%d score=%d delta=%d\n",
+			div_a,
+			a.index,
+			a.score,
+			div_b,
+			b.index,
+			b.score,
+			b.score - a.score,
+		)
+	} else {
+		fmt.println("first_score_divergence none")
+	}
+
+	fmt.println("idx divA(move score alpha nodes q tt lmp fut nmp rfp razor probcut lmr/re pvs) | divB(move score alpha nodes q tt lmp fut nmp rfp razor probcut lmr/re pvs) note")
+	for i in 0 ..< limit {
+		a := &result_a.entries[i]
+		b := &result_b.entries[i]
+		note := "same"
+		if !same_move(a.move, b.move) {
+			note = "ORDER"
+		} else if a.score != b.score {
+			note = "SCORE"
+		} else if a.nodes != b.nodes {
+			note = "NODES"
+		}
+
+		fmt.printf("%2d ", i + 1)
+		print_continuation_div_entry("", a)
+		fmt.printf(" | ")
+		print_continuation_div_entry("", b)
+		fmt.printf(" note=%s\n", note)
+	}
 }
 
 trace_root_child_diagnostics :: proc(fen: string, depth: int, target_move_text: string) {

@@ -307,6 +307,55 @@ or too small to alter ordering even at `/8`. The next likely culprit is dynamic
 search feedback deeper in the root child search: a small continuation divisor
 change may alter a later cutoff, which then changes the returned root score.
 
+## Diagnostic: Continuation Divisor Divergence Trace
+
+Candidate: `./mantis_cont_diverge`
+
+Change: add `trace-continuation-divergence <depth> [div_a div_b] fen "<FEN>"`.
+The command defaults to `/14` vs `/12`, runs both divisors from clean TT state,
+uses the normal depth-1 warmup, follows the root aspiration re-search path, and
+prints the first root child whose phase, move order, score, or node counters
+diverge. The trace also refreshes NNUE accumulators after restoring the root
+board from the warmup snapshot, fixing a diagnostic-only trace accuracy bug.
+
+Result: accepted as a diagnostic checkpoint.
+
+| Compare | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 vs `mantis_cont_line_trace` | 0/44 | 0 cp | +0.00% |
+| depth 7 vs `mantis_cont_line_trace` | 0/44 | 0 cp | +0.00% |
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_cont_diverge` | Passed |
+| `python3 correctness_test.py --binary ./mantis_cont_diverge` | Passed |
+| `./mantis_cont_diverge validate-qcaptures 4` | Passed |
+
+Sensitive FEN, depth 7:
+
+```text
+r1bqkbnr/pp1ppppp/2n5/1Bp5/4P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3
+```
+
+The rejected `/12` flip is now explained as an aspiration-phase fork, not a
+visible first-ply continuation-ordering bump:
+
+```text
+div=14 phase=fail_low_research best=g1f3 best_score=84
+div=12 phase=initial best=b1c3 best_score=40
+phase_divergence div14=fail_low_research div12=initial
+first_score_divergence move=g1f3 div14_idx=1 score=84 div12_idx=1 score=35 delta=-49
+```
+
+Interpretation: `/14` fails low in the initial aspiration pass, then re-searches
+with a wide lower bound and recovers `g1f3`. `/12` changes the dynamic search
+just enough that `b1c3` raises alpha during the initial aspiration pass, so the
+root never performs the fail-low re-search that would have recovered the better
+move. This makes further continuation-history amplification unsafe until root
+aspiration/PVS behavior is made more robust.
+
 ## Rejected: Aggressive Continuation-History Divisors
 
 Candidates: `./mantis_cont_div8`, `./mantis_cont_div12`
@@ -389,8 +438,8 @@ without globally weakening existing maluses.
 
 Future work:
 
-- Add a targeted root-child comparison that can run the sensitive FEN under
-  `/14` and `/12` inside trace mode and report where the root child score
-  first diverges.
+- Add a root aspiration/PVS trace that prints initial-pass and re-search scores
+  side-by-side for each root child, then harden the root so a shallow alpha
+  raise cannot suppress a necessary fail-low recovery.
 - Measure root quiet candidates with `trace-order` before changing history
   weights again.

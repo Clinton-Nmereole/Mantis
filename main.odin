@@ -218,6 +218,39 @@ main :: proc() {
 		}
 	}
 
+	if len(args) >= 3 && args[1] == "trace-continuation-divergence" {
+		depth, ok := strconv.parse_int(args[2])
+		if ok && depth >= 1 {
+			div_a := 14
+			div_b := 12
+			fen_arg := 3
+			if len(args) >= 5 && args[3] != "fen" {
+				parsed_a, ok_a := strconv.parse_int(args[3])
+				parsed_b, ok_b := strconv.parse_int(args[4])
+				if ok_a && ok_b {
+					div_a = parsed_a
+					div_b = parsed_b
+					fen_arg = 5
+				}
+			}
+
+			init_cli_search_runtime()
+			fen := START_FEN
+			fen_alloc := ""
+			if len(args) >= fen_arg + 2 && args[fen_arg] == "fen" {
+				if len(args) == fen_arg + 2 {
+					fen = args[fen_arg + 1]
+				} else {
+					fen_alloc = strings.join(args[fen_arg + 1:], " ")
+					defer delete(fen_alloc)
+					fen = fen_alloc
+				}
+			}
+			search.trace_continuation_divergence(fen, depth, div_a, div_b)
+			return
+		}
+	}
+
 	if len(args) >= 3 && args[1] == "perft" {
 		depth, ok := strconv.parse_int(args[2])
 		if ok && depth >= 1 {
