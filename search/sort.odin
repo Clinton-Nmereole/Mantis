@@ -153,7 +153,20 @@ score_move :: proc(
 		// 4. History score (for non-killer quiet moves)
 		hist := get_history_score(st, move)
 		if !moves.is_empty_move(prev_move) {
-			hist += get_continuation_score(st, prev_move, move) / 16
+			cont_score := get_continuation_score(st, prev_move, move) / 16
+			stat_add(&search_stats.continuation_score_probes)
+			if cont_score != 0 {
+				stat_add(&search_stats.continuation_score_nonzero)
+				abs_cont_score := cont_score
+				if cont_score > 0 {
+					stat_add(&search_stats.continuation_score_positive)
+				} else {
+					stat_add(&search_stats.continuation_score_negative)
+					abs_cont_score = -abs_cont_score
+				}
+				stat_add(&search_stats.continuation_score_abs_sum, u64(abs_cont_score))
+			}
+			hist += cont_score
 		}
 
 		// Opening priority: prefer center pawn pushes at root only.

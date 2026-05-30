@@ -164,6 +164,11 @@ SearchStats :: struct {
 	capture_history_maluses: u64,
 	continuation_updates: u64,
 	continuation_maluses: u64,
+	continuation_score_probes: u64,
+	continuation_score_nonzero: u64,
+	continuation_score_positive: u64,
+	continuation_score_negative: u64,
+	continuation_score_abs_sum: u64,
 	aspiration_fail_low:  u64,
 	aspiration_fail_high: u64,
 }
@@ -299,6 +304,14 @@ print_search_stats :: proc() {
 		stat_load(&search_stats.pvs_researches),
 		stat_load(&search_stats.aspiration_fail_low),
 		stat_load(&search_stats.aspiration_fail_high),
+	)
+	fmt.printf(
+		"info string stats continuation cont_score_probes=%d cont_score_nonzero=%d cont_score_positive=%d cont_score_negative=%d cont_score_abs_sum=%d\n",
+		stat_load(&search_stats.continuation_score_probes),
+		stat_load(&search_stats.continuation_score_nonzero),
+		stat_load(&search_stats.continuation_score_positive),
+		stat_load(&search_stats.continuation_score_negative),
+		stat_load(&search_stats.continuation_score_abs_sum),
 	)
 	os.flush(os.stdout)
 }

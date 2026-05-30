@@ -74,6 +74,49 @@ mantis_movetime_fill vs mantis_capture_gravity depth 6:
 bestmove_changes=1/44, changed opening move b1c3 -> g1f3
 ```
 
+## Accepted: Continuation-History Score Diagnostics
+
+Candidate: `./mantis_cont_stats`
+
+Change: add behavior-neutral search stats for continuation-history score
+influence during quiet move ordering. The engine now reports continuation-score
+probe count, nonzero count, sign split, and absolute score sum. The benchmark
+harness summarizes those fields.
+
+Result: accepted as a diagnostic checkpoint.
+
+| Compare | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 vs `mantis_capture_gravity` | 0/44 | 0 cp | +0.00% |
+| depth 7 vs `mantis_capture_gravity` | 0/44 | 0 cp | +0.00% |
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_cont_stats` | Passed |
+| `python3 correctness_test.py --binary ./mantis_cont_stats` | Passed |
+| `./mantis_cont_stats validate-qcaptures 4` | Passed |
+
+Sample depth-6 benchmark over the first 8 positions:
+
+```text
+cont_updates:             1677
+cont_maluses:             1742
+cont_score_probes:      144135
+cont_score_nonzero:        163
+cont_score_nonzero_pct:    0.1
+cont_score_pos_pct:       80.4
+cont_score_neg_pct:       19.6
+cont_score_avg_abs:        2.0
+```
+
+The current continuation-history score barely influences ordering in this
+opening-heavy sample: only 0.1% of quiet scoring probes saw a nonzero
+continuation contribution after scaling. Do not retune continuation history
+yet; next step is to measure where the table is written versus where it is
+queried, because the update path is active while the read path is mostly cold.
+
 ## Rejected: Symmetric Per-Depth Aging
 
 Change tested: call `age_history(st)` after every fully completed iterative
@@ -137,5 +180,6 @@ without globally weakening existing maluses.
 
 Future work:
 
-- Consider continuation-history gravity only after more measurement.
+- Measure continuation-history write/read alignment before changing update
+  weights.
 - Measure root quiet candidates with `trace-order` before changing history.
