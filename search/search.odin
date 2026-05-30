@@ -1329,6 +1329,22 @@ clear_killers :: proc(st: ^SearchThread) {
 	}
 }
 
+history_gravity_update :: proc(current: int, bonus: int) -> int {
+	abs_bonus := bonus
+	if abs_bonus < 0 {
+		abs_bonus = -abs_bonus
+	}
+
+	updated := current + bonus - current * abs_bonus / params.history_max
+	if updated > params.history_max {
+		return params.history_max
+	}
+	if updated < params.history_min {
+		return params.history_min
+	}
+	return updated
+}
+
 // Update history with result (positive for cutoffs, negative for fails)
 update_history :: proc(st: ^SearchThread, move: moves.Move, depth: int, good: bool) {
 	// Bonus based on depth (deeper searches = more important)
@@ -1337,15 +1353,8 @@ update_history :: proc(st: ^SearchThread, move: moves.Move, depth: int, good: bo
 		bonus = -bonus // Penalize moves that don't cause cutoffs
 	}
 
-	st.history_table[move.piece][move.target] += bonus
-
-	// Cap to prevent overflow
-	if st.history_table[move.piece][move.target] > params.history_max {
-		st.history_table[move.piece][move.target] = params.history_max
-	}
-	if st.history_table[move.piece][move.target] < params.history_min {
-		st.history_table[move.piece][move.target] = params.history_min
-	}
+	current := st.history_table[move.piece][move.target]
+	st.history_table[move.piece][move.target] = history_gravity_update(current, bonus)
 }
 
 // Age history scores (called periodically to decay old information)

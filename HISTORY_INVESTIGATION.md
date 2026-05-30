@@ -8,6 +8,42 @@ The target was stale or overgrown quiet-history ordering. Mantis already has a
 configured `age_history` helper using `history_decay_numer/history_decay_denom`
 (`9/10`), but it was intentionally not called after these tests.
 
+## Accepted: Gravity Quiet-History Update
+
+Candidate: `./mantis_history_gravity`
+
+Change: replace raw additive quiet-history updates with a gravity-style update:
+
+```text
+history += bonus - history * abs(bonus) / history_max
+```
+
+This keeps the sign and direction of each bonus/malus, but naturally reduces
+the effect as an entry approaches saturation. Capture history and continuation
+history were left unchanged in this pass.
+
+Result: accepted.
+
+| Compare | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 vs `mantis_order_scaled` | 0/44 | 0 cp | +0.00% |
+| depth 7 vs `mantis_order_scaled` | 0/44 | 0 cp | -0.00% |
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_history_gravity` | Passed |
+| `python3 correctness_test.py --binary ./mantis_history_gravity` | Passed |
+| `./mantis_history_gravity validate-qcaptures 4` | Passed |
+
+The previously dangerous benchmark no longer revives `a2a3`:
+
+```text
+r3kb1r/pppb1ppp/2np4/4p3/1PP1P3/5N2/PB3PPP/RN1QKB1R w KQkq - 2 9
+trace-order depth 6: d1d2 remains TT/root best, a2a3 total=-1128
+```
+
 ## Rejected: Symmetric Per-Depth Aging
 
 Change tested: call `age_history(st)` after every fully completed iterative
@@ -65,9 +101,12 @@ g1f3 -> a2a4, score_delta=-45
 Do not enable blunt quiet-history aging.
 
 The current history table is not merely stale noise; its negative maluses are
-compensating for weaknesses in root/opening ordering. Future work should focus
-on the history update formula itself rather than decaying the whole table:
+compensating for weaknesses in root/opening ordering. Gravity-style updates are
+safe for quiet history because they reduce saturation pressure during updates
+without globally weakening existing maluses.
 
-- Use a gravity-style update that scales bonus by existing magnitude.
-- Track separate quiet malus quality instead of weakening maluses over time.
+Future work:
+
+- Test the same gravity formula for capture history.
+- Consider continuation-history gravity only after capture history is stable.
 - Measure root quiet candidates with `trace-order` before changing history.
