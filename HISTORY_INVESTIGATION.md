@@ -202,6 +202,59 @@ cont_store_visible:          619
 This is intentionally small: the sample increases visible continuation scores
 from 163 to 207 without changing benchmark best moves or scores at depths 6/7.
 
+## Diagnostic: Child Continuation-Ordering Trace
+
+Candidate: `./mantis_cont_trace`
+
+Change: add `trace-continuation <depth> <rootmove> fen "<FEN>"`. The command
+warms the search to `depth - 1`, restores a clean root board, makes the chosen
+root move, then prints child move ordering with raw continuation score and
+hypothetical `/16`, `/14`, `/12`, and `/8` totals.
+
+Result: accepted as a diagnostic checkpoint.
+
+| Compare | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 vs `mantis_cont_div14` | 0/44 | 0 cp | +0.00% |
+| depth 7 vs `mantis_cont_div14` | 0/44 | 0 cp | +0.00% |
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_cont_trace` | Passed |
+| `python3 correctness_test.py --binary ./mantis_cont_trace` | Passed |
+| `./mantis_cont_trace validate-qcaptures 4` | Passed |
+
+Sensitive FEN:
+
+```text
+r1bqkbnr/pp1ppppp/2n5/1Bp5/4P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3
+```
+
+Root trace after depth-6 warmup still prefers `g1f3`; `b1c3` is nearby only
+because both receive the same root opening bias:
+
+```text
+g1f3 total=20000 tag=tt
+b1c3 total=339 hist=-11 opening=350
+```
+
+First child trace does not explain the rejected `/12` flip:
+
+```text
+after g1f3: g8f6 tag=tt/counter raw_cont=136 cont_used=false
+after g1f3: e7e6 raw_cont=27 total14=400 total12=401 total8=402
+after b1c3: c6d4 tag=counter raw_cont=28 cont_used=false
+after b1c3: e7e6 raw_cont=-2 total14=399 total12=399 total8=399
+```
+
+Conclusion: the dangerous `/12` and `/8` changes are not caused by the first
+child ply's ordinary quiet ordering. The high-impact continuation entries at
+that ply are masked by TT/counter/killer stages, and the remaining quiet
+continuation deltas are only a few ordering points. The instability is likely
+deeper in the tree, after the TT/counter move is made.
+
 ## Rejected: Aggressive Continuation-History Divisors
 
 Candidates: `./mantis_cont_div8`, `./mantis_cont_div12`
@@ -284,7 +337,7 @@ without globally weakening existing maluses.
 
 Future work:
 
-- Trace continuation-history ordering on the sensitive opening FEN before any
-  further amplification.
+- Add a deeper continuation-line trace that follows the root move plus the
+  TT/counter reply before printing the next quiet ordering layer.
 - Measure root quiet candidates with `trace-order` before changing history
   weights again.

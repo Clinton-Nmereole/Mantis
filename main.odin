@@ -111,6 +111,7 @@ main :: proc() {
 	if len(args) >= 3 && args[1] == "trace-root" {
 		depth, ok := strconv.parse_int(args[2])
 		if ok && depth >= 1 {
+			init_cli_search_runtime()
 			fen := START_FEN
 			fen_alloc := ""
 			if len(args) >= 5 && args[3] == "fen" {
@@ -122,7 +123,6 @@ main :: proc() {
 					fen = fen_alloc
 				}
 			}
-			init_cli_search_runtime()
 			search.trace_root_move_scores(fen, depth)
 			return
 		}
@@ -131,6 +131,7 @@ main :: proc() {
 	if len(args) >= 3 && args[1] == "trace-order" {
 		depth, ok := strconv.parse_int(args[2])
 		if ok && depth >= 1 {
+			init_cli_search_runtime()
 			fen := START_FEN
 			fen_alloc := ""
 			if len(args) >= 5 && args[3] == "fen" {
@@ -142,7 +143,6 @@ main :: proc() {
 					fen = fen_alloc
 				}
 			}
-			init_cli_search_runtime()
 			search.trace_root_order_scores(fen, depth)
 			return
 		}
@@ -152,6 +152,7 @@ main :: proc() {
 		depth, ok := strconv.parse_int(args[2])
 		if ok && depth >= 1 {
 			target_move := args[3]
+			init_cli_search_runtime()
 			fen := START_FEN
 			fen_alloc := ""
 			if len(args) >= 6 && args[4] == "fen" {
@@ -163,8 +164,28 @@ main :: proc() {
 					fen = fen_alloc
 				}
 			}
-			init_cli_search_runtime()
 			search.trace_root_child_diagnostics(fen, depth, target_move)
+			return
+		}
+	}
+
+	if len(args) >= 4 && args[1] == "trace-continuation" {
+		depth, ok := strconv.parse_int(args[2])
+		if ok && depth >= 1 {
+			root_move := args[3]
+			init_cli_search_runtime()
+			fen := START_FEN
+			fen_alloc := ""
+			if len(args) >= 6 && args[4] == "fen" {
+				if len(args) == 6 {
+					fen = args[5]
+				} else {
+					fen_alloc = strings.join(args[5:], " ")
+					defer delete(fen_alloc)
+					fen = fen_alloc
+				}
+			}
+			search.trace_child_continuation_order_scores(fen, depth, root_move)
 			return
 		}
 	}
