@@ -255,6 +255,58 @@ that ply are masked by TT/counter/killer stages, and the remaining quiet
 continuation deltas are only a few ordering points. The instability is likely
 deeper in the tree, after the TT/counter move is made.
 
+## Diagnostic: Deeper Continuation-Line Trace
+
+Candidate: `./mantis_cont_line_trace`
+
+Change: add `trace-continuation-line <depth> <rootmove> [reply] fen "<FEN>"`.
+The command warms the search to `depth - 1`, follows the selected root move,
+then follows either the child TT move, child counter move, first sorted legal
+move, or an explicit reply. It then prints the next ordering layer with raw
+continuation score and hypothetical `/16`, `/14`, `/12`, and `/8` totals.
+
+Result: accepted as a diagnostic checkpoint.
+
+| Compare | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 vs `mantis_cont_trace` | 0/44 | 0 cp | +0.00% |
+| depth 7 vs `mantis_cont_trace` | 0/44 | 0 cp | +0.00% |
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_cont_line_trace` | Passed |
+| `python3 correctness_test.py --binary ./mantis_cont_line_trace` | Passed |
+| `./mantis_cont_line_trace validate-qcaptures 4` | Passed |
+
+Sensitive FEN, depth 7, after depth-6 warmup:
+
+```text
+g1f3 -> g8f6: next_tt=b5c6, next_counter=e4e5
+b1c3 -> g8f6: next_tt=b5c6, next_counter=e4e5
+b1c3 -> c6d4: explicit counter branch
+```
+
+The deeper ordering layer still does not explain the rejected `/12` flip:
+
+```text
+g1f3 g8f6: e4e5 tag=counter raw_cont=6 cont_used=false
+g1f3 g8f6: f3d4 raw_cont=-1 total16=136 total14=136 total12=136 total8=136
+
+b1c3 g8f6: e4e5 tag=counter raw_cont=6 cont_used=false
+b1c3 g8f6: c3d5 raw_cont=0 total16=97 total14=97 total12=97 total8=97
+
+b1c3 c6d4: quiet layer raw_cont=0 for all listed non-killer quiets
+```
+
+Conclusion: the sensitive `/12` instability is probably not a simple local
+continuation-ordering bump on the first two plies. The visible continuation
+signal along the natural TT line is either masked by TT/counter/killer stages
+or too small to alter ordering even at `/8`. The next likely culprit is dynamic
+search feedback deeper in the root child search: a small continuation divisor
+change may alter a later cutoff, which then changes the returned root score.
+
 ## Rejected: Aggressive Continuation-History Divisors
 
 Candidates: `./mantis_cont_div8`, `./mantis_cont_div12`
@@ -337,7 +389,8 @@ without globally weakening existing maluses.
 
 Future work:
 
-- Add a deeper continuation-line trace that follows the root move plus the
-  TT/counter reply before printing the next quiet ordering layer.
+- Add a targeted root-child comparison that can run the sensitive FEN under
+  `/14` and `/12` inside trace mode and report where the root child score
+  first diverges.
 - Measure root quiet candidates with `trace-order` before changing history
   weights again.

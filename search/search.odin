@@ -1334,6 +1334,278 @@ trace_child_continuation_order_scores :: proc(fen: string, depth: int, root_move
 	fmt.printf("summary legal=%d pseudo=%d\n", legal_moves, child_list.count)
 }
 
+trace_continuation_line_order_scores :: proc(
+	fen: string,
+	depth: int,
+	root_move_text: string,
+	reply_move_text: string,
+) {
+	if depth < 1 {
+		fmt.println("Continuation line trace FAILED: depth must be at least 1")
+		return
+	}
+
+	root_board := board.parse_fen(fen)
+	b := root_board
+	refresh_trace_accumulators(&b)
+
+	st: SearchThread
+	init_search_thread(&st, 0)
+	defer free(st.continuation_history)
+
+	reset_search_control()
+	sync.atomic_store(&total_nodes, 0)
+	st.nodes = 0
+
+	warmup_best_move: moves.Move
+	warmup_score := 0
+	warmup_depth := 0
+	if depth > 1 {
+		search_position(&st, &b, depth - 1, 1, output_bestmove = false)
+		warmup_best_move = last_completed_best_move
+		warmup_score = last_completed_best_score
+		warmup_depth = last_completed_depth
+		reset_search_control()
+		b = root_board
+	}
+
+	root_list: moves.MoveList
+	board.generate_all_moves(&b, &root_list)
+	root_move: moves.Move
+	root_found := false
+	for i in 0 ..< root_list.count {
+		move := root_list.moves[i]
+		if move_matches_uci(move, root_move_text) && trace_root_legal_move(&b, move) {
+			root_move = move
+			root_found = true
+			break
+		}
+	}
+
+	if !root_found {
+		fmt.printf("Continuation line trace FAILED: root move %s was not legal in root position\n", root_move_text)
+		return
+	}
+
+	root_state: board.StateInfo
+	if !board.make_move(&b, root_move, &root_state) {
+		fmt.printf("Continuation line trace FAILED: root move %s failed legality check\n", root_move_text)
+		return
+	}
+	defer board.unmake_move(&b, &root_state)
+
+	child_tt_move := get_tt_move(b.hash)
+	child_counter_move := get_counter_move(&st, root_move)
+	reply_move: moves.Move
+	reply_found := false
+	reply_source := "none"
+
+	child_list: moves.MoveList
+	board.generate_all_moves(&b, &child_list)
+	if len(reply_move_text) > 0 {
+		for i in 0 ..< child_list.count {
+			move := child_list.moves[i]
+			if move_matches_uci(move, reply_move_text) && trace_root_legal_move(&b, move) {
+				reply_move = move
+				reply_found = true
+				reply_source = "explicit"
+				break
+			}
+		}
+		if !reply_found {
+			fmt.printf("Continuation line trace FAILED: reply move %s was not legal after root %s\n", reply_move_text, root_move_text)
+			return
+		}
+	} else {
+		if !moves.is_empty_move(child_tt_move) {
+			for i in 0 ..< child_list.count {
+				move := child_list.moves[i]
+				if same_move(move, child_tt_move) && trace_root_legal_move(&b, move) {
+					reply_move = move
+					reply_found = true
+					reply_source = "tt"
+					break
+				}
+			}
+		}
+		if !reply_found && !moves.is_empty_move(child_counter_move) {
+			for i in 0 ..< child_list.count {
+				move := child_list.moves[i]
+				if same_move(move, child_counter_move) && trace_root_legal_move(&b, move) {
+					reply_move = move
+					reply_found = true
+					reply_source = "counter"
+					break
+				}
+			}
+		}
+		if !reply_found {
+			see_scores: [256]int
+			sort_moves(&st, &child_list, &b, child_tt_move, 1, root_move, &see_scores)
+			for i in 0 ..< child_list.count {
+				move := child_list.moves[i]
+				if trace_root_legal_move(&b, move) {
+					reply_move = move
+					reply_found = true
+					reply_source = "first"
+					break
+				}
+			}
+		}
+	}
+
+	if !reply_found {
+		fmt.printf("Continuation line trace FAILED: no legal reply found after root %s\n", root_move_text)
+		return
+	}
+
+	reply_state: board.StateInfo
+	if !board.make_move(&b, reply_move, &reply_state) {
+		fmt.printf("Continuation line trace FAILED: selected reply failed legality check\n")
+		return
+	}
+	defer board.unmake_move(&b, &reply_state)
+
+	line_tt_move := get_tt_move(b.hash)
+	line_counter_move := get_counter_move(&st, reply_move)
+	line_fen := board.get_fen(b)
+	defer delete(line_fen)
+
+	fmt.printf(
+		"Continuation line trace depth=%d warmup_depth=%d warmup_score=%d root=%s reply_source=%s active_div=%d warmup_best=",
+		depth,
+		warmup_depth,
+		warmup_score,
+		root_move_text,
+		reply_source,
+		params.continuation_score_div,
+	)
+	if !moves.is_empty_move(warmup_best_move) {
+		board.print_move(warmup_best_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" root_reply=")
+	board.print_move(reply_move)
+	fmt.printf(" child_tt=")
+	if !moves.is_empty_move(child_tt_move) {
+		board.print_move(child_tt_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" child_counter=")
+	if !moves.is_empty_move(child_counter_move) {
+		board.print_move(child_counter_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" next_tt=")
+	if !moves.is_empty_move(line_tt_move) {
+		board.print_move(line_tt_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" next_counter=")
+	if !moves.is_empty_move(line_counter_move) {
+		board.print_move(line_counter_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" line_fen=%s\n", line_fen)
+	fmt.println("idx move tag total total16 total14 total12 total8 no_cont hist raw_cont cont_active cont_used see killer tt counter capture")
+
+	line_list: moves.MoveList
+	board.generate_all_moves(&b, &line_list)
+	line_see_scores: [256]int
+	sort_moves(&st, &line_list, &b, line_tt_move, 2, reply_move, &line_see_scores)
+
+	legal_moves := 0
+	for i in 0 ..< line_list.count {
+		move := line_list.moves[i]
+		legal_state: board.StateInfo
+		if !board.make_move(&b, move, &legal_state) {
+			continue
+		}
+		board.unmake_move(&b, &legal_state)
+
+		see_score := line_see_scores[i]
+		total := score_move(&st, move, &b, line_tt_move, 2, reply_move, see_score)
+		history := 0
+		killer := 0
+		raw_cont := 0
+		active_cont := 0
+		cont_used := false
+		is_tt := same_move(move, line_tt_move)
+		is_counter := same_move(move, line_counter_move)
+
+		if !move.capture && move.promoted == -1 {
+			history = get_history_score(&st, move)
+			killer = is_killer(&st, move, 2)
+			raw_cont = get_continuation_score(&st, reply_move, move)
+			active_cont = raw_cont / params.continuation_score_div
+			cont_used = !is_tt && !is_counter && killer == 0
+		}
+
+		no_cont := total
+		total16 := total
+		total14 := total
+		total12 := total
+		total8 := total
+		if cont_used {
+			no_cont = total - active_cont
+			total16 = no_cont + raw_cont / 16
+			total14 = no_cont + raw_cont / 14
+			total12 = no_cont + raw_cont / 12
+			total8 = no_cont + raw_cont / 8
+		}
+
+		tag := "quiet"
+		if is_tt {
+			tag = "tt"
+		} else if is_counter {
+			tag = "counter"
+		} else if move.capture {
+			if see_score >= 0 {
+				tag = "good_capture"
+			} else {
+				tag = "bad_capture"
+			}
+		} else if move.promoted != -1 {
+			tag = "promotion"
+		} else if killer == 1 {
+			tag = "killer1"
+		} else if killer == 2 {
+			tag = "killer2"
+		}
+
+		fmt.printf("%2d ", legal_moves + 1)
+		board.print_move(move)
+		fmt.printf(
+			" tag=%s total=%d total16=%d total14=%d total12=%d total8=%d no_cont=%d hist=%d raw_cont=%d cont_active=%d cont_used=%v see=%d killer=%d tt=%v counter=%v capture=%v\n",
+			tag,
+			total,
+			total16,
+			total14,
+			total12,
+			total8,
+			no_cont,
+			history,
+			raw_cont,
+			active_cont,
+			cont_used,
+			see_score,
+			killer,
+			is_tt,
+			is_counter,
+			move.capture,
+		)
+
+		legal_moves += 1
+	}
+
+	fmt.printf("summary legal=%d pseudo=%d\n", legal_moves, line_list.count)
+}
+
 trace_root_child_diagnostics :: proc(fen: string, depth: int, target_move_text: string) {
 	if depth < 1 {
 		fmt.println("Root child trace FAILED: depth must be at least 1")
