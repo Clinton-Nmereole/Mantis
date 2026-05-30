@@ -424,6 +424,40 @@ Regression checks:
 This supersedes the earlier `/12` rejection below; `/8` remains rejected until
 it is retested behind the root guard.
 
+## Rejected: Continuation Divisor `/10`
+
+Candidate: `./mantis_cont_div10_guard`
+
+Change tested: set `params.continuation_score_div` from `12` to `10`.
+
+Result: rejected conservatively. The 44-position fixed-depth suite looked
+stable through depth 8, but one benchmark had a large score swing. A targeted
+deeper check on that FEN then showed best-move instability at depths 9 and 10.
+
+Target FEN:
+
+```text
+r4rk1/1pp2ppp/2p2n2/p2b4/8/3P2P1/P1P2P1P/R1B1R1K1 w - - 0 22
+```
+
+Fixed-depth suite:
+
+| Compare vs `mantis_cont_div12_guard` | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 | 0/44 | 0 cp | +0.00% |
+| depth 7 | 0/44 | 21 cp | -0.07% |
+| depth 8 | 0/44 | 225 cp | +0.04% |
+
+Targeted deeper check:
+
+| Depth | `/12` | `/10` |
+| --- | --- | --- |
+| 8 | `c1b2`, -1226 cp | `c1b2`, -1451 cp |
+| 9 | `c1b2`, -1565 cp | `c1g5`, -1404 cp |
+| 10 | `c1b2`, -1588 cp | `c1f4`, -1645 cp |
+
+Keep `/12` as the active continuation divisor for now.
+
 ## Rejected: Aggressive Continuation-History Divisors
 
 Candidates: `./mantis_cont_div8`, `./mantis_cont_div12`
@@ -506,8 +540,7 @@ without globally weakening existing maluses.
 
 Future work:
 
-- Re-test a more aggressive continuation divisor, likely `/10` before `/8`,
-  behind the root aspiration guard.
+- Stop increasing continuation-history weight for now; `/10` is unstable.
 - Add a bounded root aspiration retry loop if clipped beta-bound scores remain
   common after fail-low recovery.
 - Measure root quiet candidates with `trace-order` before changing history
