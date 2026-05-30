@@ -1759,6 +1759,8 @@ run_continuation_div_root_pass :: proc(
 		}
 		legal_moves += 1
 	}
+
+	result.total_nodes = st.nodes
 }
 
 collect_continuation_div_trace :: proc(fen: string, depth: int, divisor: int) -> ContinuationDivTraceResult {
@@ -1993,6 +1995,205 @@ trace_continuation_divergence :: proc(fen: string, depth: int, div_a: int, div_b
 		fmt.printf(" | ")
 		print_continuation_div_entry("", b)
 		fmt.printf(" note=%s\n", note)
+	}
+}
+
+trace_root_aspiration :: proc(fen: string, depth: int, divisor: int) {
+	if depth < 1 {
+		fmt.println("Root aspiration trace FAILED: depth must be at least 1")
+		return
+	}
+	if divisor <= 0 {
+		fmt.println("Root aspiration trace FAILED: divisor must be positive")
+		return
+	}
+
+	original_div := params.continuation_score_div
+	params.continuation_score_div = divisor
+	clear_tt()
+
+	root_board := board.parse_fen(fen)
+	b := root_board
+	refresh_trace_accumulators(&b)
+
+	st: SearchThread
+	init_search_thread(&st, 0)
+	defer free(st.continuation_history)
+
+	reset_search_control()
+	sync.atomic_store(&total_nodes, 0)
+	st.nodes = 0
+
+	warmup_best: moves.Move
+	warmup_score := 0
+	warmup_depth := 0
+	if depth > 1 {
+		search_position(&st, &b, depth - 1, 1, output_bestmove = false)
+		warmup_best = last_completed_best_move
+		warmup_score = last_completed_best_score
+		warmup_depth = last_completed_depth
+		reset_search_control()
+		b = root_board
+		refresh_trace_accumulators(&b)
+	}
+
+	alpha := -eval.INF
+	beta := eval.INF
+	if depth >= 4 {
+		alpha = warmup_score - params.aspiration_window
+		beta = warmup_score + params.aspiration_window
+	}
+
+	move_list: moves.MoveList
+	board.generate_all_moves(&b, &move_list)
+	root_tt_move := warmup_best
+	if moves.is_empty_move(root_tt_move) {
+		root_tt_move = get_tt_move(b.hash)
+	}
+	sort_moves(&st, &move_list, &b, root_tt_move, 0, moves.Move{})
+
+	prev_stats_enabled := search_stats_enabled
+	prev_options := search_debug_options
+	search_debug_options = SearchDebugOptions{}
+	search_stats_enabled = true
+	reset_search_stats()
+
+	initial := ContinuationDivTraceResult {
+		divisor       = divisor,
+		warmup_depth  = warmup_depth,
+		warmup_score  = warmup_score,
+		warmup_best   = warmup_best,
+		initial_alpha = alpha,
+		initial_beta  = beta,
+	}
+	run_continuation_div_root_pass(&initial, &st, &b, &move_list, depth, alpha, beta, "initial")
+
+	pv_initial_score := -eval.INF
+	pv_initial_seen := false
+	if !moves.is_empty_move(root_tt_move) {
+		pv_idx := find_continuation_div_entry(&initial, root_tt_move)
+		if pv_idx >= 0 {
+			pv_initial_seen = true
+			pv_initial_score = initial.entries[pv_idx].score
+		}
+	}
+	pv_failed_low := pv_initial_seen && pv_initial_score <= alpha
+
+	research := ContinuationDivTraceResult {
+		divisor       = divisor,
+		warmup_depth  = warmup_depth,
+		warmup_score  = warmup_score,
+		warmup_best   = warmup_best,
+		initial_alpha = alpha,
+		initial_beta  = beta,
+	}
+	research_needed := false
+	research_reason := "none"
+	if initial.best_score <= alpha {
+		research_needed = true
+		research_reason = "window_fail_low"
+		reset_search_stats()
+		run_continuation_div_root_pass(&research, &st, &b, &move_list, depth, -eval.INF, beta, "fail_low_research")
+	} else if pv_failed_low && initial.best_score < beta {
+		research_needed = true
+		research_reason = "pv_fail_low_guard"
+		reset_search_stats()
+		run_continuation_div_root_pass(&research, &st, &b, &move_list, depth, -eval.INF, beta, "fail_low_research")
+	} else if initial.best_score >= beta {
+		research_needed = true
+		research_reason = "window_fail_high"
+		reset_search_stats()
+		run_continuation_div_root_pass(&research, &st, &b, &move_list, depth, alpha, eval.INF, "fail_high_research")
+	}
+
+	search_stats_enabled = prev_stats_enabled
+	search_debug_options = prev_options
+	params.continuation_score_div = original_div
+
+	fmt.printf(
+		"Root aspiration trace depth=%d div=%d warmup_depth=%d warmup_score=%d window=[%d,%d] reason=%s fen=%s\n",
+		depth,
+		divisor,
+		warmup_depth,
+		warmup_score,
+		alpha,
+		beta,
+		research_reason,
+		fen,
+	)
+	fmt.printf("warmup_best=")
+	if !moves.is_empty_move(root_tt_move) {
+		board.print_move(root_tt_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" pv_initial_seen=%v pv_initial_score=%d pv_failed_low=%v\n", pv_initial_seen, pv_initial_score, pv_failed_low)
+	print_continuation_div_summary(&initial)
+	if research_needed {
+		print_continuation_div_summary(&research)
+	} else {
+		fmt.println("research=none")
+	}
+
+	fmt.println("idx move initial(score alpha nodes q tt lmp fut nmp rfp razor probcut lmr/re pvs) | research(score alpha nodes q tt lmp fut nmp rfp razor probcut lmr/re pvs) delta note")
+	for i in 0 ..< initial.count {
+		init_entry := &initial.entries[i]
+		fmt.printf("%2d ", i + 1)
+		board.print_move(init_entry.move)
+		fmt.printf(" initial(score=%d alpha=%d nodes=%d q=%d tt=%d lmp=%d fut=%d nmp=%d rfp=%d razor=%d probcut=%d lmr=%d/%d pvs=%d)",
+			init_entry.score,
+			init_entry.alpha_before,
+			init_entry.nodes,
+			init_entry.qnodes,
+			init_entry.tt_cutoffs,
+			init_entry.lmp,
+			init_entry.futility,
+			init_entry.nmp_cutoffs,
+			init_entry.rfp,
+			init_entry.razor_cutoffs,
+			init_entry.probcut_cutoffs,
+			init_entry.lmr,
+			init_entry.lmr_research,
+			init_entry.pvs_research,
+		)
+
+		if research_needed {
+			research_idx := find_continuation_div_entry(&research, init_entry.move)
+			if research_idx >= 0 {
+				research_entry := &research.entries[research_idx]
+				delta := research_entry.score - init_entry.score
+				note := "same"
+				if research_entry.index != init_entry.index {
+					note = "ORDER"
+				} else if delta != 0 {
+					note = "SCORE"
+				} else if research_entry.nodes != init_entry.nodes {
+					note = "NODES"
+				}
+				fmt.printf(" | research(score=%d alpha=%d nodes=%d q=%d tt=%d lmp=%d fut=%d nmp=%d rfp=%d razor=%d probcut=%d lmr=%d/%d pvs=%d) delta=%d note=%s\n",
+					research_entry.score,
+					research_entry.alpha_before,
+					research_entry.nodes,
+					research_entry.qnodes,
+					research_entry.tt_cutoffs,
+					research_entry.lmp,
+					research_entry.futility,
+					research_entry.nmp_cutoffs,
+					research_entry.rfp,
+					research_entry.razor_cutoffs,
+					research_entry.probcut_cutoffs,
+					research_entry.lmr,
+					research_entry.lmr_research,
+					research_entry.pvs_research,
+					delta,
+					note,
+				)
+			} else {
+				fmt.println(" | research(missing) delta=NA note=MISSING")
+			}
+		} else {
+			fmt.println(" | research(NA) delta=NA note=no_research")
+		}
 	}
 }
 
@@ -3399,6 +3600,8 @@ search_position :: proc(
 
 			current_alpha := alpha
 			root_pv_first_legal_counted := false
+			root_tt_initial_seen := false
+			root_tt_initial_score := -eval.INF
 
 			for i in 0 ..< move_list.count {
 				// Abort root move loop if search was stopped (time limit or external stop)
@@ -3440,6 +3643,10 @@ search_position :: proc(
 				)
 
 				board.unmake_move(b, &state)
+				if pv_index == 0 && !moves.is_empty_move(root_tt_move) && same_move(move_list.moves[i], root_tt_move) {
+					root_tt_initial_seen = true
+					root_tt_initial_score = score
+				}
 
 				if score > best_score {
 					best_score = score
@@ -3465,7 +3672,8 @@ search_position :: proc(
 				initial_best_move := current_best_move
 				initial_pv := best_pv
 
-				if best_score <= alpha {
+				root_tt_failed_low := root_tt_initial_seen && root_tt_initial_score <= alpha && best_score < beta
+				if best_score <= alpha || root_tt_failed_low {
 					aspiration_failures += 1
 					stat_add(&search_stats.aspiration_fail_low)
 					// Failed low - re-search with lower bound

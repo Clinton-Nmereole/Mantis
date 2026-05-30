@@ -356,6 +356,46 @@ root never performs the fail-low re-search that would have recovered the better
 move. This makes further continuation-history amplification unsafe until root
 aspiration/PVS behavior is made more robust.
 
+## Accepted: Root PV Fail-Low Aspiration Guard
+
+Candidate: `./mantis_root_asp_guard`
+
+Change: add `trace-root-aspiration <depth> [divisor] fen "<FEN>"` and harden
+root aspiration handling. During a root aspiration search, if the previous PV
+move itself fails low, the root now performs the fail-low recovery search even
+when a later root move barely raises alpha. This directly addresses the
+`/12` continuation-divisor failure mode where `b1c3` suppressed the recovery
+search that would have restored `g1f3`.
+
+Sensitive FEN with divisor `/12`, depth 7:
+
+```text
+reason=pv_fail_low_guard
+warmup_best=g1f3 pv_initial_score=35 pv_failed_low=true
+initial: best=b1c3 best_score=40
+fail_low_research: best=g1f3 best_score=105
+```
+
+Result: accepted. The fixed-depth suite shows small overhead and no tactical or
+correctness regression.
+
+| Compare vs `mantis_cont_diverge` | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 | 0/44 | 3 cp | +0.72% |
+| depth 7 | 1/44 | 1 cp | +1.13% |
+| depth 8 | 0/44 | 60 cp | +0.60% |
+
+The only best-move change was after `1.d4`, where Black changed from `e7e6`
+to the more classical `d7d5` at `+1 cp`.
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_root_asp_guard` | Passed |
+| `python3 correctness_test.py --binary ./mantis_root_asp_guard` | Passed |
+| `./mantis_root_asp_guard validate-qcaptures 4` | Passed |
+
 ## Rejected: Aggressive Continuation-History Divisors
 
 Candidates: `./mantis_cont_div8`, `./mantis_cont_div12`
@@ -438,8 +478,9 @@ without globally weakening existing maluses.
 
 Future work:
 
-- Add a root aspiration/PVS trace that prints initial-pass and re-search scores
-  side-by-side for each root child, then harden the root so a shallow alpha
-  raise cannot suppress a necessary fail-low recovery.
+- Re-test the `/12` continuation divisor behind the root aspiration guard before
+  considering any continuation-history amplification.
+- Add a bounded root aspiration retry loop if clipped beta-bound scores remain
+  common after fail-low recovery.
 - Measure root quiet candidates with `trace-order` before changing history
   weights again.

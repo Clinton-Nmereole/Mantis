@@ -251,6 +251,36 @@ main :: proc() {
 		}
 	}
 
+	if len(args) >= 3 && args[1] == "trace-root-aspiration" {
+		depth, ok := strconv.parse_int(args[2])
+		if ok && depth >= 1 {
+			divisor := 14
+			fen_arg := 3
+			if len(args) >= 4 && args[3] != "fen" {
+				parsed_div, div_ok := strconv.parse_int(args[3])
+				if div_ok {
+					divisor = parsed_div
+					fen_arg = 4
+				}
+			}
+
+			init_cli_search_runtime()
+			fen := START_FEN
+			fen_alloc := ""
+			if len(args) >= fen_arg + 2 && args[fen_arg] == "fen" {
+				if len(args) == fen_arg + 2 {
+					fen = args[fen_arg + 1]
+				} else {
+					fen_alloc = strings.join(args[fen_arg + 1:], " ")
+					defer delete(fen_alloc)
+					fen = fen_alloc
+				}
+			}
+			search.trace_root_aspiration(fen, depth, divisor)
+			return
+		}
+	}
+
 	if len(args) >= 3 && args[1] == "perft" {
 		depth, ok := strconv.parse_int(args[2])
 		if ok && depth >= 1 {
