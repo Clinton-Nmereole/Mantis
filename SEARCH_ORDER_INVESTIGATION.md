@@ -199,3 +199,61 @@ Depth 9 also surfaced two remaining `a2a3` best moves:
 other moves at depth 9 (`g2g3` in position 16 and `c4c5` in position 19), so
 the next target is root full-score versus normal root search divergence, not
 another root quiet-ordering tweak.
+
+## Follow-Up: Scoped Root Fail-Low Verification
+
+Candidate: `./mantis_root_verify`
+
+Change: add a final-depth-only root verification guard for the stale TT/warmup
+move case. The guard is deliberately narrow:
+
+- first PV only,
+- final requested depth only,
+- depth 9 or deeper,
+- root TT move has a negative opening-bias score,
+- the root TT move failed low during aspiration recovery,
+- recovery still kept that same TT move as best.
+
+When all of those conditions hold, Mantis restores a pre-root TT snapshot and
+runs a full-window verification pass from a cloned search thread. The verifier
+does not repeat the rejected all-move prototype. It checks the stale TT move,
+promotions, non-losing captures by SEE, and quiet moves with positive history.
+
+Rejected prototype:
+
+```text
+depth 9 all-move verifier vs mantis_asp_retry:
+bestmove_changes=2/44, nodes +33.44%, time +34.52%
+```
+
+Accepted narrower result:
+
+```text
+depth 8 vs mantis_asp_retry:
+bestmove_changes=0/44, nodes +0.00%, max_score_delta=0
+
+depth 9 vs mantis_asp_retry:
+bestmove_changes=2/44, nodes +3.63%, time +4.20%, max_score_delta=37
+16: a2a3 -> g2g3
+19: a2a3 -> c4c5
+```
+
+The target-only depth-9 benchmark now fixes both remaining `a2a3` cases:
+
+```text
+pos 16: best=g2g3, nodes=192597
+pos 19: best=c4c5, nodes=83708
+asp_verify=2
+```
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_root_verify` | Passed |
+| `python3 correctness_test.py --binary ./mantis_root_verify` | Passed |
+| `./mantis_root_verify validate-qcaptures 4` | Passed |
+
+This is still a tactical safety valve, not a broad root-PVS solution. It is
+worth keeping because it corrects the known bad opening TT cases at a small
+measured cost, while staying inactive at depth 8 and below.

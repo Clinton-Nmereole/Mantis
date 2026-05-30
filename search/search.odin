@@ -191,6 +191,7 @@ SearchStats :: struct {
 	aspiration_fail_low:  u64,
 	aspiration_fail_high: u64,
 	aspiration_retries:   u64,
+	aspiration_verifies:  u64,
 }
 
 search_stats_enabled: bool = false
@@ -311,7 +312,7 @@ print_search_stats :: proc() {
 		stat_load(&search_stats.q_see_prunes),
 	)
 	fmt.printf(
-		"info string stats search beta_cutoffs=%d quiet_beta=%d capture_beta=%d capture_hist_updates=%d capture_hist_maluses=%d cont_updates=%d cont_maluses=%d lmr=%d lmr_research=%d pvs_research=%d asp_low=%d asp_high=%d asp_retry=%d\n",
+		"info string stats search beta_cutoffs=%d quiet_beta=%d capture_beta=%d capture_hist_updates=%d capture_hist_maluses=%d cont_updates=%d cont_maluses=%d lmr=%d lmr_research=%d pvs_research=%d asp_low=%d asp_high=%d asp_retry=%d asp_verify=%d\n",
 		stat_load(&search_stats.beta_cutoffs),
 		stat_load(&search_stats.quiet_beta_cutoffs),
 		stat_load(&search_stats.capture_beta_cutoffs),
@@ -325,6 +326,7 @@ print_search_stats :: proc() {
 		stat_load(&search_stats.aspiration_fail_low),
 		stat_load(&search_stats.aspiration_fail_high),
 		stat_load(&search_stats.aspiration_retries),
+		stat_load(&search_stats.aspiration_verifies),
 	)
 	fmt.printf(
 		"info string stats continuation cont_score_probes=%d cont_raw_nonzero=%d cont_raw_positive=%d cont_raw_negative=%d cont_raw_abs_sum=%d cont_raw_under_scale=%d cont_score_nonzero=%d cont_score_positive=%d cont_score_negative=%d cont_score_abs_sum=%d\n",
@@ -3587,6 +3589,94 @@ run_root_search_pass :: proc(
 	return result
 }
 
+run_root_full_window_verification_pass :: proc(
+	st: ^SearchThread,
+	b: ^board.Board,
+	move_list: ^moves.MoveList,
+	depth: int,
+	root_tt_move: moves.Move,
+	pv_index: int,
+	root_pv_first_legal_counted: ^bool,
+) -> RootSearchPassResult {
+	result := RootSearchPassResult {
+		best_score    = -eval.INF,
+		completed     = true,
+		root_tt_score = -eval.INF,
+	}
+
+	for i in 0 ..< move_list.count {
+		if should_stop_search() {
+			result.completed = false
+			break
+		}
+
+		move := move_list.moves[i]
+		// Verify the stale TT move plus forcing/high-signal alternatives only.
+		if !same_move(move, root_tt_move) {
+			if move.promoted != -1 {
+				// Always verify promotions.
+			} else if move.capture {
+				if see_capture(b, move) < 0 {
+					continue
+				}
+			} else if get_history_score(st, move) <= 0 {
+				continue
+			}
+		}
+
+		if !board.is_castling_legal_now(b, move) {
+			continue
+		}
+
+		state: board.StateInfo
+		board.make_move_fast(b, move, &state)
+
+		king_sq := board.get_king_square(b, 1 - b.side)
+		if board.is_square_attacked(b, king_sq, b.side) {
+			board.unmake_move(b, &state)
+			stat_add(&search_stats.legal_rejects)
+			continue
+		}
+		if !root_pv_first_legal_counted^ && i == 0 && same_move(move, root_tt_move) {
+			stat_add(&search_stats.root_pv_first_legal)
+			root_pv_first_legal_counted^ = true
+		}
+
+		nnue.update_accumulators(&state, b, move)
+
+		child_pv: PV_Line
+		score := -negamax(
+			st,
+			b,
+			-eval.INF,
+			eval.INF,
+			depth - 1,
+			1,
+			&child_pv,
+		)
+
+		board.unmake_move(b, &state)
+		if pv_index == 0 && !moves.is_empty_move(root_tt_move) && same_move(move, root_tt_move) {
+			result.root_tt_seen = true
+			result.root_tt_score = score
+		}
+
+		if score > result.best_score {
+			result.best_score = score
+			result.best_move = move
+			result.found_move = true
+
+			result.best_pv.moves[0] = move
+			for i in 0 ..< child_pv.count {
+				result.best_pv.moves[i + 1] = child_pv.moves[i]
+			}
+			result.best_pv.count = child_pv.count + 1
+		}
+	}
+
+	return result
+}
+
 // Root Search
 search_position :: proc(
 	st: ^SearchThread,
@@ -3726,6 +3816,18 @@ search_position :: proc(
 				stat_add(&search_stats.root_pv_first)
 			}
 
+			verify_from_clean_root := false
+			verify_tt_snapshot: []TTBucket
+			verify_st: SearchThread
+			if current_depth == depth && current_depth >= 9 && pv_index == 0 &&
+			   !moves.is_empty_move(root_tt_move) &&
+			   root_opening_bias_score(b, root_tt_move) < 0 {
+				verify_from_clean_root = true
+				verify_tt_snapshot = snapshot_tt()
+				verify_st = clone_search_thread(st)
+				verify_st.nodes = 0
+			}
+
 			best_score := -eval.INF
 			current_best_move: moves.Move
 			found_move := false
@@ -3783,6 +3885,29 @@ search_position :: proc(
 						found_move = research_pass.found_move
 					} else {
 						depth_completed = false
+					}
+
+					if depth_completed && verify_from_clean_root && root_tt_failed_low && same_move(current_best_move, root_tt_move) {
+						stat_add(&search_stats.aspiration_verifies)
+						restore_tt(verify_tt_snapshot)
+						verify_pass := run_root_full_window_verification_pass(
+							&verify_st,
+							b,
+							&move_list,
+							current_depth,
+							root_tt_move,
+							pv_index,
+							&root_pv_first_legal_counted,
+						)
+						st.nodes += verify_st.nodes
+						if verify_pass.completed {
+							best_score = verify_pass.best_score
+							current_best_move = verify_pass.best_move
+							best_pv = verify_pass.best_pv
+							found_move = verify_pass.found_move
+						} else {
+							depth_completed = false
+						}
 					}
 
 					if depth_completed && guard_forced_fail_low && best_score >= beta {
@@ -3865,6 +3990,13 @@ search_position :: proc(
 					prev_score = contempt_score
 					best_move = current_best_move
 				}
+			}
+
+			if verify_from_clean_root {
+				if verify_st.continuation_history != nil {
+					free(verify_st.continuation_history)
+				}
+				delete(verify_tt_snapshot)
 			}
 		}
 

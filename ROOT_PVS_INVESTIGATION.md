@@ -183,3 +183,26 @@ python3 compare_candidates.py \
   --fail-on-bestmove-change \
   --fail-on-score-delta 25
 ```
+
+## Related: Root Fail-Low Verification
+
+`mantis_root_verify` does not enable root PVS, but it addresses one of the
+root-state symptoms found here: a stale previous-depth TT move can survive root
+aspiration fail-low recovery even when a clean full-window root diagnostic
+prefers another move.
+
+The accepted guard is scoped to final-depth, first-PV, depth-9-or-deeper cases
+where the TT move has negative opening bias and still remains best after a
+root-TT fail low. It restores a pre-root TT snapshot and verifies only the TT
+move plus high-signal alternatives with a full window.
+
+Result vs `mantis_asp_retry`:
+
+```text
+depth 8: 0/44 bestmove changes, +0.00% nodes
+depth 9: 2/44 bestmove changes, +3.63% nodes
+changed: a2a3 -> g2g3, a2a3 -> c4c5
+```
+
+This is a safety valve for the known bad opening TT cases, not evidence that
+root PVS is safe to re-enable.
