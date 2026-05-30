@@ -396,6 +396,34 @@ Regression checks:
 | `python3 correctness_test.py --binary ./mantis_root_asp_guard` | Passed |
 | `./mantis_root_asp_guard validate-qcaptures 4` | Passed |
 
+## Accepted: Continuation Divisor `/12` Behind Root Guard
+
+Candidate: `./mantis_cont_div12_guard`
+
+Change: set `params.continuation_score_div` from `14` to `12`. This makes
+continuation-history ordering slightly more visible now that the root PV
+fail-low guard prevents the old `g1f3 -> b1c3` aspiration failure.
+
+Result: accepted. The old sensitive FEN now keeps `g1f3`, and the fixed-depth
+suite shows no best-move changes through depth 8.
+
+| Compare vs `mantis_root_asp_guard` | Best Move Changes | Max Score Delta | Nodes |
+| --- | ---: | ---: | ---: |
+| depth 6 | 0/44 | 0 cp | -0.00% |
+| depth 7 | 0/44 | 21 cp | +0.10% |
+| depth 8 | 0/44 | 19 cp | -0.00% |
+
+Regression checks:
+
+| Test | Result |
+| --- | --- |
+| `python3 tactical_regression.py --binary ./mantis_cont_div12_guard` | Passed |
+| `python3 correctness_test.py --binary ./mantis_cont_div12_guard` | Passed |
+| `./mantis_cont_div12_guard validate-qcaptures 4` | Passed |
+
+This supersedes the earlier `/12` rejection below; `/8` remains rejected until
+it is retested behind the root guard.
+
 ## Rejected: Aggressive Continuation-History Divisors
 
 Candidates: `./mantis_cont_div8`, `./mantis_cont_div12`
@@ -478,8 +506,8 @@ without globally weakening existing maluses.
 
 Future work:
 
-- Re-test the `/12` continuation divisor behind the root aspiration guard before
-  considering any continuation-history amplification.
+- Re-test a more aggressive continuation divisor, likely `/10` before `/8`,
+  behind the root aspiration guard.
 - Add a bounded root aspiration retry loop if clipped beta-bound scores remain
   common after fail-low recovery.
 - Measure root quiet candidates with `trace-order` before changing history

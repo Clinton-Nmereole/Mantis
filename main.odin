@@ -254,7 +254,7 @@ main :: proc() {
 	if len(args) >= 3 && args[1] == "trace-root-aspiration" {
 		depth, ok := strconv.parse_int(args[2])
 		if ok && depth >= 1 {
-			divisor := 14
+			divisor := 0
 			fen_arg := 3
 			if len(args) >= 4 && args[3] != "fen" {
 				parsed_div, div_ok := strconv.parse_int(args[3])
@@ -265,6 +265,9 @@ main :: proc() {
 			}
 
 			init_cli_search_runtime()
+			if divisor == 0 {
+				divisor = search.params.continuation_score_div
+			}
 			fen := START_FEN
 			fen_alloc := ""
 			if len(args) >= fen_arg + 2 && args[fen_arg] == "fen" {

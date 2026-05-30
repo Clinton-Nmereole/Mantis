@@ -117,7 +117,7 @@ init_search_params :: proc() {
 		history_min            = -10000,
 		history_decay_numer    = 9,
 		history_decay_denom    = 10,
-		continuation_score_div = 14,
+		continuation_score_div = 12,
 		hash_move_score        = 20000,
 		counter_move_score     = 15000,
 		capture_base_score     = 10000,
