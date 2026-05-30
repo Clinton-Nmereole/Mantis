@@ -15,6 +15,31 @@ MOVE_PICKER_KILLER2_STAGE :: 4
 MOVE_PICKER_REST_STAGE :: 5
 MOVE_PICKER_DONE_STAGE :: 6
 
+root_opening_bias_score :: proc(b: ^board.Board, move: moves.Move) -> int {
+	bias := 0
+	target := move.target
+
+	if move.piece % 6 == constants.PAWN {
+		if target == 27 || target == 28 {bias += 1200} // d4, e4
+		if target == 35 || target == 36 {bias += 1200} // d5, e5
+		if target == 18 || target == 21 || target == 42 || target == 45 {bias += 450} // c3, f3, c6, f6
+		if target == 26 || target == 29 || target == 34 || target == 37 {bias += 350} // c4, f4, c5, f5
+		// Penalize early wing pawn moves that commonly waste opening tempi.
+		if target == 16 || target == 17 || target == 22 || target == 23 ||
+		   target == 24 || target == 25 || target == 30 || target == 31 ||
+		   target == 32 || target == 33 || target == 38 || target == 39 ||
+		   target == 40 || target == 41 || target == 46 || target == 47 {
+			bias -= 1200
+		}
+	} else if move.piece % 6 == constants.KNIGHT && b.fullmove_number <= 12 {
+		if target == 18 || target == 21 || target == 42 || target == 45 {bias += 350} // c3, f3, c6, f6
+		// Penalize knights on the rim.
+		if target == 16 || target == 23 || target == 40 || target == 47 {bias -= 200} // a3, h3, a6, h6
+	}
+
+	return bias
+}
+
 MovePicker :: struct {
 	move_list:       ^moves.MoveList,
 	scores:          [256]int,
@@ -128,26 +153,9 @@ score_move :: proc(
 		}
 
 		// Opening priority: prefer center pawn pushes at root only.
-		// NNUE rates all opening moves ~equal; this biases toward sound openings
-		if ply == 0 && move.piece % 6 == constants.PAWN {
-			target := move.target
-			if target == 27 || target == 28 { hist += 1200 } // d4, e4
-			if target == 35 || target == 36 { hist += 1200 } // d5, e5
-			if target == 18 || target == 21 || target == 42 || target == 45 { hist += 450 } // c3, f3, c6, f6
-			if target == 26 || target == 29 || target == 34 || target == 37 { hist += 350 } // c4, f4, c5, f5
-			// Penalize early wing pawn moves that commonly waste opening tempi.
-			if target == 16 || target == 17 || target == 22 || target == 23 ||
-			   target == 24 || target == 25 || target == 30 || target == 31 ||
-			   target == 32 || target == 33 || target == 38 || target == 39 ||
-			   target == 40 || target == 41 || target == 46 || target == 47 {
-				hist -= 1200
-			}
-		}
-		if ply == 0 && move.piece % 6 == constants.KNIGHT {
-			target := move.target
-			if target == 2 || target == 5 || target == 58 || target == 61 { hist += 350 }  // c3/f3/c6/f6
-			// Penalize knight to rim
-			if target == 0 || target == 7 || target == 56 || target == 63 { hist -= 200 }  // a3, h3, a6, h6
+		// NNUE rates all opening moves ~equal; this biases toward sound openings.
+		if ply == 0 {
+			hist += root_opening_bias_score(b, move)
 		}
 
 		return hist

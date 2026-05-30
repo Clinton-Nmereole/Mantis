@@ -925,6 +925,199 @@ trace_root_move_scores :: proc(fen: string, depth: int) {
 	fmt.printf(" best_score=%d misses=%d researches=%d\n", best_score, misses, researches)
 }
 
+trace_root_legal_move :: proc(b: ^board.Board, move: moves.Move) -> bool {
+	if !board.is_castling_legal_now(b, move) {
+		return false
+	}
+
+	state: board.StateInfo
+	board.make_move_fast(b, move, &state)
+	king_sq := board.get_king_square(b, 1 - b.side)
+	illegal := board.is_square_attacked(b, king_sq, b.side)
+	board.unmake_move(b, &state)
+
+	return !illegal
+}
+
+trace_capture_values :: proc(
+	b: ^board.Board,
+	move: moves.Move,
+) -> (
+	victim_piece: int,
+	victim_value: int,
+	attacker_value: int,
+) {
+	victim_piece = -1
+	victim_value = 0
+	attacker_value = 0
+
+	if move.piece >= 0 {
+		attacker_piece := move.piece % 6
+		attacker_value = constants.PIECE_VALUES[attacker_piece]
+	}
+
+	if !move.capture {
+		return
+	}
+
+	if move.en_passant {
+		victim_piece = constants.PAWN
+		victim_value = constants.PIECE_VALUES[constants.PAWN]
+		return
+	}
+
+	start_piece := 0
+	end_piece := 6
+	if b.side == constants.WHITE {
+		start_piece = 6
+		end_piece = 12
+	}
+
+	for i in start_piece ..< end_piece {
+		if (b.bitboards[i] & (1 << u64(move.target))) != 0 {
+			victim_piece = i % 6
+			victim_value = constants.PIECE_VALUES[victim_piece]
+			return
+		}
+	}
+
+	return
+}
+
+trace_root_order_scores :: proc(fen: string, depth: int) {
+	if depth < 1 {
+		fmt.println("Root order trace FAILED: depth must be at least 1")
+		return
+	}
+
+	b := board.parse_fen(fen)
+	refresh_trace_accumulators(&b)
+
+	st: SearchThread
+	init_search_thread(&st, 0)
+	defer free(st.continuation_history)
+
+	reset_search_control()
+	sync.atomic_store(&total_nodes, 0)
+	st.nodes = 0
+
+	warmup_best_move: moves.Move
+	warmup_score := 0
+	warmup_depth := 0
+	if depth > 1 {
+		search_position(&st, &b, depth - 1, 1, output_bestmove = false)
+		warmup_best_move = last_completed_best_move
+		warmup_score = last_completed_best_score
+		warmup_depth = last_completed_depth
+		reset_search_control()
+	}
+
+	move_list: moves.MoveList
+	board.generate_all_moves(&b, &move_list)
+	root_tt_move := warmup_best_move
+	if moves.is_empty_move(root_tt_move) {
+		root_tt_move = get_tt_move(b.hash)
+	}
+
+	see_scores: [256]int
+	sort_moves(&st, &move_list, &b, root_tt_move, 0, moves.Move{}, &see_scores)
+
+	fmt.printf("Root order trace depth=%d warmup_depth=%d warmup_score=%d warmup_best=", depth, warmup_depth, warmup_score)
+	if !moves.is_empty_move(root_tt_move) {
+		board.print_move(root_tt_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" fen=%s\n", fen)
+	fmt.println("idx move tag total see hist caphist opening killer victim attacker promo tt capture")
+
+	legal_moves := 0
+	for i in 0 ..< move_list.count {
+		move := move_list.moves[i]
+		if !trace_root_legal_move(&b, move) {
+			continue
+		}
+
+		see_score := see_scores[i]
+		total := score_move(&st, move, &b, root_tt_move, 0, moves.Move{}, see_score)
+		history := 0
+		capture_history := 0
+		opening_bias := 0
+		killer := 0
+		victim_piece, victim_value, attacker_value := trace_capture_values(&b, move)
+		promo_bonus := 0
+		if move.promoted != -1 {
+			promo_bonus = constants.PIECE_VALUES[move.promoted]
+		}
+
+		if move.capture {
+			capture_history = get_capture_history_score(&st, move)
+		} else if move.promoted == -1 {
+			killer = is_killer(&st, move, 0)
+			history = get_history_score(&st, move)
+			opening_bias = root_opening_bias_score(&b, move)
+		}
+
+		tag := "quiet"
+		if same_move(move, root_tt_move) {
+			tag = "tt"
+		} else if move.capture {
+			if see_score >= 0 {
+				tag = "good_capture"
+			} else {
+				tag = "bad_capture"
+			}
+		} else if move.promoted != -1 {
+			tag = "promotion"
+		} else {
+			if killer == 1 {
+				tag = "killer1"
+			} else if killer == 2 {
+				tag = "killer2"
+			}
+		}
+
+		fmt.printf("%2d ", legal_moves + 1)
+		board.print_move(move)
+		if move.capture {
+			fmt.printf(
+				" tag=%s total=%d see=%d hist=%d caphist=%d opening=%d killer=%d victim=%d attacker=%d promo=%d tt=%v capture=%v\n",
+				tag,
+				total,
+				see_score,
+				history,
+				capture_history,
+				opening_bias,
+				killer,
+				victim_value,
+				attacker_value,
+				promo_bonus,
+				same_move(move, root_tt_move),
+				move.capture,
+			)
+		} else {
+			fmt.printf(
+				" tag=%s total=%d see=NA hist=%d caphist=%d opening=%d killer=%d victim=%d attacker=%d promo=%d tt=%v capture=%v\n",
+				tag,
+				total,
+				history,
+				capture_history,
+				opening_bias,
+				killer,
+				victim_piece,
+				attacker_value,
+				promo_bonus,
+				same_move(move, root_tt_move),
+				move.capture,
+			)
+		}
+
+		legal_moves += 1
+	}
+
+	fmt.printf("summary legal=%d pseudo=%d\n", legal_moves, move_list.count)
+}
+
 trace_root_child_diagnostics :: proc(fen: string, depth: int, target_move_text: string) {
 	if depth < 1 {
 		fmt.println("Root child trace FAILED: depth must be at least 1")
