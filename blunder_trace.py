@@ -87,16 +87,22 @@ class UCIEngine:
             if marker in line:
                 return "".join(output)
 
-    def search_depth(self, moves_so_far: list[str], depth: int, timeout: float) -> tuple[dict[str, int | str], float]:
+    def search_go(self, moves_so_far: list[str], go_command: str, timeout: float) -> tuple[dict[str, int | str], float]:
         if moves_so_far:
             self.send("position startpos moves " + " ".join(moves_so_far))
         else:
             self.send("position startpos")
-        self.send(f"go depth {depth}")
+        self.send(go_command)
         start = time.perf_counter()
         output = self.read_until("bestmove", timeout)
         wall_ms = (time.perf_counter() - start) * 1000.0
         return stats_benchmark.parse_stats(output), wall_ms
+
+    def search_depth(self, moves_so_far: list[str], depth: int, timeout: float) -> tuple[dict[str, int | str], float]:
+        return self.search_go(moves_so_far, f"go depth {depth}", timeout)
+
+    def search_movetime(self, moves_so_far: list[str], movetime_ms: int, timeout: float) -> tuple[dict[str, int | str], float]:
+        return self.search_go(moves_so_far, f"go movetime {movetime_ms}", timeout)
 
 
 @dataclass
@@ -284,18 +290,22 @@ def run_engine_depths(
     candidates: list[BlunderCandidate],
     binary: str,
     depths: list[int],
+    movetimes_ms: list[int],
     timeout: float,
     limit: int,
 ) -> None:
     selected = candidates[:limit]
-    total = len(selected) * len(depths)
+    specs = [("depth", depth, None) for depth in depths]
+    specs.extend(("movetime", None, movetime_ms) for movetime_ms in movetimes_ms)
+    total = len(selected) * len(specs)
     done = 0
     for candidate in selected:
-        for depth in depths:
+        for spec_type, depth, movetime_ms in specs:
             done += 1
+            search_label = f"d{depth}" if depth is not None else f"{movetime_ms}ms"
             print(
                 f"[{done:>3}/{total}] round={candidate.round_name} "
-                f"ply={candidate.ply} move={candidate.uci} depth={depth}",
+                f"ply={candidate.ply} move={candidate.uci} search={search_label}",
                 flush=True,
             )
             try:
@@ -303,6 +313,7 @@ def run_engine_depths(
                     binary=binary,
                     fen=candidate.fen,
                     depth=depth,
+                    movetime_ms=movetime_ms,
                     timeout=timeout,
                     clear_hash=True,
                     staged_picker=False,
@@ -310,10 +321,12 @@ def run_engine_depths(
             except subprocess.TimeoutExpired:
                 candidate.engine_rows.append(
                     {
-                "depth": depth,
-                "search_mode": "cold",
-                "bestmove": "timeout",
-                "score_cp": "",
+                        "depth": depth if depth is not None else "",
+                        "movetime_ms": movetime_ms if movetime_ms is not None else "",
+                        "search_limit": search_label,
+                        "search_mode": "cold",
+                        "bestmove": "timeout",
+                        "score_cp": "",
                         "nodes": "",
                         "time_ms": "",
                         "wall_ms": int(timeout * 1000),
@@ -322,7 +335,9 @@ def run_engine_depths(
                 continue
 
             row = {
-                "depth": depth,
+                "depth": depth if depth is not None else stats.get("depth", ""),
+                "movetime_ms": movetime_ms if movetime_ms is not None else "",
+                "search_limit": search_label,
                 "search_mode": "cold",
                 "bestmove": stats.get("bestmove", "?"),
                 "score_cp": stats.get("score_cp", ""),
@@ -345,6 +360,7 @@ def run_stateful_replay(
     mantis_name: str,
     binary: str,
     depths: list[int],
+    movetimes_ms: list[int],
     warm_depth: int,
     timeout: float,
     limit: int,
@@ -360,6 +376,8 @@ def run_stateful_replay(
     }
     if not targets:
         return
+    specs = [("depth", depth, None) for depth in depths]
+    specs.extend(("movetime", None, movetime_ms) for movetime_ms in movetimes_ms)
 
     engine = UCIEngine(binary, timeout)
     try:
@@ -395,18 +413,25 @@ def run_stateful_replay(
 
                     if mover_color == mantis_color:
                         if target is not None:
-                            total = len(depths)
-                            for depth_index, depth in enumerate(depths, start=1):
+                            total = len(specs)
+                            for depth_index, (spec_type, depth, movetime_ms) in enumerate(specs, start=1):
+                                search_label = f"d{depth}" if depth is not None else f"{movetime_ms}ms"
                                 print(
                                     f"[stateful {depth_index:>2}/{total}] round={target.round_name} "
-                                    f"ply={target.ply} move={target.uci} depth={depth} "
+                                    f"ply={target.ply} move={target.uci} search={search_label} "
                                     f"warm_positions={searched_warm_positions}",
                                     flush=True,
                                 )
                                 try:
-                                    stats, wall_ms = engine.search_depth(moves_so_far, depth, timeout)
+                                    if depth is not None:
+                                        stats, wall_ms = engine.search_depth(moves_so_far, depth, timeout)
+                                    else:
+                                        assert movetime_ms is not None
+                                        stats, wall_ms = engine.search_movetime(moves_so_far, movetime_ms, timeout)
                                     row = {
-                                        "depth": depth,
+                                        "depth": depth if depth is not None else stats.get("depth", ""),
+                                        "movetime_ms": movetime_ms if movetime_ms is not None else "",
+                                        "search_limit": search_label,
                                         "search_mode": f"stateful-warm{warm_depth}",
                                         "bestmove": stats.get("bestmove", "?"),
                                         "score_cp": stats.get("score_cp", ""),
@@ -421,7 +446,9 @@ def run_stateful_replay(
                                     }
                                 except subprocess.TimeoutExpired:
                                     row = {
-                                        "depth": depth,
+                                        "depth": depth if depth is not None else "",
+                                        "movetime_ms": movetime_ms if movetime_ms is not None else "",
+                                        "search_limit": search_label,
                                         "search_mode": f"stateful-warm{warm_depth}",
                                         "bestmove": "timeout",
                                         "score_cp": "",
@@ -465,12 +492,12 @@ def classify(candidate: BlunderCandidate) -> str:
         return "needs search"
     last = str(rows[-1].get("bestmove"))
     if all(str(row.get("bestmove")) == candidate.uci for row in rows):
-        return "still preferred at fixed depth"
+        return "still preferred by searched limits"
     if last == candidate.uci:
-        return "returns to PGN move by max depth"
+        return "returns to PGN move by final limit"
     if any(str(row.get("bestmove")) == candidate.uci for row in rows):
         return "horizon flip"
-    return "fixed-depth avoids PGN move"
+    return "searched limits avoid PGN move"
 
 
 def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
@@ -488,7 +515,9 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
         "eval_after_mantis",
         "classification",
         "search_mode",
+        "search_limit",
         "depth",
+        "movetime_ms",
         "bestmove",
         "score_cp",
         "nodes",
@@ -516,7 +545,9 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                             "eval_after_mantis": candidate.eval_after_mantis_cp,
                             "classification": classify(candidate),
                             "search_mode": row.get("search_mode", "cold"),
+                            "search_limit": row.get("search_limit", row.get("depth", "")),
                             "depth": row.get("depth", ""),
+                            "movetime_ms": row.get("movetime_ms", ""),
                             "bestmove": row.get("bestmove", ""),
                             "score_cp": row.get("score_cp", ""),
                             "nodes": row.get("nodes", ""),
@@ -550,6 +581,7 @@ def render_markdown(
     pgn_path: Path,
     binary: str | None,
     depths: list[int],
+    movetimes_ms: list[int],
     threshold_cp: int,
     max_before_abs_cp: int | None,
     mode: str,
@@ -576,7 +608,10 @@ def render_markdown(
         )
     if binary:
         out.write(f"Binary: `{binary}`\n\n")
-        out.write(f"Depths: `{', '.join(str(depth) for depth in depths)}`\n\n")
+        depth_label = ", ".join(str(depth) for depth in depths) if depths else "none"
+        movetime_label = ", ".join(f"{value}ms" for value in movetimes_ms) if movetimes_ms else "none"
+        out.write(f"Depths: `{depth_label}`\n\n")
+        out.write(f"Movetimes: `{movetime_label}`\n\n")
     if stateful_replay:
         out.write(f"Stateful replay: `enabled`, warm depth `{warm_depth}`\n\n")
     out.write("## Summary\n\n")
@@ -613,13 +648,13 @@ def render_markdown(
         )
         out.write(f"FEN: `{candidate.fen}`\n\n")
         if candidate.engine_rows:
-            out.write("| Mode | Depth | Bestmove | Score | Nodes | Time ms | Asp low/high/retry/verify |\n")
-            out.write("| --- | ---: | --- | ---: | ---: | ---: | --- |\n")
+            out.write("| Mode | Limit | Bestmove | Score | Nodes | Time ms | Asp low/high/retry/verify |\n")
+            out.write("| --- | --- | --- | ---: | ---: | ---: | --- |\n")
             for row in candidate.engine_rows:
                 score = row.get("score_cp", "")
                 score_label = cp_label(int(score)) if isinstance(score, int) else "?"
                 out.write(
-                    f"| {row.get('search_mode', 'cold')} | {row.get('depth', '')} | "
+                    f"| {row.get('search_mode', 'cold')} | {row.get('search_limit', row.get('depth', ''))} | "
                     f"`{row.get('bestmove', '')}` | "
                     f"{score_label} | {row.get('nodes', '')} | {row.get('time_ms', '')} | "
                     f"{row.get('asp_low', 0)}/{row.get('asp_high', 0)}/"
@@ -661,6 +696,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=16, help="Number of worst candidates to search/report")
     parser.add_argument("--binary", help="Optional Mantis binary for fixed-depth re-search")
     parser.add_argument("--depths", type=int, nargs="+", default=[8, 10], help="Depths for fixed-depth re-search")
+    parser.add_argument("--no-depths", action="store_true", help="Do not run fixed-depth target searches")
+    parser.add_argument("--movetimes-ms", type=int, nargs="*", default=[], help="Movetime budgets for timed target searches")
     parser.add_argument("--stateful-replay", action="store_true", help="Replay prior Mantis searches in one engine process before target positions")
     parser.add_argument("--warm-depth", type=int, default=8, help="Depth used to warm stateful replay before target positions")
     parser.add_argument("--skip-cold", action="store_true", help="Only run stateful replay searches, not cold per-position searches")
@@ -686,12 +723,17 @@ def main() -> int:
         collapse_before_cp=args.collapse_before_cp,
         collapse_after_cp=args.collapse_after_cp,
     )
+    depths = [] if args.no_depths else args.depths
+    movetimes_ms = args.movetimes_ms
+    if args.binary and not depths and not movetimes_ms:
+        raise SystemExit("provide at least one depth or movetime when --binary is used")
 
     if args.binary and not args.skip_cold:
         run_engine_depths(
             candidates=candidates,
             binary=args.binary,
-            depths=args.depths,
+            depths=depths,
+            movetimes_ms=movetimes_ms,
             timeout=args.timeout,
             limit=args.limit,
         )
@@ -701,7 +743,8 @@ def main() -> int:
             pgn_path=pgn_path,
             mantis_name=args.mantis_name,
             binary=args.binary,
-            depths=args.depths,
+            depths=depths,
+            movetimes_ms=movetimes_ms,
             warm_depth=args.warm_depth,
             timeout=args.timeout,
             limit=args.limit,
@@ -712,7 +755,8 @@ def main() -> int:
         stats=stats,
         pgn_path=pgn_path,
         binary=args.binary,
-        depths=args.depths,
+        depths=depths,
+        movetimes_ms=movetimes_ms,
         threshold_cp=args.threshold_cp,
         max_before_abs_cp=None if args.max_before_abs_cp == 0 else args.max_before_abs_cp,
         mode=args.mode,

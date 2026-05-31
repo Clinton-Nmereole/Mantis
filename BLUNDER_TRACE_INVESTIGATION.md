@@ -121,3 +121,52 @@ Run a timed-budget replay of the same first-collapse positions. If timed replay
 reproduces moves that fixed-depth avoids, the issue is time/depth instability.
 If timed replay still avoids them, inspect the original GUI/game conditions or
 focus on the fixed-depth failures with root move traces and endgame evaluation.
+
+## Accepted: Timed Replay Matrix
+
+Change: add movetime search specs to `blunder_trace.py` through
+`--movetimes-ms`, plus `--no-depths` for timed-only reports. Timed specs work
+for both cold FEN searches and stateful replay.
+
+Command used:
+
+```sh
+python3 blunder_trace.py \
+  --pgn games/Games.pgn \
+  --mode first-collapse \
+  --limit 12 \
+  --binary ./mantis_root_verify \
+  --no-depths \
+  --movetimes-ms 250 750 1500 3000 \
+  --stateful-replay \
+  --warm-depth 8 \
+  --timeout 60 \
+  --report games/first_collapse_timed_root_verify.md \
+  --csv games/first_collapse_timed_root_verify.csv
+```
+
+Result:
+
+| Round | PGN Move | Cold Timed | Stateful Timed | Finding |
+| ---: | --- | --- | --- | --- |
+| 1 | `d7f6` | PGN at all budgets | PGN at all budgets | Persistent eval/horizon failure. |
+| 2 | `b6b4` | Avoids PGN | PGN from 750ms onward | Warm/timed instability reproduces the game move. |
+| 3 | `d3f1` | Avoids PGN | Avoids PGN | Not reproduced; inspect deeper root/eval if needed. |
+| 4 | `e7f7` | PGN at 750/1500ms | PGN at 250/1500ms | Unstable timed choice. |
+| 5 | `d1e1` | Avoids PGN | Avoids PGN | Not reproduced by timed replay. |
+| 8 | `d7e6` | Avoids PGN | PGN at 1500ms | Warm/timed instability reproduces the game move. |
+| 10 | `c6e5` | PGN at all budgets | PGN at all budgets | Persistent eval/horizon/endgame-search failure. |
+
+This separates the collapses into two groups:
+
+1. Persistent failures where Mantis likes the PGN move across cold, stateful,
+   fixed-depth, and timed probes: rounds 1 and 10.
+2. Timed/warm instability where fixed-depth often avoids the PGN move but
+   movetime/stateful replay can bring it back: rounds 2, 4, and 8.
+
+## Next
+
+Focus on the timed/warm instability group first. Add a root-move trace mode for
+timed/stateful probes that records each root move's score at the budget where
+the PGN move is chosen. The first target should be round 2 `b6b4`, because
+cold timed avoids it while stateful timed selects it from 750ms onward.
