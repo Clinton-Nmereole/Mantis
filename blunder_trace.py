@@ -68,6 +68,15 @@ class UCIEngine:
         self.process.stdin.write(command + "\n")
         self.process.stdin.flush()
 
+    def set_option(self, name: str, value: str | int | bool) -> None:
+        if isinstance(value, bool):
+            value_text = "true" if value else "false"
+        else:
+            value_text = str(value)
+        self.send(f"setoption name {name} value {value_text}")
+        self.send("isready")
+        self.read_until("readyok", self.timeout)
+
     def read_until(self, marker: str, timeout: float) -> str:
         output: list[str] = []
         deadline = time.monotonic() + timeout
@@ -87,7 +96,7 @@ class UCIEngine:
             if marker in line:
                 return "".join(output)
 
-    def search_go(self, moves_so_far: list[str], go_command: str, timeout: float) -> tuple[dict[str, int | str], float]:
+    def search_go_output(self, moves_so_far: list[str], go_command: str, timeout: float) -> tuple[dict[str, int | str], float, str]:
         if moves_so_far:
             self.send("position startpos moves " + " ".join(moves_so_far))
         else:
@@ -96,7 +105,11 @@ class UCIEngine:
         start = time.perf_counter()
         output = self.read_until("bestmove", timeout)
         wall_ms = (time.perf_counter() - start) * 1000.0
-        return stats_benchmark.parse_stats(output), wall_ms
+        return stats_benchmark.parse_stats(output), wall_ms, output
+
+    def search_go(self, moves_so_far: list[str], go_command: str, timeout: float) -> tuple[dict[str, int | str], float]:
+        stats, wall_ms, _output = self.search_go_output(moves_so_far, go_command, timeout)
+        return stats, wall_ms
 
     def search_depth(self, moves_so_far: list[str], depth: int, timeout: float) -> tuple[dict[str, int | str], float]:
         return self.search_go(moves_so_far, f"go depth {depth}", timeout)
@@ -378,102 +391,105 @@ def run_stateful_replay(
         return
     specs = [("depth", depth, None) for depth in depths]
     specs.extend(("movetime", None, movetime_ms) for movetime_ms in movetimes_ms)
+    contexts: dict[tuple[int, int], tuple[list[str], list[list[str]]]] = {}
 
-    engine = UCIEngine(binary, timeout)
-    try:
-        with pgn_path.open("r", encoding="utf-8", errors="replace") as handle:
-            game_index = 0
-            while True:
-                game = chess.pgn.read_game(handle)
-                if game is None:
+    with pgn_path.open("r", encoding="utf-8", errors="replace") as handle:
+        game_index = 0
+        while True:
+            game = chess.pgn.read_game(handle)
+            if game is None:
+                break
+            game_index += 1
+            if game_index not in target_games:
+                continue
+
+            mantis_color = mantis_color_for_game(game, mantis_name)
+            if mantis_color is None:
+                continue
+
+            board = game.board()
+            moves_so_far: list[str] = []
+            warm_positions: list[list[str]] = []
+
+            for ply, node in enumerate(game.mainline(), start=1):
+                if ply > last_target_ply[game_index]:
                     break
-                game_index += 1
-                if game_index not in target_games:
-                    continue
 
-                mantis_color = mantis_color_for_game(game, mantis_name)
-                if mantis_color is None:
-                    continue
+                move = node.move
+                mover_color = board.turn
+                target = targets.get((game_index, ply))
 
+                if mover_color == mantis_color and target is not None:
+                    contexts[(game_index, ply)] = (moves_so_far.copy(), [position.copy() for position in warm_positions])
+                if mover_color == mantis_color:
+                    warm_positions.append(moves_so_far.copy())
+
+                moves_so_far.append(move.uci())
+                board.push(move)
+
+    total = len(selected) * len(specs)
+    done = 0
+    for candidate in selected:
+        context = contexts.get((candidate.game_index, candidate.ply))
+        if context is None:
+            continue
+        moves_so_far, warm_positions = context
+        for _spec_type, depth, movetime_ms in specs:
+            done += 1
+            search_label = f"d{depth}" if depth is not None else f"{movetime_ms}ms"
+            print(
+                f"[stateful {done:>3}/{total}] round={candidate.round_name} "
+                f"ply={candidate.ply} move={candidate.uci} search={search_label} "
+                f"warm_positions={len(warm_positions)}",
+                flush=True,
+            )
+            engine = UCIEngine(binary, timeout)
+            try:
                 engine.send("ucinewgame")
                 engine.send("isready")
                 engine.read_until("readyok", timeout)
-
-                board = game.board()
-                moves_so_far: list[str] = []
-                searched_warm_positions = 0
-
-                for ply, node in enumerate(game.mainline(), start=1):
-                    if ply > last_target_ply[game_index]:
-                        break
-
-                    move = node.move
-                    mover_color = board.turn
-                    target = targets.get((game_index, ply))
-
-                    if mover_color == mantis_color:
-                        if target is not None:
-                            total = len(specs)
-                            for depth_index, (spec_type, depth, movetime_ms) in enumerate(specs, start=1):
-                                search_label = f"d{depth}" if depth is not None else f"{movetime_ms}ms"
-                                print(
-                                    f"[stateful {depth_index:>2}/{total}] round={target.round_name} "
-                                    f"ply={target.ply} move={target.uci} search={search_label} "
-                                    f"warm_positions={searched_warm_positions}",
-                                    flush=True,
-                                )
-                                try:
-                                    if depth is not None:
-                                        stats, wall_ms = engine.search_depth(moves_so_far, depth, timeout)
-                                    else:
-                                        assert movetime_ms is not None
-                                        stats, wall_ms = engine.search_movetime(moves_so_far, movetime_ms, timeout)
-                                    row = {
-                                        "depth": depth if depth is not None else stats.get("depth", ""),
-                                        "movetime_ms": movetime_ms if movetime_ms is not None else "",
-                                        "search_limit": search_label,
-                                        "search_mode": f"stateful-warm{warm_depth}",
-                                        "bestmove": stats.get("bestmove", "?"),
-                                        "score_cp": stats.get("score_cp", ""),
-                                        "nodes": stats.get("nodes", ""),
-                                        "time_ms": stats.get("time_ms", ""),
-                                        "wall_ms": int(round(wall_ms)),
-                                        "asp_low": stats.get("asp_low", 0),
-                                        "asp_high": stats.get("asp_high", 0),
-                                        "asp_retry": stats.get("asp_retry", 0),
-                                        "asp_verify": stats.get("asp_verify", 0),
-                                        "warm_positions": searched_warm_positions,
-                                    }
-                                except subprocess.TimeoutExpired:
-                                    row = {
-                                        "depth": depth if depth is not None else "",
-                                        "movetime_ms": movetime_ms if movetime_ms is not None else "",
-                                        "search_limit": search_label,
-                                        "search_mode": f"stateful-warm{warm_depth}",
-                                        "bestmove": "timeout",
-                                        "score_cp": "",
-                                        "nodes": "",
-                                        "time_ms": "",
-                                        "wall_ms": int(timeout * 1000),
-                                        "warm_positions": searched_warm_positions,
-                                    }
-                                target.engine_rows.append(row)
-                        else:
-                            try:
-                                engine.search_depth(moves_so_far, warm_depth, timeout)
-                                searched_warm_positions += 1
-                            except subprocess.TimeoutExpired:
-                                print(
-                                    f"warning: warm search timed out round={game.headers.get('Round', '?')} "
-                                    f"ply={ply}",
-                                    file=sys.stderr,
-                                    flush=True,
-                                )
-
-                    moves_so_far.append(move.uci())
-                    board.push(move)
-    finally:
-        engine.close()
+                warmed = 0
+                try:
+                    for warm_moves in warm_positions:
+                        engine.search_depth(warm_moves, warm_depth, timeout)
+                        warmed += 1
+                    if depth is not None:
+                        stats, wall_ms = engine.search_depth(moves_so_far, depth, timeout)
+                    else:
+                        assert movetime_ms is not None
+                        stats, wall_ms = engine.search_movetime(moves_so_far, movetime_ms, timeout)
+                    row = {
+                        "depth": depth if depth is not None else stats.get("depth", ""),
+                        "movetime_ms": movetime_ms if movetime_ms is not None else "",
+                        "search_limit": search_label,
+                        "search_mode": f"stateful-warm{warm_depth}",
+                        "bestmove": stats.get("bestmove", "?"),
+                        "score_cp": stats.get("score_cp", ""),
+                        "nodes": stats.get("nodes", ""),
+                        "time_ms": stats.get("time_ms", ""),
+                        "wall_ms": int(round(wall_ms)),
+                        "asp_low": stats.get("asp_low", 0),
+                        "asp_high": stats.get("asp_high", 0),
+                        "asp_retry": stats.get("asp_retry", 0),
+                        "asp_verify": stats.get("asp_verify", 0),
+                        "warm_positions": warmed,
+                    }
+                except subprocess.TimeoutExpired:
+                    row = {
+                        "depth": depth if depth is not None else "",
+                        "movetime_ms": movetime_ms if movetime_ms is not None else "",
+                        "search_limit": search_label,
+                        "search_mode": f"stateful-warm{warm_depth}",
+                        "bestmove": "timeout",
+                        "score_cp": "",
+                        "nodes": "",
+                        "time_ms": "",
+                        "wall_ms": int(timeout * 1000),
+                        "warm_positions": warmed,
+                    }
+                candidate.engine_rows.append(row)
+            finally:
+                engine.close()
 
 
 def classify(candidate: BlunderCandidate) -> str:

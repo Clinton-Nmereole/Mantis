@@ -103,17 +103,16 @@ Result:
 | Round | PGN Move | Cold d12 | Stateful d12 | Finding |
 | ---: | --- | --- | --- | --- |
 | 1 | `d7f6` | `d7f6` | `d7f6` | Still preferred; likely eval/horizon/endgame-search. |
-| 2 | `b6b4` | `e7g5` | `e7g5` | Not reproduced by cold or warm fixed-depth. |
-| 3 | `d3f1` | `g5f6` | `g5f6` | Not reproduced by cold or warm fixed-depth. |
+| 2 | `b6b4` | `e7g5` | `b6b4` | Warm fixed-depth reproduces PGN at d12. |
+| 3 | `d3f1` | `g5f6` | `h2h4` | Warm state changes the preferred move, but not to PGN. |
 | 4 | `e7f7` | `e7f7` | `e7f7` | Still preferred by max depth. |
 | 5 | `d1e1` | `e5f3` | `e5g4` | Not reproduced by fixed-depth. |
-| 8 | `d7e6` | `f5f4` | `a7a5` | Warm d8 chose PGN, but d10/d12 avoided it. |
+| 8 | `d7e6` | `f5f4` | `d7e6` | Warm fixed-depth reproduces PGN at d8 and d12. |
 | 10 | `c6e5` | `c6e5` | `c6e5` | Still preferred; likely eval/horizon/endgame-search. |
 
-Warm state alone does not explain most first collapses. The bad PGN move
-reappears at depth 12 in only the same positions where cold fixed-depth also
-likes it. The clearest warm-state effect is round 8, where stateful depth 8
-selects the PGN move but deeper stateful searches avoid it.
+Warm state matters for fixed-depth searches. Rounds 2 and 8 are not reproduced
+by cold fixed-depth, but are reproduced by isolated stateful replay at depth
+12. This points to TT/search-state interaction, not merely static evaluation.
 
 ## Next
 
@@ -150,23 +149,74 @@ Result:
 | Round | PGN Move | Cold Timed | Stateful Timed | Finding |
 | ---: | --- | --- | --- | --- |
 | 1 | `d7f6` | PGN at all budgets | PGN at all budgets | Persistent eval/horizon failure. |
-| 2 | `b6b4` | Avoids PGN | PGN from 750ms onward | Warm/timed instability reproduces the game move. |
+| 2 | `b6b4` | Avoids PGN | Avoids PGN; prefers `h8h5` from 750ms onward | Fixed-depth warm issue, not reproduced by isolated movetime. |
 | 3 | `d3f1` | Avoids PGN | Avoids PGN | Not reproduced; inspect deeper root/eval if needed. |
-| 4 | `e7f7` | PGN at 750/1500ms | PGN at 250/1500ms | Unstable timed choice. |
+| 4 | `e7f7` | PGN at 750/1500ms | PGN only at 250ms | Unstable timed choice. |
 | 5 | `d1e1` | Avoids PGN | Avoids PGN | Not reproduced by timed replay. |
-| 8 | `d7e6` | Avoids PGN | PGN at 1500ms | Warm/timed instability reproduces the game move. |
+| 8 | `d7e6` | Avoids PGN | Avoids PGN | Fixed-depth warm issue, not reproduced by isolated movetime. |
 | 10 | `c6e5` | PGN at all budgets | PGN at all budgets | Persistent eval/horizon/endgame-search failure. |
 
-This separates the collapses into two groups:
+This corrected report isolates each stateful target budget in a fresh warmed
+engine. An earlier draft ran target budgets sequentially in one process, which
+allowed the 250ms target probe itself to warm later 750/1500/3000ms probes.
+That artifact made round 2 appear to reproduce `b6b4` under movetime. The
+isolated replay does not support that conclusion.
+
+The corrected grouping is:
 
 1. Persistent failures where Mantis likes the PGN move across cold, stateful,
    fixed-depth, and timed probes: rounds 1 and 10.
-2. Timed/warm instability where fixed-depth often avoids the PGN move but
-   movetime/stateful replay can bring it back: rounds 2, 4, and 8.
+2. Fixed-depth warm-state failures where cold search avoids the PGN move but
+   isolated stateful depth-12 can bring it back: rounds 2 and 8.
+3. Timed instability where movetime choices vary around the collapse but do
+   not consistently reproduce the PGN move: round 4.
 
 ## Next
 
-Focus on the timed/warm instability group first. Add a root-move trace mode for
-timed/stateful probes that records each root move's score at the budget where
-the PGN move is chosen. The first target should be round 2 `b6b4`, because
-cold timed avoids it while stateful timed selects it from 750ms onward.
+Focus on the fixed-depth warm-state group first. Add a root-move trace mode for
+stateful probes that records normal search and MultiPV root rankings. The first
+target should remain round 2 because cold d12 chooses `e7g5`, while stateful
+d12 chooses the PGN move `b6b4`.
+
+## Accepted: Timed Root Trace Tool
+
+Tool: `timed_root_trace.py`
+
+Change: add a focused diagnostic that replays one PGN target with a fresh
+warmed engine per movetime budget. For each budget it runs:
+
+1. a normal MultiPV=1 movetime search,
+2. a separate diagnostic MultiPV search from the same warmed game path.
+
+Command used:
+
+```sh
+python3 timed_root_trace.py \
+  --movetimes-ms 250 750 1500 3000 \
+  --multipv 8 \
+  --timeout 120 \
+  --report games/timed_root_trace_round2_ply36.md \
+  --csv games/timed_root_trace_round2_ply36.csv
+```
+
+Round 2 result:
+
+```text
+normal 250ms:  e7g5
+normal 750ms:  h8h5
+normal 1500ms: h8h5
+normal 3000ms: h8h5
+```
+
+MultiPV diagnostics show `b6b4` is nearby but not top under movetime:
+
+```text
+250ms:  rank 3, score -7.22
+750ms:  rank 4, score -5.67
+1500ms: rank 4, score -4.06
+3000ms: rank 6, score -6.15
+```
+
+Conclusion: round 2 `b6b4` is not a movetime root-choice bug under isolated
+replay. It is a stateful fixed-depth d12 issue. The immediate next diagnostic
+should be a depth-12 stateful root trace, not another movetime trace.
