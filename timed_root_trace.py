@@ -241,10 +241,13 @@ def run_normal_trace(
     spec: SearchSpec,
     warm_depth: int,
     timeout: float,
+    root_debug: bool,
 ) -> dict[str, Any]:
     engine = blunder_trace.UCIEngine(binary, timeout)
     try:
         warmed = warm_engine(engine, target.warm_positions, warm_depth, timeout)
+        if root_debug:
+            engine.set_option("RootDebugTrace", True)
         stats, wall_ms, _output = engine.search_go_output(
             target.moves_before,
             spec.go_command,
@@ -262,6 +265,11 @@ def run_normal_trace(
             "nodes": stats.get("nodes", ""),
             "time_ms": stats.get("time_ms", ""),
             "wall_ms": int(round(wall_ms)),
+            "root_debug_lines": [
+                line
+                for line in _output.splitlines()
+                if line.startswith("info string rootdebug ")
+            ],
         }
     finally:
         engine.close()
@@ -339,6 +347,20 @@ def write_reports(
             )
         out.write("\n")
 
+        debug_rows = [
+            row
+            for row in trace.normal_rows
+            if row.get("root_debug_lines")
+        ]
+        if debug_rows:
+            out.write("### Normal Root Debug\n\n")
+            for row in debug_rows:
+                out.write(f"#### {row['search_label']}\n\n")
+                out.write("```text\n")
+                for line in row["root_debug_lines"]:
+                    out.write(f"{line}\n")
+                out.write("```\n\n")
+
         out.write("### MultiPV Trace\n\n")
         for summary in trace.multipv_summaries:
             spec_label = str(summary["search_label"])
@@ -410,7 +432,7 @@ def write_reports(
                         "depth": row["depth"],
                         "nodes": row["nodes"],
                         "time_ms": row["time_ms"],
-                        "pv": "",
+                        "pv": " | ".join(row.get("root_debug_lines", [])),
                     }
                 )
             for summary in trace.multipv_summaries:
@@ -456,6 +478,7 @@ def main() -> int:
     parser.add_argument("--movetimes-ms", type=int, nargs="*", default=None)
     parser.add_argument("--warm-depth", type=int, default=8)
     parser.add_argument("--multipv", type=int, default=8)
+    parser.add_argument("--root-debug", action="store_true", help="Enable RootDebugTrace during normal searches")
     parser.add_argument("--timeout", type=float, default=90.0)
     parser.add_argument("--report")
     parser.add_argument("--csv")
@@ -497,6 +520,7 @@ def main() -> int:
                     spec=spec,
                     warm_depth=args.warm_depth,
                     timeout=args.timeout,
+                    root_debug=args.root_debug,
                 )
             )
             print(f"multipv={args.multipv} target={target_id(target)} search={spec.label}", flush=True)

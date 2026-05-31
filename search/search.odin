@@ -195,6 +195,7 @@ SearchStats :: struct {
 }
 
 search_stats_enabled: bool = false
+root_debug_trace_enabled: bool = false
 search_stats: SearchStats
 
 reset_search_stats :: proc() {
@@ -800,6 +801,22 @@ print_probe_variant :: proc(
 		futility,
 		lmp,
 	)
+}
+
+root_debug_print_move :: proc(move: moves.Move) {
+	if moves.is_empty_move(move) {
+		fmt.printf("(none)")
+	} else {
+		board.print_move(move)
+	}
+}
+
+root_debug_print_pv :: proc(root_move: moves.Move, child_pv: ^PV_Line) {
+	board.print_move(root_move)
+	for i in 0 ..< child_pv.count {
+		fmt.printf(" ")
+		board.print_move(child_pv.moves[i])
+	}
 }
 
 trace_root_move_scores :: proc(fen: string, depth: int) {
@@ -3517,6 +3534,8 @@ run_root_search_pass :: proc(
 	root_tt_move: moves.Move,
 	pv_index: int,
 	root_pv_first_legal_counted: ^bool,
+	debug_trace: bool = false,
+	debug_phase: string = "",
 ) -> RootSearchPassResult {
 	result := RootSearchPassResult {
 		best_score    = -eval.INF,
@@ -3524,6 +3543,13 @@ run_root_search_pass :: proc(
 		root_tt_score = -eval.INF,
 	}
 	current_alpha := alpha
+
+	if debug_trace {
+		fmt.printf("info string rootdebug pass phase=%s depth=%d alpha=%d beta=%d root_seed=", debug_phase, depth, alpha, beta)
+		root_debug_print_move(root_tt_move)
+		fmt.println()
+		os.flush(os.stdout)
+	}
 
 	for i in 0 ..< move_list.count {
 		if should_stop_search() {
@@ -3533,6 +3559,11 @@ run_root_search_pass :: proc(
 
 		move := move_list.moves[i]
 		if !board.is_castling_legal_now(b, move) {
+			if debug_trace {
+				fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
+				root_debug_print_move(move)
+				fmt.println(" reason=castle_illegal")
+			}
 			continue
 		}
 
@@ -3543,6 +3574,11 @@ run_root_search_pass :: proc(
 		if board.is_square_attacked(b, king_sq, b.side) {
 			board.unmake_move(b, &state)
 			stat_add(&search_stats.legal_rejects)
+			if debug_trace {
+				fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
+				root_debug_print_move(move)
+				fmt.println(" reason=self_check")
+			}
 			continue
 		}
 		if !root_pv_first_legal_counted^ && i == 0 && same_move(move, root_tt_move) {
@@ -3553,6 +3589,8 @@ run_root_search_pass :: proc(
 		nnue.update_accumulators(&state, b, move)
 
 		child_pv: PV_Line
+		alpha_before := current_alpha
+		nodes_before := st.nodes
 		score := -negamax(
 			st,
 			b,
@@ -3562,6 +3600,7 @@ run_root_search_pass :: proc(
 			1,
 			&child_pv,
 		)
+		nodes_delta := st.nodes - nodes_before
 
 		board.unmake_move(b, &state)
 		if pv_index == 0 && !moves.is_empty_move(root_tt_move) && same_move(move, root_tt_move) {
@@ -3569,6 +3608,7 @@ run_root_search_pass :: proc(
 			result.root_tt_score = score
 		}
 
+		new_best := score > result.best_score
 		if score > result.best_score {
 			result.best_score = score
 			result.best_move = move
@@ -3584,6 +3624,35 @@ run_root_search_pass :: proc(
 		if score > current_alpha {
 			current_alpha = score
 		}
+
+		if debug_trace {
+			fmt.printf(
+				"info string rootdebug child phase=%s idx=%d move=",
+				debug_phase,
+				i + 1,
+			)
+			root_debug_print_move(move)
+			fmt.printf(
+				" score=%d alpha_before=%d alpha_after=%d beta=%d nodes=%d new_best=%v root_seed=%v pv=",
+				score,
+				alpha_before,
+				current_alpha,
+				beta,
+				nodes_delta,
+				new_best,
+				same_move(move, root_tt_move),
+			)
+			root_debug_print_pv(move, &child_pv)
+			fmt.println()
+			os.flush(os.stdout)
+		}
+	}
+
+	if debug_trace {
+		fmt.printf("info string rootdebug pass_result phase=%s completed=%v found=%v best=", debug_phase, result.completed, result.found_move)
+		root_debug_print_move(result.best_move)
+		fmt.printf(" best_score=%d root_seed_seen=%v root_seed_score=%d\n", result.best_score, result.root_tt_seen, result.root_tt_score)
+		os.flush(os.stdout)
 	}
 
 	return result
@@ -3597,11 +3666,20 @@ run_root_full_window_verification_pass :: proc(
 	root_tt_move: moves.Move,
 	pv_index: int,
 	root_pv_first_legal_counted: ^bool,
+	debug_trace: bool = false,
+	debug_phase: string = "",
 ) -> RootSearchPassResult {
 	result := RootSearchPassResult {
 		best_score    = -eval.INF,
 		completed     = true,
 		root_tt_score = -eval.INF,
+	}
+
+	if debug_trace {
+		fmt.printf("info string rootdebug pass phase=%s depth=%d alpha=%d beta=%d root_seed=", debug_phase, depth, -eval.INF, eval.INF)
+		root_debug_print_move(root_tt_move)
+		fmt.println()
+		os.flush(os.stdout)
 	}
 
 	for i in 0 ..< move_list.count {
@@ -3617,14 +3695,29 @@ run_root_full_window_verification_pass :: proc(
 				// Always verify promotions.
 			} else if move.capture {
 				if see_capture(b, move) < 0 {
+					if debug_trace {
+						fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
+						root_debug_print_move(move)
+						fmt.println(" reason=negative_see_capture")
+					}
 					continue
 				}
 			} else if get_history_score(st, move) <= 0 {
+				if debug_trace {
+					fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
+					root_debug_print_move(move)
+					fmt.println(" reason=quiet_nonpositive_history")
+				}
 				continue
 			}
 		}
 
 		if !board.is_castling_legal_now(b, move) {
+			if debug_trace {
+				fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
+				root_debug_print_move(move)
+				fmt.println(" reason=castle_illegal")
+			}
 			continue
 		}
 
@@ -3635,6 +3728,11 @@ run_root_full_window_verification_pass :: proc(
 		if board.is_square_attacked(b, king_sq, b.side) {
 			board.unmake_move(b, &state)
 			stat_add(&search_stats.legal_rejects)
+			if debug_trace {
+				fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
+				root_debug_print_move(move)
+				fmt.println(" reason=self_check")
+			}
 			continue
 		}
 		if !root_pv_first_legal_counted^ && i == 0 && same_move(move, root_tt_move) {
@@ -3645,6 +3743,7 @@ run_root_full_window_verification_pass :: proc(
 		nnue.update_accumulators(&state, b, move)
 
 		child_pv: PV_Line
+		nodes_before := st.nodes
 		score := -negamax(
 			st,
 			b,
@@ -3654,6 +3753,7 @@ run_root_full_window_verification_pass :: proc(
 			1,
 			&child_pv,
 		)
+		nodes_delta := st.nodes - nodes_before
 
 		board.unmake_move(b, &state)
 		if pv_index == 0 && !moves.is_empty_move(root_tt_move) && same_move(move, root_tt_move) {
@@ -3661,6 +3761,7 @@ run_root_full_window_verification_pass :: proc(
 			result.root_tt_score = score
 		}
 
+		new_best := score > result.best_score
 		if score > result.best_score {
 			result.best_score = score
 			result.best_move = move
@@ -3672,6 +3773,35 @@ run_root_full_window_verification_pass :: proc(
 			}
 			result.best_pv.count = child_pv.count + 1
 		}
+
+		if debug_trace {
+			fmt.printf(
+				"info string rootdebug child phase=%s idx=%d move=",
+				debug_phase,
+				i + 1,
+			)
+			root_debug_print_move(move)
+			fmt.printf(
+				" score=%d alpha_before=%d alpha_after=%d beta=%d nodes=%d new_best=%v root_seed=%v pv=",
+				score,
+				-eval.INF,
+				eval.INF,
+				eval.INF,
+				nodes_delta,
+				new_best,
+				same_move(move, root_tt_move),
+			)
+			root_debug_print_pv(move, &child_pv)
+			fmt.println()
+			os.flush(os.stdout)
+		}
+	}
+
+	if debug_trace {
+		fmt.printf("info string rootdebug pass_result phase=%s completed=%v found=%v best=", debug_phase, result.completed, result.found_move)
+		root_debug_print_move(result.best_move)
+		fmt.printf(" best_score=%d root_seed_seen=%v root_seed_score=%d\n", result.best_score, result.root_tt_seen, result.root_tt_score)
+		os.flush(os.stdout)
 	}
 
 	return result
@@ -3809,6 +3939,11 @@ search_position :: proc(
 					root_tt_move = prev_completed_best_move
 				}
 			}
+			actual_root_tt_move := moves.Move{}
+			debug_root_pass := root_debug_trace_enabled && current_depth == depth && pv_index == 0
+			if debug_root_pass {
+				actual_root_tt_move = get_tt_move(b.hash)
+			}
 
 			// Sort root moves, preserving the previous completed PV move first.
 			sort_moves(st, &move_list, b, root_tt_move, 0, moves.Move{})
@@ -3828,6 +3963,41 @@ search_position :: proc(
 				verify_st.nodes = 0
 			}
 
+			if debug_root_pass {
+				fmt.printf(
+					"info string rootdebug root depth=%d pv=%d alpha=%d beta=%d prev_score=%d verify_clean=%v root_seed=",
+					current_depth,
+					pv_index + 1,
+					alpha,
+					beta,
+					prev_score,
+					verify_from_clean_root,
+				)
+				root_debug_print_move(root_tt_move)
+				fmt.printf(" tt_move=")
+				root_debug_print_move(actual_root_tt_move)
+				fmt.printf(" best_before=")
+				root_debug_print_move(best_move)
+				fmt.printf(" prev_completed=")
+				root_debug_print_move(prev_completed_best_move)
+				fmt.println()
+				for order_idx in 0 ..< move_list.count {
+					order_move := move_list.moves[order_idx]
+					if !trace_root_legal_move(b, order_move) {
+						continue
+					}
+					fmt.printf("info string rootdebug order depth=%d idx=%d move=", current_depth, order_idx + 1)
+					root_debug_print_move(order_move)
+					fmt.printf(" root_seed=%v tt_move=%v capture=%v promoted=%d\n",
+						same_move(order_move, root_tt_move),
+						same_move(order_move, actual_root_tt_move),
+						order_move.capture,
+						order_move.promoted,
+					)
+				}
+				os.flush(os.stdout)
+			}
+
 			best_score := -eval.INF
 			current_best_move: moves.Move
 			found_move := false
@@ -3843,6 +4013,8 @@ search_position :: proc(
 				root_tt_move,
 				pv_index,
 				&root_pv_first_legal_counted,
+				debug_root_pass,
+				"initial",
 			)
 			best_score = initial_pass.best_score
 			current_best_move = initial_pass.best_move
@@ -3863,10 +4035,27 @@ search_position :: proc(
 
 				root_tt_failed_low := initial_pass.root_tt_seen && initial_pass.root_tt_score <= window_alpha && best_score < window_beta
 				guard_forced_fail_low := root_tt_failed_low && best_score > window_alpha
+				if debug_root_pass {
+					fmt.printf("info string rootdebug aspiration initial_best=")
+					root_debug_print_move(current_best_move)
+					fmt.printf(
+						" initial_score=%d window_alpha=%d window_beta=%d root_seed_seen=%v root_seed_score=%d root_seed_failed_low=%v guard_forced_fail_low=%v\n",
+						best_score,
+						window_alpha,
+						window_beta,
+						initial_pass.root_tt_seen,
+						initial_pass.root_tt_score,
+						root_tt_failed_low,
+						guard_forced_fail_low,
+					)
+				}
 				if best_score <= alpha || root_tt_failed_low {
 					aspiration_failures += 1
 					stat_add(&search_stats.aspiration_fail_low)
 					alpha = -eval.INF
+					if debug_root_pass {
+						fmt.printf("info string rootdebug aspiration action=fail_low_research alpha=%d beta=%d\n", alpha, beta)
+					}
 					research_pass := run_root_search_pass(
 						st,
 						b,
@@ -3877,6 +4066,8 @@ search_position :: proc(
 						root_tt_move,
 						pv_index,
 						&root_pv_first_legal_counted,
+						debug_root_pass,
+						"fail_low_research",
 					)
 					if research_pass.completed {
 						best_score = research_pass.best_score
@@ -3889,6 +4080,11 @@ search_position :: proc(
 
 					if depth_completed && verify_from_clean_root && root_tt_failed_low && same_move(current_best_move, root_tt_move) {
 						stat_add(&search_stats.aspiration_verifies)
+						if debug_root_pass {
+							fmt.printf("info string rootdebug verify action=clean_root start current_best=")
+							root_debug_print_move(current_best_move)
+							fmt.printf(" current_score=%d\n", best_score)
+						}
 						restore_tt(verify_tt_snapshot)
 						verify_pass := run_root_full_window_verification_pass(
 							&verify_st,
@@ -3898,6 +4094,8 @@ search_position :: proc(
 							root_tt_move,
 							pv_index,
 							&root_pv_first_legal_counted,
+							debug_root_pass,
+							"clean_root_verify",
 						)
 						st.nodes += verify_st.nodes
 						if verify_pass.completed {
@@ -3916,6 +4114,9 @@ search_position :: proc(
 						stat_add(&search_stats.aspiration_retries)
 						alpha = window_alpha
 						beta = eval.INF
+						if debug_root_pass {
+							fmt.printf("info string rootdebug aspiration action=fail_low_beta_retry alpha=%d beta=%d\n", alpha, beta)
+						}
 						retry_pass := run_root_search_pass(
 							st,
 							b,
@@ -3926,6 +4127,8 @@ search_position :: proc(
 							root_tt_move,
 							pv_index,
 							&root_pv_first_legal_counted,
+							debug_root_pass,
+							"fail_low_beta_retry",
 						)
 						if retry_pass.completed {
 							best_score = retry_pass.best_score
@@ -3940,6 +4143,9 @@ search_position :: proc(
 					aspiration_failures += 1
 					stat_add(&search_stats.aspiration_fail_high)
 					beta = eval.INF
+					if debug_root_pass {
+						fmt.printf("info string rootdebug aspiration action=fail_high_research alpha=%d beta=%d\n", alpha, beta)
+					}
 					research_pass := run_root_search_pass(
 						st,
 						b,
@@ -3950,6 +4156,8 @@ search_position :: proc(
 						root_tt_move,
 						pv_index,
 						&root_pv_first_legal_counted,
+						debug_root_pass,
+						"fail_high_research",
 					)
 					if research_pass.completed {
 						best_score = research_pass.best_score
@@ -3989,6 +4197,20 @@ search_position :: proc(
 				if pv_index == 0 {
 					prev_score = contempt_score
 					best_move = current_best_move
+				}
+
+				if debug_root_pass {
+					fmt.printf("info string rootdebug final depth=%d best=", current_depth)
+					root_debug_print_move(current_best_move)
+					fmt.printf(" raw_score=%d contempt_score=%d pv=", best_score, contempt_score)
+					for pv_i in 0 ..< best_pv.count {
+						board.print_move(best_pv.moves[pv_i])
+						if pv_i < best_pv.count - 1 {
+							fmt.printf(" ")
+						}
+					}
+					fmt.println()
+					os.flush(os.stdout)
 				}
 			}
 

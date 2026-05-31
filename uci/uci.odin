@@ -143,6 +143,7 @@ uci_loop :: proc() {
 			fmt.println("option name Threads type spin default 1 min 1 max 512")
 			fmt.println("option name Contempt type spin default 24 min -100 max 100")
 			fmt.println("option name SearchStats type check default false")
+			fmt.println("option name RootDebugTrace type check default false")
 			fmt.println("option name StagedMovePicker type check default false")
 			fmt.println("uciok")
 			os.flush(os.stdout)
@@ -629,6 +630,12 @@ parse_setoption :: proc(command: string) {
 				search.search_stats_enabled = true
 			} else if parts[4] == "false" {
 				search.search_stats_enabled = false
+			}
+		} else if name == "RootDebugTrace" {
+			if parts[4] == "true" {
+				search.root_debug_trace_enabled = true
+			} else if parts[4] == "false" {
+				search.root_debug_trace_enabled = false
 			}
 		} else if name == "StagedMovePicker" {
 			if parts[4] == "true" {

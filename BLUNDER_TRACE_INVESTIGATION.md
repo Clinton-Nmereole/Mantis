@@ -264,3 +264,50 @@ any root fail-low/fail-high verification. Run it on rounds 2 and 8 and compare
 the normal root path against the MultiPV ranking above. Also confirm whether
 reported root scores are side-to-move or white-perspective before using score
 margins as evidence.
+
+## Accepted: Normal Root Debug Trace
+
+Change: add a gated UCI option, `RootDebugTrace`, and teach
+`timed_root_trace.py --root-debug` to enable it for normal warmed searches. The
+option is off by default and only prints `info string rootdebug ...` lines when
+explicitly enabled.
+
+Diagnostic binary: `./mantis_root_debug`
+
+Command used:
+
+```sh
+python3 timed_root_trace.py \
+  --binary ./mantis_root_debug \
+  --target 2:36 \
+  --target 8:48 \
+  --depths 12 \
+  --multipv 8 \
+  --root-debug \
+  --timeout 240 \
+  --report games/root_debug_trace_root_debug.md \
+  --csv games/root_debug_trace_root_debug.csv
+```
+
+Result:
+
+| Round | Root seed | Actual root TT | Initial d12 | Fail-low research | Final |
+| ---: | --- | --- | --- | --- | --- |
+| 2 | `h8h5` | `e7g5` | `h8h5` fails low at -4.24 | `e7g5` raises to -6.24, then `b6b4` raises to -6.06 | `b6b4` |
+| 8 | `a7a6` | `d7e6` | `a7a6` fails low at -4.22 | `d7e6` raises to -10.26; later `a7a5` only returns the same bound, -10.26 | `d7e6` |
+
+Conclusion: the bad moves are selected in root fail-low recovery, not in the
+initial aspiration pass. Round 8 is especially suspicious: the MultiPV trace
+ranks `a7a5` first, but normal fail-low research searches it after `d7e6` and
+only gets an equal alpha-bound score, so strict `>` tie handling leaves
+`d7e6` as best. Round 2 also disagrees with MultiPV after fail-low recovery,
+where `b6b4` raises alpha above the actual root TT move `e7g5`.
+
+## Next
+
+Fix root fail-low recovery conservatively. When a final-depth root aspiration
+fails low, verify the recovered best move against a clean full-window root
+pass, or at minimum full-window verify the recovered best plus the actual root
+TT move and later candidates that only returned the alpha bound. The acceptance
+test should be that warmed d12 rounds 2 and 8 no longer choose `b6b4`/`d7e6`,
+while the 44-position stats harness remains stable.
