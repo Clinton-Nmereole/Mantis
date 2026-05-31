@@ -220,3 +220,47 @@ MultiPV diagnostics show `b6b4` is nearby but not top under movetime:
 Conclusion: round 2 `b6b4` is not a movetime root-choice bug under isolated
 replay. It is a stateful fixed-depth d12 issue. The immediate next diagnostic
 should be a depth-12 stateful root trace, not another movetime trace.
+
+## Accepted: Stateful Depth Root Trace
+
+Tool: `timed_root_trace.py`
+
+Change: generalize the root trace tool so it supports fixed-depth probes through
+`--depths` and repeated targets through `--target ROUND:PLY`. Each normal search
+and MultiPV diagnostic still uses a fresh engine warmed along the same PGN path.
+
+Command used:
+
+```sh
+python3 timed_root_trace.py \
+  --target 2:36 \
+  --target 8:48 \
+  --depths 12 \
+  --multipv 8 \
+  --timeout 180 \
+  --report games/stateful_depth_root_trace_root_verify.md \
+  --csv games/stateful_depth_root_trace_root_verify.csv
+```
+
+Result:
+
+| Round | PGN Move | Normal warm d12 | MultiPV warm d12 | Finding |
+| ---: | --- | --- | --- | --- |
+| 2 | `b6b4` | `b6b4`, score -5.94 | `e7g5` rank 1 (-5.18), `b6b4` rank 2 (-5.55) | Normal root chooses the worse move; MultiPV avoids it. |
+| 8 | `d7e6` | `d7e6`, score -10.14 | `a7a5` rank 1 (-6.94), `d7e6` rank 4 (-9.73) | Normal root chooses the worse move; MultiPV avoids it. |
+
+Conclusion: these two warm-state failures are not simple NNUE/eval preference
+bugs. Under the same warmed PGN path, the normal root search selects the PGN
+collapse while a separate warmed MultiPV search ranks better root moves above
+it. MultiPV is not behavior-identical to normal search, but the divergence is
+now sharply localized to normal root search state: TT/root ordering,
+aspiration/fail-low recovery, or PV/non-PV score handling.
+
+## Next
+
+Add a normal-root debug trace for warmed depth-12 searches that records each
+completed root move score, the final root ordering, TT move at the root, and
+any root fail-low/fail-high verification. Run it on rounds 2 and 8 and compare
+the normal root path against the MultiPV ranking above. Also confirm whether
+reported root scores are side-to-move or white-perspective before using score
+margins as evidence.
