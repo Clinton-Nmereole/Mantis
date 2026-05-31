@@ -38,6 +38,8 @@ class BlunderCandidate:
     fen: str
     eval_before_cp: int
     eval_after_cp: int
+    eval_before_mantis_cp: int
+    eval_after_mantis_cp: int
     delta_cp: int
     comment: str
     engine_rows: list[dict[str, Any]] = field(default_factory=list)
@@ -129,7 +131,9 @@ def extract_candidates(
                     else:
                         # PGN evals from Scid/Viridithas are white-perspective.
                         side_sign = 1 if mantis_color == chess.WHITE else -1
-                        delta_cp = (after_eval_cp - last_eval_cp) * side_sign
+                        before_mantis_cp = last_eval_cp * side_sign
+                        after_mantis_cp = after_eval_cp * side_sign
+                        delta_cp = after_mantis_cp - before_mantis_cp
                         if delta_cp < 0:
                             stats["moves_with_eval_drop"] += 1
                         if (
@@ -154,6 +158,8 @@ def extract_candidates(
                                     fen=before_fen,
                                     eval_before_cp=last_eval_cp,
                                     eval_after_cp=after_eval_cp,
+                                    eval_before_mantis_cp=before_mantis_cp,
+                                    eval_after_mantis_cp=after_mantis_cp,
                                     delta_cp=delta_cp,
                                     comment=node.comment.strip(),
                                 )
@@ -168,6 +174,34 @@ def extract_candidates(
     for index, item in enumerate(candidates, start=1):
         item.index = index
     return candidates, stats
+
+
+def select_candidates(
+    candidates: list[BlunderCandidate],
+    mode: str,
+    collapse_before_cp: int,
+    collapse_after_cp: int,
+) -> list[BlunderCandidate]:
+    if mode == "worst":
+        selected = sorted(candidates, key=lambda item: item.delta_cp)
+    elif mode == "first-collapse":
+        selected = []
+        seen_games: set[int] = set()
+        for candidate in sorted(candidates, key=lambda item: (item.game_index, item.ply)):
+            if candidate.game_index in seen_games:
+                continue
+            if (
+                candidate.eval_before_mantis_cp >= -collapse_before_cp
+                and candidate.eval_after_mantis_cp <= -collapse_after_cp
+            ):
+                selected.append(candidate)
+                seen_games.add(candidate.game_index)
+    else:
+        raise ValueError(f"unknown selection mode: {mode}")
+
+    for index, item in enumerate(selected, start=1):
+        item.index = index
+    return selected
 
 
 def run_engine_depths(
@@ -252,6 +286,8 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
         "delta_cp",
         "eval_before",
         "eval_after",
+        "eval_before_mantis",
+        "eval_after_mantis",
         "classification",
         "depth",
         "bestmove",
@@ -277,6 +313,8 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                             "delta_cp": candidate.delta_cp,
                             "eval_before": candidate.eval_before_cp,
                             "eval_after": candidate.eval_after_cp,
+                            "eval_before_mantis": candidate.eval_before_mantis_cp,
+                            "eval_after_mantis": candidate.eval_after_mantis_cp,
                             "classification": classify(candidate),
                             "depth": row.get("depth", ""),
                             "bestmove": row.get("bestmove", ""),
@@ -298,6 +336,8 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                         "delta_cp": candidate.delta_cp,
                         "eval_before": candidate.eval_before_cp,
                         "eval_after": candidate.eval_after_cp,
+                        "eval_before_mantis": candidate.eval_before_mantis_cp,
+                        "eval_after_mantis": candidate.eval_after_mantis_cp,
                         "classification": classify(candidate),
                         "fen": candidate.fen,
                     }
@@ -312,15 +352,26 @@ def render_markdown(
     depths: list[int],
     threshold_cp: int,
     max_before_abs_cp: int | None,
+    mode: str,
+    pool_count: int,
+    collapse_before_cp: int,
+    collapse_after_cp: int,
     limit: int,
 ) -> str:
     selected = candidates[:limit]
     out = io.StringIO()
     out.write("# Mantis Blunder Trace\n\n")
     out.write(f"PGN: `{pgn_path}`\n\n")
+    out.write(f"Selection mode: `{mode}`\n\n")
     out.write(f"Threshold: `{threshold_cp}` cp drop from Mantis' perspective\n\n")
     if max_before_abs_cp is not None:
         out.write(f"Previous-eval filter: `abs(eval_before) <= {max_before_abs_cp}` cp\n\n")
+    if mode == "first-collapse":
+        out.write(
+            "First-collapse filter: "
+            f"`before >= -{collapse_before_cp}` and `after <= -{collapse_after_cp}` "
+            "from Mantis' perspective\n\n"
+        )
     if binary:
         out.write(f"Binary: `{binary}`\n\n")
         out.write(f"Depths: `{', '.join(str(depth) for depth in depths)}`\n\n")
@@ -329,17 +380,18 @@ def render_markdown(
     out.write(f"- Games with Mantis: {stats['mantis_games']}\n")
     out.write(f"- Mantis moves with adjacent evals: {stats['mantis_moves'] - stats['moves_missing_eval']}\n")
     out.write(f"- Mantis eval drops: {stats['moves_with_eval_drop']}\n")
-    out.write(f"- Candidates at threshold: {len(candidates)}\n")
+    out.write(f"- Candidates at threshold: {pool_count}\n")
     out.write(f"- Candidates searched in this report: {len(selected)}\n\n")
 
-    out.write("## Worst Drops\n\n")
-    out.write("| # | Round | Ply | Side | Move | Eval Before | Eval After | Drop | Classification |\n")
+    section_title = "First Collapses" if mode == "first-collapse" else "Worst Drops"
+    out.write(f"## {section_title}\n\n")
+    out.write("| # | Round | Ply | Side | Move | Mantis Before | Mantis After | Drop | Classification |\n")
     out.write("| ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | --- |\n")
     for candidate in selected:
         out.write(
             f"| {candidate.index} | {candidate.round_name} | {candidate.ply} | "
             f"{candidate.mantis_color} | `{candidate.uci}` `{candidate.san}` | "
-            f"{cp_label(candidate.eval_before_cp)} | {cp_label(candidate.eval_after_cp)} | "
+            f"{cp_label(candidate.eval_before_mantis_cp)} | {cp_label(candidate.eval_after_mantis_cp)} | "
             f"{candidate.delta_cp:+d} | {classify(candidate)} |\n"
         )
     out.write("\n")
@@ -348,8 +400,12 @@ def render_markdown(
         out.write(f"## Candidate {candidate.index}: Round {candidate.round_name}, Ply {candidate.ply}\n\n")
         out.write(f"Played: `{candidate.uci}` (`{candidate.san}`), Mantis as {candidate.mantis_color}\n\n")
         out.write(
-            f"Eval: {cp_label(candidate.eval_before_cp)} -> "
-            f"{cp_label(candidate.eval_after_cp)} ({candidate.delta_cp:+d} cp for Mantis)\n\n"
+            f"Mantis eval: {cp_label(candidate.eval_before_mantis_cp)} -> "
+            f"{cp_label(candidate.eval_after_mantis_cp)} ({candidate.delta_cp:+d} cp)\n\n"
+        )
+        out.write(
+            f"White-perspective PGN eval: {cp_label(candidate.eval_before_cp)} -> "
+            f"{cp_label(candidate.eval_after_cp)}\n\n"
         )
         out.write(f"FEN: `{candidate.fen}`\n\n")
         if candidate.engine_rows:
@@ -372,12 +428,30 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pgn", default="games/Games.pgn", help="PGN file to analyze")
     parser.add_argument("--mantis-name", default="Mantis", help="Substring identifying Mantis in PGN player names")
+    parser.add_argument(
+        "--mode",
+        choices=["worst", "first-collapse"],
+        default="worst",
+        help="Select worst drops globally or the first collapse in each game",
+    )
     parser.add_argument("--threshold-cp", type=int, default=150, help="Minimum Mantis-perspective eval drop")
     parser.add_argument(
         "--max-before-abs-cp",
         type=int,
         default=3000,
         help="Ignore drops where the previous eval was already beyond this absolute cp value; use 0 to disable",
+    )
+    parser.add_argument(
+        "--collapse-before-cp",
+        type=int,
+        default=400,
+        help="For first-collapse mode, require the prior Mantis eval to be at least this playable threshold",
+    )
+    parser.add_argument(
+        "--collapse-after-cp",
+        type=int,
+        default=600,
+        help="For first-collapse mode, require the post-move Mantis eval to be this bad or worse",
     )
     parser.add_argument("--limit", type=int, default=16, help="Number of worst candidates to search/report")
     parser.add_argument("--binary", help="Optional Mantis binary for fixed-depth re-search")
@@ -397,6 +471,13 @@ def main() -> int:
         threshold_cp=args.threshold_cp,
         max_before_abs_cp=None if args.max_before_abs_cp == 0 else args.max_before_abs_cp,
     )
+    pool_count = len(candidates)
+    candidates = select_candidates(
+        candidates=candidates,
+        mode=args.mode,
+        collapse_before_cp=args.collapse_before_cp,
+        collapse_after_cp=args.collapse_after_cp,
+    )
 
     if args.binary:
         run_engine_depths(
@@ -415,6 +496,10 @@ def main() -> int:
         depths=args.depths,
         threshold_cp=args.threshold_cp,
         max_before_abs_cp=None if args.max_before_abs_cp == 0 else args.max_before_abs_cp,
+        mode=args.mode,
+        pool_count=pool_count,
+        collapse_before_cp=args.collapse_before_cp,
+        collapse_after_cp=args.collapse_after_cp,
         limit=args.limit,
     )
     report_path = Path(args.report)
