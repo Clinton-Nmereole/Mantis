@@ -70,3 +70,54 @@ queries Mantis at the first-collapse positions without resetting the process.
 That will tell us whether the bad practice-game move reappears only with warm
 TT/history state. If it does, inspect TT/history/aspiration at those positions;
 if it does not, focus on timed-budget reproduction.
+
+## Accepted: Stateful Replay Mode
+
+Change: add `--stateful-replay` to `blunder_trace.py`. The mode launches one
+persistent UCI process, sends `ucinewgame` at each PGN game boundary, replays
+the game from `startpos`, and searches earlier Mantis-to-move positions at a
+warmup depth before querying the first-collapse position.
+
+Important engine detail: `ucinewgame` clears the TT, and `search_position`
+clears killer/history/counter/continuation state per search. So this mode is
+primarily testing warm in-game TT/process effects, not persistent history.
+
+Command used:
+
+```sh
+python3 blunder_trace.py \
+  --pgn games/Games.pgn \
+  --mode first-collapse \
+  --limit 12 \
+  --binary ./mantis_root_verify \
+  --depths 8 10 12 \
+  --stateful-replay \
+  --warm-depth 8 \
+  --timeout 120 \
+  --report games/first_collapse_stateful_root_verify.md \
+  --csv games/first_collapse_stateful_root_verify.csv
+```
+
+Result:
+
+| Round | PGN Move | Cold d12 | Stateful d12 | Finding |
+| ---: | --- | --- | --- | --- |
+| 1 | `d7f6` | `d7f6` | `d7f6` | Still preferred; likely eval/horizon/endgame-search. |
+| 2 | `b6b4` | `e7g5` | `e7g5` | Not reproduced by cold or warm fixed-depth. |
+| 3 | `d3f1` | `g5f6` | `g5f6` | Not reproduced by cold or warm fixed-depth. |
+| 4 | `e7f7` | `e7f7` | `e7f7` | Still preferred by max depth. |
+| 5 | `d1e1` | `e5f3` | `e5g4` | Not reproduced by fixed-depth. |
+| 8 | `d7e6` | `f5f4` | `a7a5` | Warm d8 chose PGN, but d10/d12 avoided it. |
+| 10 | `c6e5` | `c6e5` | `c6e5` | Still preferred; likely eval/horizon/endgame-search. |
+
+Warm state alone does not explain most first collapses. The bad PGN move
+reappears at depth 12 in only the same positions where cold fixed-depth also
+likes it. The clearest warm-state effect is round 8, where stateful depth 8
+selects the PGN move but deeper stateful searches avoid it.
+
+## Next
+
+Run a timed-budget replay of the same first-collapse positions. If timed replay
+reproduces moves that fixed-depth avoids, the issue is time/depth instability.
+If timed replay still avoids them, inspect the original GUI/game conditions or
+focus on the fixed-depth failures with root move traces and endgame evaluation.

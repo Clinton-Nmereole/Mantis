@@ -6,9 +6,12 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import queue
 import re
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,79 @@ import stats_benchmark
 
 EVAL_RE = re.compile(r"\[%eval\s+([^\]]+)\]")
 MATE_SCORE = 100_000
+
+
+class UCIEngine:
+    def __init__(self, binary: str, timeout: float) -> None:
+        self.binary = binary
+        self.timeout = timeout
+        self.process = subprocess.Popen(
+            [binary],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        self.output_queue: queue.Queue[str] = queue.Queue()
+        self.reader = threading.Thread(target=self._read_stdout, daemon=True)
+        self.reader.start()
+        self.send("uci")
+        self.read_until("uciok", timeout)
+        self.send("setoption name SearchStats value true")
+        self.send("isready")
+        self.read_until("readyok", timeout)
+
+    def close(self) -> None:
+        if self.process.poll() is None:
+            try:
+                self.send("quit")
+                self.process.wait(timeout=2.0)
+            except Exception:
+                self.process.kill()
+                self.process.wait(timeout=2.0)
+
+    def _read_stdout(self) -> None:
+        if self.process.stdout is None:
+            return
+        for line in self.process.stdout:
+            self.output_queue.put(line)
+
+    def send(self, command: str) -> None:
+        if self.process.stdin is None:
+            raise RuntimeError("engine stdin is closed")
+        self.process.stdin.write(command + "\n")
+        self.process.stdin.flush()
+
+    def read_until(self, marker: str, timeout: float) -> str:
+        output: list[str] = []
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.process.poll() is not None:
+                raise RuntimeError(
+                    f"engine exited before {marker!r}; output:\n{''.join(output)}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(self.binary, timeout, output="".join(output))
+            try:
+                line = self.output_queue.get(timeout=remaining)
+            except queue.Empty:
+                raise subprocess.TimeoutExpired(self.binary, timeout, output="".join(output))
+            output.append(line)
+            if marker in line:
+                return "".join(output)
+
+    def search_depth(self, moves_so_far: list[str], depth: int, timeout: float) -> tuple[dict[str, int | str], float]:
+        if moves_so_far:
+            self.send("position startpos moves " + " ".join(moves_so_far))
+        else:
+            self.send("position startpos")
+        self.send(f"go depth {depth}")
+        start = time.perf_counter()
+        output = self.read_until("bestmove", timeout)
+        wall_ms = (time.perf_counter() - start) * 1000.0
+        return stats_benchmark.parse_stats(output), wall_ms
 
 
 @dataclass
@@ -234,9 +310,10 @@ def run_engine_depths(
             except subprocess.TimeoutExpired:
                 candidate.engine_rows.append(
                     {
-                        "depth": depth,
-                        "bestmove": "timeout",
-                        "score_cp": "",
+                "depth": depth,
+                "search_mode": "cold",
+                "bestmove": "timeout",
+                "score_cp": "",
                         "nodes": "",
                         "time_ms": "",
                         "wall_ms": int(timeout * 1000),
@@ -246,6 +323,7 @@ def run_engine_depths(
 
             row = {
                 "depth": depth,
+                "search_mode": "cold",
                 "bestmove": stats.get("bestmove", "?"),
                 "score_cp": stats.get("score_cp", ""),
                 "nodes": stats.get("nodes", ""),
@@ -261,8 +339,128 @@ def run_engine_depths(
             candidate.engine_rows.append(row)
 
 
+def run_stateful_replay(
+    candidates: list[BlunderCandidate],
+    pgn_path: Path,
+    mantis_name: str,
+    binary: str,
+    depths: list[int],
+    warm_depth: int,
+    timeout: float,
+    limit: int,
+) -> None:
+    selected = candidates[:limit]
+    targets: dict[tuple[int, int], BlunderCandidate] = {
+        (candidate.game_index, candidate.ply): candidate for candidate in selected
+    }
+    target_games = {candidate.game_index for candidate in selected}
+    last_target_ply = {
+        game_index: max(candidate.ply for candidate in selected if candidate.game_index == game_index)
+        for game_index in target_games
+    }
+    if not targets:
+        return
+
+    engine = UCIEngine(binary, timeout)
+    try:
+        with pgn_path.open("r", encoding="utf-8", errors="replace") as handle:
+            game_index = 0
+            while True:
+                game = chess.pgn.read_game(handle)
+                if game is None:
+                    break
+                game_index += 1
+                if game_index not in target_games:
+                    continue
+
+                mantis_color = mantis_color_for_game(game, mantis_name)
+                if mantis_color is None:
+                    continue
+
+                engine.send("ucinewgame")
+                engine.send("isready")
+                engine.read_until("readyok", timeout)
+
+                board = game.board()
+                moves_so_far: list[str] = []
+                searched_warm_positions = 0
+
+                for ply, node in enumerate(game.mainline(), start=1):
+                    if ply > last_target_ply[game_index]:
+                        break
+
+                    move = node.move
+                    mover_color = board.turn
+                    target = targets.get((game_index, ply))
+
+                    if mover_color == mantis_color:
+                        if target is not None:
+                            total = len(depths)
+                            for depth_index, depth in enumerate(depths, start=1):
+                                print(
+                                    f"[stateful {depth_index:>2}/{total}] round={target.round_name} "
+                                    f"ply={target.ply} move={target.uci} depth={depth} "
+                                    f"warm_positions={searched_warm_positions}",
+                                    flush=True,
+                                )
+                                try:
+                                    stats, wall_ms = engine.search_depth(moves_so_far, depth, timeout)
+                                    row = {
+                                        "depth": depth,
+                                        "search_mode": f"stateful-warm{warm_depth}",
+                                        "bestmove": stats.get("bestmove", "?"),
+                                        "score_cp": stats.get("score_cp", ""),
+                                        "nodes": stats.get("nodes", ""),
+                                        "time_ms": stats.get("time_ms", ""),
+                                        "wall_ms": int(round(wall_ms)),
+                                        "asp_low": stats.get("asp_low", 0),
+                                        "asp_high": stats.get("asp_high", 0),
+                                        "asp_retry": stats.get("asp_retry", 0),
+                                        "asp_verify": stats.get("asp_verify", 0),
+                                        "warm_positions": searched_warm_positions,
+                                    }
+                                except subprocess.TimeoutExpired:
+                                    row = {
+                                        "depth": depth,
+                                        "search_mode": f"stateful-warm{warm_depth}",
+                                        "bestmove": "timeout",
+                                        "score_cp": "",
+                                        "nodes": "",
+                                        "time_ms": "",
+                                        "wall_ms": int(timeout * 1000),
+                                        "warm_positions": searched_warm_positions,
+                                    }
+                                target.engine_rows.append(row)
+                        else:
+                            try:
+                                engine.search_depth(moves_so_far, warm_depth, timeout)
+                                searched_warm_positions += 1
+                            except subprocess.TimeoutExpired:
+                                print(
+                                    f"warning: warm search timed out round={game.headers.get('Round', '?')} "
+                                    f"ply={ply}",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+
+                    moves_so_far.append(move.uci())
+                    board.push(move)
+    finally:
+        engine.close()
+
+
 def classify(candidate: BlunderCandidate) -> str:
-    rows = [row for row in candidate.engine_rows if row.get("bestmove") not in {"", "timeout", "?"}]
+    rows = [
+        row
+        for row in candidate.engine_rows
+        if row.get("search_mode", "cold") == "cold" and row.get("bestmove") not in {"", "timeout", "?"}
+    ]
+    if not rows:
+        rows = [
+            row
+            for row in candidate.engine_rows
+            if row.get("bestmove") not in {"", "timeout", "?"}
+        ]
     if not rows:
         return "needs search"
     last = str(rows[-1].get("bestmove"))
@@ -289,6 +487,7 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
         "eval_before_mantis",
         "eval_after_mantis",
         "classification",
+        "search_mode",
         "depth",
         "bestmove",
         "score_cp",
@@ -316,6 +515,7 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                             "eval_before_mantis": candidate.eval_before_mantis_cp,
                             "eval_after_mantis": candidate.eval_after_mantis_cp,
                             "classification": classify(candidate),
+                            "search_mode": row.get("search_mode", "cold"),
                             "depth": row.get("depth", ""),
                             "bestmove": row.get("bestmove", ""),
                             "score_cp": row.get("score_cp", ""),
@@ -356,6 +556,8 @@ def render_markdown(
     pool_count: int,
     collapse_before_cp: int,
     collapse_after_cp: int,
+    stateful_replay: bool,
+    warm_depth: int,
     limit: int,
 ) -> str:
     selected = candidates[:limit]
@@ -375,6 +577,8 @@ def render_markdown(
     if binary:
         out.write(f"Binary: `{binary}`\n\n")
         out.write(f"Depths: `{', '.join(str(depth) for depth in depths)}`\n\n")
+    if stateful_replay:
+        out.write(f"Stateful replay: `enabled`, warm depth `{warm_depth}`\n\n")
     out.write("## Summary\n\n")
     out.write(f"- Games parsed: {stats['games']}\n")
     out.write(f"- Games with Mantis: {stats['mantis_games']}\n")
@@ -409,13 +613,14 @@ def render_markdown(
         )
         out.write(f"FEN: `{candidate.fen}`\n\n")
         if candidate.engine_rows:
-            out.write("| Depth | Bestmove | Score | Nodes | Time ms | Asp low/high/retry/verify |\n")
-            out.write("| ---: | --- | ---: | ---: | ---: | --- |\n")
+            out.write("| Mode | Depth | Bestmove | Score | Nodes | Time ms | Asp low/high/retry/verify |\n")
+            out.write("| --- | ---: | --- | ---: | ---: | ---: | --- |\n")
             for row in candidate.engine_rows:
                 score = row.get("score_cp", "")
                 score_label = cp_label(int(score)) if isinstance(score, int) else "?"
                 out.write(
-                    f"| {row.get('depth', '')} | `{row.get('bestmove', '')}` | "
+                    f"| {row.get('search_mode', 'cold')} | {row.get('depth', '')} | "
+                    f"`{row.get('bestmove', '')}` | "
                     f"{score_label} | {row.get('nodes', '')} | {row.get('time_ms', '')} | "
                     f"{row.get('asp_low', 0)}/{row.get('asp_high', 0)}/"
                     f"{row.get('asp_retry', 0)}/{row.get('asp_verify', 0)} |\n"
@@ -456,6 +661,9 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=16, help="Number of worst candidates to search/report")
     parser.add_argument("--binary", help="Optional Mantis binary for fixed-depth re-search")
     parser.add_argument("--depths", type=int, nargs="+", default=[8, 10], help="Depths for fixed-depth re-search")
+    parser.add_argument("--stateful-replay", action="store_true", help="Replay prior Mantis searches in one engine process before target positions")
+    parser.add_argument("--warm-depth", type=int, default=8, help="Depth used to warm stateful replay before target positions")
+    parser.add_argument("--skip-cold", action="store_true", help="Only run stateful replay searches, not cold per-position searches")
     parser.add_argument("--timeout", type=float, default=90.0, help="Timeout per engine search")
     parser.add_argument("--report", default="games/blunder_trace_report.md", help="Markdown report path")
     parser.add_argument("--csv", default="games/blunder_trace_report.csv", help="CSV report path")
@@ -479,11 +687,22 @@ def main() -> int:
         collapse_after_cp=args.collapse_after_cp,
     )
 
-    if args.binary:
+    if args.binary and not args.skip_cold:
         run_engine_depths(
             candidates=candidates,
             binary=args.binary,
             depths=args.depths,
+            timeout=args.timeout,
+            limit=args.limit,
+        )
+    if args.binary and args.stateful_replay:
+        run_stateful_replay(
+            candidates=candidates,
+            pgn_path=pgn_path,
+            mantis_name=args.mantis_name,
+            binary=args.binary,
+            depths=args.depths,
+            warm_depth=args.warm_depth,
             timeout=args.timeout,
             limit=args.limit,
         )
@@ -500,6 +719,8 @@ def main() -> int:
         pool_count=pool_count,
         collapse_before_cp=args.collapse_before_cp,
         collapse_after_cp=args.collapse_after_cp,
+        stateful_replay=args.stateful_replay,
+        warm_depth=args.warm_depth,
         limit=args.limit,
     )
     report_path = Path(args.report)
