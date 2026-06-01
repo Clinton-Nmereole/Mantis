@@ -311,3 +311,65 @@ pass, or at minimum full-window verify the recovered best plus the actual root
 TT move and later candidates that only returned the alpha bound. The acceptance
 test should be that warmed d12 rounds 2 and 8 no longer choose `b6b4`/`d7e6`,
 while the 44-position stats harness remains stable.
+
+## Accepted: Scoped Root Fail-Low Verification
+
+Candidate: `./mantis_root_fail_verify`
+
+Change: when the final fixed-depth root search fails low, restore the clean
+pre-depth TT snapshot and run a full-window verification pass over the previous
+PV root seed, the recovered best move, the actual root TT move, and existing
+forcing/high-signal alternatives. This is narrower than verifying every legal
+root move.
+
+Command used:
+
+```sh
+python3 timed_root_trace.py \
+  --binary ./mantis_root_fail_verify \
+  --target 2:36 \
+  --target 8:48 \
+  --depths 12 \
+  --multipv 8 \
+  --root-debug \
+  --timeout 240 \
+  --report games/root_fail_verify_trace.md \
+  --csv games/root_fail_verify_trace.csv
+```
+
+Result:
+
+| Round | Before | After | Verification result |
+| ---: | --- | --- | --- |
+| 2 | `b6b4` | `h8h5` | Clean verify chooses the previous-PV/root seed and rejects the fail-low recovered `b6b4`. |
+| 8 | `d7e6` | `a7a5` | Clean verify promotes the later high-signal candidate and rejects actual root TT move `d7e6`. |
+
+Benchmark comparison:
+
+```sh
+python3 compare_candidates.py \
+  --baseline ./mantis_root_verify \
+  --candidate ./mantis_root_fail_verify \
+  --depths 8 9 \
+  --timeout 120 \
+  --csv games/root_fail_verify_compare_d8_d9.csv
+```
+
+Summary:
+
+| Depth | Bestmove changes | Max score delta | Nodes | Time |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 0/44 | 0 cp | +0.00% | -7.22% |
+| 9 | 4/44 | 166 cp | +45.54% | +33.40% |
+
+Depth 9 changed moves all had positive candidate score deltas in the benchmark
+sample. The cost is real but much smaller than the all-legal-root proof pass,
+which caused 8/44 bestmove changes and roughly +240% time at depth 9.
+
+## Next
+
+Measure this candidate in timed mode and practice games. Because the current
+verification is scoped to final fixed-depth searches, it may not affect normal
+3+2 play much yet. If practice strength does not move, the next step is to make
+the same verification available to time-managed searches only when the engine
+is about to stop after a completed depth, rather than on every depth.

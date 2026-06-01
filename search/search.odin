@@ -3668,6 +3668,9 @@ run_root_full_window_verification_pass :: proc(
 	root_pv_first_legal_counted: ^bool,
 	debug_trace: bool = false,
 	debug_phase: string = "",
+	verify_all: bool = false,
+	extra_verify_move_1: moves.Move = moves.Move{},
+	extra_verify_move_2: moves.Move = moves.Move{},
 ) -> RootSearchPassResult {
 	result := RootSearchPassResult {
 		best_score    = -eval.INF,
@@ -3690,7 +3693,10 @@ run_root_full_window_verification_pass :: proc(
 
 		move := move_list.moves[i]
 		// Verify the stale TT move plus forcing/high-signal alternatives only.
-		if !same_move(move, root_tt_move) {
+		if !verify_all &&
+		   !same_move(move, root_tt_move) &&
+		   !same_move(move, extra_verify_move_1) &&
+		   !same_move(move, extra_verify_move_2) {
 			if move.promoted != -1 {
 				// Always verify promotions.
 			} else if move.capture {
@@ -3941,7 +3947,7 @@ search_position :: proc(
 			}
 			actual_root_tt_move := moves.Move{}
 			debug_root_pass := root_debug_trace_enabled && current_depth == depth && pv_index == 0
-			if debug_root_pass {
+			if debug_root_pass || (current_depth == depth && current_depth >= 9 && pv_index == 0) {
 				actual_root_tt_move = get_tt_move(b.hash)
 			}
 
@@ -3954,9 +3960,7 @@ search_position :: proc(
 			verify_from_clean_root := false
 			verify_tt_snapshot: []TTBucket
 			verify_st: SearchThread
-			if current_depth == depth && current_depth >= 9 && pv_index == 0 &&
-			   !moves.is_empty_move(root_tt_move) &&
-			   root_opening_bias_score(b, root_tt_move) < 0 {
+			if current_depth == depth && current_depth >= 9 && pv_index == 0 {
 				verify_from_clean_root = true
 				verify_tt_snapshot = snapshot_tt()
 				verify_st = clone_search_thread(st)
@@ -4078,7 +4082,7 @@ search_position :: proc(
 						depth_completed = false
 					}
 
-					if depth_completed && verify_from_clean_root && root_tt_failed_low && same_move(current_best_move, root_tt_move) {
+					if depth_completed && verify_from_clean_root {
 						stat_add(&search_stats.aspiration_verifies)
 						if debug_root_pass {
 							fmt.printf("info string rootdebug verify action=clean_root start current_best=")
@@ -4096,9 +4100,12 @@ search_position :: proc(
 							&root_pv_first_legal_counted,
 							debug_root_pass,
 							"clean_root_verify",
+							false,
+							current_best_move,
+							actual_root_tt_move,
 						)
 						st.nodes += verify_st.nodes
-						if verify_pass.completed {
+						if verify_pass.completed && verify_pass.found_move {
 							best_score = verify_pass.best_score
 							current_best_move = verify_pass.best_move
 							best_pv = verify_pass.best_pv
