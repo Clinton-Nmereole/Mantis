@@ -105,6 +105,14 @@ apply_move_to_board :: proc(b: ^Board, move: moves.Move) {
 	update_occupancies(b)
 
 	// Update State
+	if move.piece % 6 == constants.PAWN || move.capture {
+		b.halfmove_clock = 0
+	} else {
+		b.halfmove_clock += 1
+	}
+	if side == constants.BLACK {
+		b.fullmove_number += 1
+	}
 	b.side = 1 - side
 
 	// Update En Passant Target

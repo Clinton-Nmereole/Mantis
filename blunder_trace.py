@@ -77,6 +77,11 @@ class UCIEngine:
         self.send("isready")
         self.read_until("readyok", self.timeout)
 
+    def new_game(self) -> None:
+        self.send("ucinewgame")
+        self.send("isready")
+        self.read_until("readyok", self.timeout)
+
     def read_until(self, marker: str, timeout: float) -> str:
         output: list[str] = []
         deadline = time.monotonic() + timeout
@@ -107,6 +112,14 @@ class UCIEngine:
         wall_ms = (time.perf_counter() - start) * 1000.0
         return stats_benchmark.parse_stats(output), wall_ms, output
 
+    def search_go_output_fen(self, fen: str, go_command: str, timeout: float) -> tuple[dict[str, int | str], float, str]:
+        self.send("position fen " + fen)
+        self.send(go_command)
+        start = time.perf_counter()
+        output = self.read_until("bestmove", timeout)
+        wall_ms = (time.perf_counter() - start) * 1000.0
+        return stats_benchmark.parse_stats(output), wall_ms, output
+
     def search_go(self, moves_so_far: list[str], go_command: str, timeout: float) -> tuple[dict[str, int | str], float]:
         stats, wall_ms, _output = self.search_go_output(moves_so_far, go_command, timeout)
         return stats, wall_ms
@@ -114,8 +127,23 @@ class UCIEngine:
     def search_depth(self, moves_so_far: list[str], depth: int, timeout: float) -> tuple[dict[str, int | str], float]:
         return self.search_go(moves_so_far, f"go depth {depth}", timeout)
 
+    def search_depth_fen(self, fen: str, depth: int, timeout: float) -> tuple[dict[str, int | str], float]:
+        stats, wall_ms, _output = self.search_go_output_fen(fen, f"go depth {depth}", timeout)
+        return stats, wall_ms
+
     def search_movetime(self, moves_so_far: list[str], movetime_ms: int, timeout: float) -> tuple[dict[str, int | str], float]:
         return self.search_go(moves_so_far, f"go movetime {movetime_ms}", timeout)
+
+    def search_movetime_fen(self, fen: str, movetime_ms: int, timeout: float) -> tuple[dict[str, int | str], float]:
+        stats, wall_ms, _output = self.search_go_output_fen(fen, f"go movetime {movetime_ms}", timeout)
+        return stats, wall_ms
+
+    def search_clock(self, moves_so_far: list[str], clock_ms: dict[str, int], timeout: float) -> tuple[dict[str, int | str], float]:
+        return self.search_go(moves_so_far, stats_benchmark.clock_go_command(clock_ms), timeout)
+
+    def search_clock_fen(self, fen: str, clock_ms: dict[str, int], timeout: float) -> tuple[dict[str, int | str], float]:
+        stats, wall_ms, _output = self.search_go_output_fen(fen, stats_benchmark.clock_go_command(clock_ms), timeout)
+        return stats, wall_ms
 
 
 @dataclass
@@ -304,18 +332,27 @@ def run_engine_depths(
     binary: str,
     depths: list[int],
     movetimes_ms: list[int],
+    clock_ms: dict[str, int] | None,
     timeout: float,
     limit: int,
 ) -> None:
     selected = candidates[:limit]
-    specs = [("depth", depth, None) for depth in depths]
-    specs.extend(("movetime", None, movetime_ms) for movetime_ms in movetimes_ms)
+    specs = [("depth", depth, None, None) for depth in depths]
+    specs.extend(("movetime", None, movetime_ms, None) for movetime_ms in movetimes_ms)
+    if clock_ms is not None:
+        specs.append(("clock", None, None, clock_ms))
     total = len(selected) * len(specs)
     done = 0
     for candidate in selected:
-        for spec_type, depth, movetime_ms in specs:
+        for spec_type, depth, movetime_ms, clock_limit in specs:
             done += 1
-            search_label = f"d{depth}" if depth is not None else f"{movetime_ms}ms"
+            if depth is not None:
+                search_label = f"d{depth}"
+            elif movetime_ms is not None:
+                search_label = f"{movetime_ms}ms"
+            else:
+                assert clock_limit is not None
+                search_label = stats_benchmark.clock_label(clock_limit)
             print(
                 f"[{done:>3}/{total}] round={candidate.round_name} "
                 f"ply={candidate.ply} move={candidate.uci} search={search_label}",
@@ -327,6 +364,7 @@ def run_engine_depths(
                     fen=candidate.fen,
                     depth=depth,
                     movetime_ms=movetime_ms,
+                    clock_ms=clock_limit,
                     timeout=timeout,
                     clear_hash=True,
                     staged_picker=False,
@@ -336,6 +374,7 @@ def run_engine_depths(
                     {
                         "depth": depth if depth is not None else "",
                         "movetime_ms": movetime_ms if movetime_ms is not None else "",
+                        "clock": stats_benchmark.clock_label(clock_limit) if clock_limit is not None else "",
                         "search_limit": search_label,
                         "search_mode": "cold",
                         "bestmove": "timeout",
@@ -350,6 +389,7 @@ def run_engine_depths(
             row = {
                 "depth": depth if depth is not None else stats.get("depth", ""),
                 "movetime_ms": movetime_ms if movetime_ms is not None else "",
+                "clock": stats_benchmark.clock_label(clock_limit) if clock_limit is not None else "",
                 "search_limit": search_label,
                 "search_mode": "cold",
                 "bestmove": stats.get("bestmove", "?"),
@@ -374,7 +414,10 @@ def run_stateful_replay(
     binary: str,
     depths: list[int],
     movetimes_ms: list[int],
+    clock_ms: dict[str, int] | None,
     warm_depth: int,
+    clear_hash_before_target: bool,
+    target_from_fen: bool,
     timeout: float,
     limit: int,
 ) -> None:
@@ -389,8 +432,10 @@ def run_stateful_replay(
     }
     if not targets:
         return
-    specs = [("depth", depth, None) for depth in depths]
-    specs.extend(("movetime", None, movetime_ms) for movetime_ms in movetimes_ms)
+    specs = [("depth", depth, None, None) for depth in depths]
+    specs.extend(("movetime", None, movetime_ms, None) for movetime_ms in movetimes_ms)
+    if clock_ms is not None:
+        specs.append(("clock", None, None, clock_ms))
     contexts: dict[tuple[int, int], tuple[list[str], list[list[str]]]] = {}
 
     with pgn_path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -434,9 +479,15 @@ def run_stateful_replay(
         if context is None:
             continue
         moves_so_far, warm_positions = context
-        for _spec_type, depth, movetime_ms in specs:
+        for _spec_type, depth, movetime_ms, clock_limit in specs:
             done += 1
-            search_label = f"d{depth}" if depth is not None else f"{movetime_ms}ms"
+            if depth is not None:
+                search_label = f"d{depth}"
+            elif movetime_ms is not None:
+                search_label = f"{movetime_ms}ms"
+            else:
+                assert clock_limit is not None
+                search_label = stats_benchmark.clock_label(clock_limit)
             print(
                 f"[stateful {done:>3}/{total}] round={candidate.round_name} "
                 f"ply={candidate.ply} move={candidate.uci} search={search_label} "
@@ -445,24 +496,38 @@ def run_stateful_replay(
             )
             engine = UCIEngine(binary, timeout)
             try:
-                engine.send("ucinewgame")
-                engine.send("isready")
-                engine.read_until("readyok", timeout)
+                engine.new_game()
                 warmed = 0
                 try:
                     for warm_moves in warm_positions:
                         engine.search_depth(warm_moves, warm_depth, timeout)
                         warmed += 1
+                    if clear_hash_before_target:
+                        engine.new_game()
                     if depth is not None:
-                        stats, wall_ms = engine.search_depth(moves_so_far, depth, timeout)
+                        if target_from_fen:
+                            stats, wall_ms = engine.search_depth_fen(candidate.fen, depth, timeout)
+                        else:
+                            stats, wall_ms = engine.search_depth(moves_so_far, depth, timeout)
                     else:
-                        assert movetime_ms is not None
-                        stats, wall_ms = engine.search_movetime(moves_so_far, movetime_ms, timeout)
+                        if movetime_ms is not None:
+                            if target_from_fen:
+                                stats, wall_ms = engine.search_movetime_fen(candidate.fen, movetime_ms, timeout)
+                            else:
+                                stats, wall_ms = engine.search_movetime(moves_so_far, movetime_ms, timeout)
+                        else:
+                            assert clock_limit is not None
+                            if target_from_fen:
+                                stats, wall_ms = engine.search_clock_fen(candidate.fen, clock_limit, timeout)
+                            else:
+                                stats, wall_ms = engine.search_clock(moves_so_far, clock_limit, timeout)
+                    mode_suffix = f"{'-clearhash' if clear_hash_before_target else ''}{'-fen' if target_from_fen else ''}"
                     row = {
                         "depth": depth if depth is not None else stats.get("depth", ""),
                         "movetime_ms": movetime_ms if movetime_ms is not None else "",
+                        "clock": stats_benchmark.clock_label(clock_limit) if clock_limit is not None else "",
                         "search_limit": search_label,
-                        "search_mode": f"stateful-warm{warm_depth}",
+                        "search_mode": f"stateful-warm{warm_depth}{mode_suffix}",
                         "bestmove": stats.get("bestmove", "?"),
                         "score_cp": stats.get("score_cp", ""),
                         "nodes": stats.get("nodes", ""),
@@ -475,11 +540,13 @@ def run_stateful_replay(
                         "warm_positions": warmed,
                     }
                 except subprocess.TimeoutExpired:
+                    mode_suffix = f"{'-clearhash' if clear_hash_before_target else ''}{'-fen' if target_from_fen else ''}"
                     row = {
                         "depth": depth if depth is not None else "",
                         "movetime_ms": movetime_ms if movetime_ms is not None else "",
+                        "clock": stats_benchmark.clock_label(clock_limit) if clock_limit is not None else "",
                         "search_limit": search_label,
-                        "search_mode": f"stateful-warm{warm_depth}",
+                        "search_mode": f"stateful-warm{warm_depth}{mode_suffix}",
                         "bestmove": "timeout",
                         "score_cp": "",
                         "nodes": "",
@@ -534,6 +601,7 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
         "search_limit",
         "depth",
         "movetime_ms",
+        "clock",
         "bestmove",
         "score_cp",
         "nodes",
@@ -564,6 +632,7 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                             "search_limit": row.get("search_limit", row.get("depth", "")),
                             "depth": row.get("depth", ""),
                             "movetime_ms": row.get("movetime_ms", ""),
+                            "clock": row.get("clock", ""),
                             "bestmove": row.get("bestmove", ""),
                             "score_cp": row.get("score_cp", ""),
                             "nodes": row.get("nodes", ""),
@@ -598,6 +667,7 @@ def render_markdown(
     binary: str | None,
     depths: list[int],
     movetimes_ms: list[int],
+    clock_ms: dict[str, int] | None,
     threshold_cp: int,
     max_before_abs_cp: int | None,
     mode: str,
@@ -606,6 +676,8 @@ def render_markdown(
     collapse_after_cp: int,
     stateful_replay: bool,
     warm_depth: int,
+    clear_hash_before_target: bool,
+    target_from_fen: bool,
     limit: int,
 ) -> str:
     selected = candidates[:limit]
@@ -626,10 +698,16 @@ def render_markdown(
         out.write(f"Binary: `{binary}`\n\n")
         depth_label = ", ".join(str(depth) for depth in depths) if depths else "none"
         movetime_label = ", ".join(f"{value}ms" for value in movetimes_ms) if movetimes_ms else "none"
+        clock_label = stats_benchmark.clock_label(clock_ms) if clock_ms is not None else "none"
         out.write(f"Depths: `{depth_label}`\n\n")
         out.write(f"Movetimes: `{movetime_label}`\n\n")
+        out.write(f"Clock: `{clock_label}`\n\n")
     if stateful_replay:
         out.write(f"Stateful replay: `enabled`, warm depth `{warm_depth}`\n\n")
+        if clear_hash_before_target:
+            out.write("Stateful target hash: `cleared after warmup`\n\n")
+        if target_from_fen:
+            out.write("Stateful target position: `FEN`\n\n")
     out.write("## Summary\n\n")
     out.write(f"- Games parsed: {stats['games']}\n")
     out.write(f"- Games with Mantis: {stats['mantis_games']}\n")
@@ -710,17 +788,49 @@ def main() -> int:
         help="For first-collapse mode, require the post-move Mantis eval to be this bad or worse",
     )
     parser.add_argument("--limit", type=int, default=16, help="Number of worst candidates to search/report")
+    parser.add_argument(
+        "--candidate-indexes",
+        type=int,
+        nargs="+",
+        help="Only report selected candidate indexes after mode selection; preserves original candidate numbers",
+    )
     parser.add_argument("--binary", help="Optional Mantis binary for fixed-depth re-search")
     parser.add_argument("--depths", type=int, nargs="+", default=[8, 10], help="Depths for fixed-depth re-search")
     parser.add_argument("--no-depths", action="store_true", help="Do not run fixed-depth target searches")
     parser.add_argument("--movetimes-ms", type=int, nargs="*", default=[], help="Movetime budgets for timed target searches")
+    parser.add_argument(
+        "--clock",
+        type=int,
+        nargs=4,
+        metavar=("WTIME", "BTIME", "WINC", "BINC"),
+        help="UCI clock budget for target searches, in milliseconds",
+    )
+    parser.add_argument("--movestogo", type=int, default=0, help="Optional UCI movestogo for --clock")
     parser.add_argument("--stateful-replay", action="store_true", help="Replay prior Mantis searches in one engine process before target positions")
     parser.add_argument("--warm-depth", type=int, default=8, help="Depth used to warm stateful replay before target positions")
+    parser.add_argument(
+        "--clear-hash-before-target",
+        action="store_true",
+        help="In stateful replay, clear TT after warming prior searches and before the target search",
+    )
+    parser.add_argument(
+        "--stateful-target-fen",
+        action="store_true",
+        help="In stateful replay, set the target position from its FEN instead of replaying startpos moves",
+    )
     parser.add_argument("--skip-cold", action="store_true", help="Only run stateful replay searches, not cold per-position searches")
     parser.add_argument("--timeout", type=float, default=90.0, help="Timeout per engine search")
     parser.add_argument("--report", default="games/blunder_trace_report.md", help="Markdown report path")
     parser.add_argument("--csv", default="games/blunder_trace_report.csv", help="CSV report path")
     args = parser.parse_args()
+    if args.clock:
+        wtime, btime, winc, binc = args.clock
+        if wtime <= 0 or btime <= 0:
+            parser.error("--clock WTIME and BTIME must be positive")
+        if winc < 0 or binc < 0:
+            parser.error("--clock WINC and BINC must be non-negative")
+    if args.movestogo < 0:
+        parser.error("--movestogo must be non-negative")
 
     pgn_path = Path(args.pgn)
     if not pgn_path.exists():
@@ -739,10 +849,23 @@ def main() -> int:
         collapse_before_cp=args.collapse_before_cp,
         collapse_after_cp=args.collapse_after_cp,
     )
+    if args.candidate_indexes:
+        wanted = set(args.candidate_indexes)
+        candidates = [candidate for candidate in candidates if candidate.index in wanted]
     depths = [] if args.no_depths else args.depths
     movetimes_ms = args.movetimes_ms
-    if args.binary and not depths and not movetimes_ms:
-        raise SystemExit("provide at least one depth or movetime when --binary is used")
+    clock_ms: dict[str, int] | None = None
+    if args.clock:
+        wtime, btime, winc, binc = args.clock
+        clock_ms = {
+            "wtime": wtime,
+            "btime": btime,
+            "winc": winc,
+            "binc": binc,
+            "movestogo": args.movestogo,
+        }
+    if args.binary and not depths and not movetimes_ms and clock_ms is None:
+        raise SystemExit("provide at least one depth, movetime, or clock budget when --binary is used")
 
     if args.binary and not args.skip_cold:
         run_engine_depths(
@@ -750,6 +873,7 @@ def main() -> int:
             binary=args.binary,
             depths=depths,
             movetimes_ms=movetimes_ms,
+            clock_ms=clock_ms,
             timeout=args.timeout,
             limit=args.limit,
         )
@@ -761,7 +885,10 @@ def main() -> int:
             binary=args.binary,
             depths=depths,
             movetimes_ms=movetimes_ms,
+            clock_ms=clock_ms,
             warm_depth=args.warm_depth,
+            clear_hash_before_target=args.clear_hash_before_target,
+            target_from_fen=args.stateful_target_fen,
             timeout=args.timeout,
             limit=args.limit,
         )
@@ -773,6 +900,7 @@ def main() -> int:
         binary=args.binary,
         depths=depths,
         movetimes_ms=movetimes_ms,
+        clock_ms=clock_ms,
         threshold_cp=args.threshold_cp,
         max_before_abs_cp=None if args.max_before_abs_cp == 0 else args.max_before_abs_cp,
         mode=args.mode,
@@ -781,6 +909,8 @@ def main() -> int:
         collapse_after_cp=args.collapse_after_cp,
         stateful_replay=args.stateful_replay,
         warm_depth=args.warm_depth,
+        clear_hash_before_target=args.clear_hash_before_target,
+        target_from_fen=args.stateful_target_fen,
         limit=args.limit,
     )
     report_path = Path(args.report)

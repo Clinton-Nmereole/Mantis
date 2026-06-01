@@ -429,3 +429,139 @@ Build a stateful clock replay for the PGN first-collapse positions. The next
 question is why some positions are avoided by cold clock search but selected in
 the live game, which points toward TT/history/search-state contamination rather
 than only raw tactical depth.
+
+## Accepted: Stateful Clock Replay Harness
+
+Tooling change: `blunder_trace.py` now accepts UCI clock budgets through
+`--clock WTIME BTIME WINC BINC` and can run those target searches in both cold
+and stateful replay modes. Stateful replay warms all previous Mantis-to-move
+positions from the same game in one engine process before searching the target.
+
+Command:
+
+```sh
+python3 blunder_trace.py \
+  --pgn games/MantisVsViridthas0601.pgn \
+  --mode first-collapse \
+  --threshold-cp 150 \
+  --limit 13 \
+  --binary ./mantis_timed_verify \
+  --no-depths \
+  --clock 180000 180000 2000 2000 \
+  --stateful-replay \
+  --warm-depth 8 \
+  --timeout 120 \
+  --report games/mantis_vs_viridithas_0601_stateful_clock.md \
+  --csv games/mantis_vs_viridithas_0601_stateful_clock.csv
+```
+
+Result:
+
+| Category | Count | Positions |
+| --- | ---: | --- |
+| Stateful bestmove changed from cold | 7/13 | 3, 5, 8, 9, 11, 12, 13 |
+| Cold avoided PGN, stateful reproduced PGN blunder | 3/13 | 5, 8, 13 |
+| Cold and stateful both preferred PGN blunder | 3/13 | 2, 6, 10 |
+| Cold preferred PGN, stateful avoided PGN | 1/13 | 11 |
+
+The three stateful-reproduced PGN blunders are especially important:
+
+| # | Round | Played | Cold clock | Stateful clock |
+| ---: | ---: | --- | --- | --- |
+| 5 | 11 | `d3e4` | `d3c2` | `d3e4` |
+| 8 | 17 | `f5d3` | `h2h3` | `f5d3` |
+| 13 | 25 | `f5c2` | `g3d6` | `f5c2` |
+
+Search history, capture history, counter moves, continuation history, and
+killers are cleared at the start of each root search. That made TT state the
+prime suspect for these cold-vs-stateful flips, not long-lived history tables.
+
+## Accepted: Stateful TT and Position-State Isolation
+
+Tooling change: `blunder_trace.py` can now:
+
+- clear TT after warmup but before the target search with
+  `--clear-hash-before-target`;
+- set the stateful target from its FEN with `--stateful-target-fen`;
+- select exact first-collapse candidates with `--candidate-indexes`.
+
+The first isolation pass showed a split:
+
+| # | Played | Cold clock | Stateful clock | Stateful clock after TT clear |
+| ---: | --- | --- | --- | --- |
+| 5 | `d3e4` | `d3c2` | `d3e4` | `d3e4` |
+| 8 | `f5d3` | `h2h3` | `f5d3` | `f5d3` |
+| 13 | `f5c2` | `g3d6` | `f5c2` | `g3d6` |
+
+Candidate 13 was TT-sensitive, but 5 and 8 still reproduced the PGN blunder
+after clearing TT. That pointed away from pure TT contamination.
+
+The next check compared `position startpos moves ...` with the equivalent FEN
+target. Before the fix, Mantis printed the correct piece placement but always
+reported `0 1` for halfmove/fullmove after replaying UCI moves. That mattered
+because root ordering uses `b.fullmove_number` to taper the opening pawn/knight
+bias after move 12. In real GUI games, Mantis was effectively treating late
+middlegame positions as move 1 for that root-ordering term.
+
+Engine fix: `board.apply_move_to_board()` now updates:
+
+- `halfmove_clock`: reset on pawn moves/captures, otherwise increment;
+- `fullmove_number`: increment after Black moves.
+
+Validation:
+
+```text
+candidate 5: startpos-moves FEN now matches python-chess FEN
+candidate 8: startpos-moves FEN now matches python-chess FEN
+candidate 13: startpos-moves FEN now matches python-chess FEN
+44-position depth-8 comparison vs ./mantis_timed_verify: 0 bestmove changes,
+0 node changes, 0 score changes
+```
+
+Fixed-depth target replay with `./mantis_position_state`:
+
+```sh
+python3 blunder_trace.py \
+  --pgn games/MantisVsViridthas0601.pgn \
+  --mode first-collapse \
+  --threshold-cp 150 \
+  --candidate-indexes 5 8 13 \
+  --limit 3 \
+  --binary ./mantis_position_state \
+  --depths 14 \
+  --stateful-replay \
+  --clear-hash-before-target \
+  --skip-cold \
+  --warm-depth 8 \
+  --timeout 180 \
+  --report games/mantis_vs_viridithas_0601_position_state_targets_d14.md \
+  --csv games/mantis_vs_viridithas_0601_position_state_targets_d14.csv
+```
+
+Result:
+
+| # | Played | Fixed replay bestmove | Finding |
+| ---: | --- | --- | --- |
+| 5 | `d3e4` | `d3c2` | Avoids PGN blunder |
+| 8 | `f5d3` | `h2h3` | Avoids PGN blunder |
+| 13 | `f5c2` | `g3d6` | Avoids PGN blunder |
+
+Clock replay with warm TT still reproduced candidates 5 and 8, but clearing TT
+before the target made all three avoid the PGN move:
+
+| # | Played | Warm clock | Warm clock after TT clear |
+| ---: | --- | --- | --- |
+| 5 | `d3e4` | `d3e4` | `d3c2` |
+| 8 | `f5d3` | `f5d3` | `h2h3` |
+| 13 | `f5c2` | `g3d6` | `g3d6` |
+
+Conclusion: the UCI replay counter bug was real and fixed. The remaining
+practice-game issue is warm TT influence under clock play, especially at
+candidates 5 and 8.
+
+## Next
+
+Add a clock-safe root verification mode that verifies the likely final timed
+root choice with TT cutoffs disabled or from an empty TT, then restores normal
+TT state. The goal is to keep useful TT across the game while preventing stale
+warm TT bounds/order from deciding the final move at unstable tactical roots.
