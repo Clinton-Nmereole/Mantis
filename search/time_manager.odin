@@ -219,3 +219,22 @@ should_start_next_depth :: proc(
 	projected := project_next_depth_time(last_depth_ms, previous_depth_ms)
 	return elapsed_ms(limits) + projected < budget
 }
+
+should_prepare_timed_root_verify :: proc(
+	limits: SearchLimits,
+	last_depth_ms: int,
+	previous_depth_ms: int,
+	best_move_changes: int,
+	score_drop: int,
+	aspiration_failures: int,
+) -> bool {
+	if limits.is_infinite || limits.is_movetime {
+		return false
+	}
+
+	elapsed := elapsed_ms(limits)
+	budget := time_budget_with_instability(limits, best_move_changes, score_drop, aspiration_failures)
+	projected := project_next_depth_time(last_depth_ms, previous_depth_ms)
+
+	return elapsed + projected * 2 >= budget || elapsed >= limits.soft_time
+}

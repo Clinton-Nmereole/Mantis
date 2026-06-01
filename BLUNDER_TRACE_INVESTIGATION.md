@@ -373,3 +373,59 @@ verification is scoped to final fixed-depth searches, it may not affect normal
 3+2 play much yet. If practice strength does not move, the next step is to make
 the same verification available to time-managed searches only when the engine
 is about to stop after a completed depth, rather than on every depth.
+
+## Accepted: Timed Stop-Boundary Root Verification
+
+Candidate: `./mantis_timed_verify`
+
+The 25-game `MantisVsViridthas0601.pgn` match confirmed that the fixed-depth
+root fail-low fix was not enough for normal 3+2 play. Mantis scored 0.5/25, and
+the first-collapse report found 13 positions where Mantis crossed from playable
+or bad-but-defensible into clearly lost.
+
+Change: prepare the clean root TT snapshot for likely final timed depths, then
+run the same scoped full-window root verification only when a completed clock
+search is about to stop instead of starting the next depth. Exact `go movetime`
+searches are left alone.
+
+PGN first-collapse extraction:
+
+```sh
+python3 blunder_trace.py \
+  --pgn games/MantisVsViridthas0601.pgn \
+  --mode first-collapse \
+  --threshold-cp 150 \
+  --limit 13 \
+  --binary ./mantis_root_fail_verify \
+  --depths 8 10 12 \
+  --movetimes-ms 500 1500 \
+  --timeout 120 \
+  --report games/mantis_vs_viridithas_0601_first_collapse_search.md \
+  --csv games/mantis_vs_viridithas_0601_first_collapse_search.csv
+```
+
+Clock safety checks against `./mantis_root_fail_verify`:
+
+| Suite | Bestmove changes | Avg depth | Nodes | Time | Max score delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 44-position 3+2 smoke, first 16 | 0/16 | 13.62 -> 13.62 | +2.15% | +2.34% | 14 cp |
+| PGN first-collapse FENs | 0/13 | 15.46 -> 15.46 | +2.09% | +2.85% | 19 cp |
+
+Fixed-depth parity against `./mantis_root_fail_verify` stayed exact:
+
+| Depth | Bestmove changes | Nodes | Score delta |
+| ---: | ---: | ---: | ---: |
+| 8 | 0/44 | +0.00% | 0 cp |
+| 9 | 0/44 | +0.00% | 0 cp |
+
+Conclusion: this is a safe consistency improvement for clock play, but not the
+main cause of the 25-game losses. Several PGN first-collapse positions are
+still preferred by cold searches, while several others are avoided cold but were
+played in the actual games.
+
+## Next
+
+Build a stateful clock replay for the PGN first-collapse positions. The next
+question is why some positions are avoided by cold clock search but selected in
+the live game, which points toward TT/history/search-state contamination rather
+than only raw tactical depth.

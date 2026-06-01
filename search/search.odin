@@ -3938,6 +3938,20 @@ search_position :: proc(
 				break // No more moves to search
 			}
 
+			fixed_depth_root_verify := current_depth == depth && current_depth >= 9 && pv_index == 0
+			timed_root_verify_prepared := false
+			if current_depth >= 9 && pv_index == 0 && use_time_management {
+				timed_root_verify_prepared = should_prepare_timed_root_verify(
+					search_limits,
+					last_depth_ms,
+					previous_depth_ms,
+					best_move_changes,
+					largest_score_drop,
+					aspiration_failures,
+				)
+			}
+			prepare_clean_root_verify := fixed_depth_root_verify || timed_root_verify_prepared
+
 			root_tt_move := moves.Move{}
 			if pv_index == 0 {
 				root_tt_move = best_move
@@ -3947,7 +3961,7 @@ search_position :: proc(
 			}
 			actual_root_tt_move := moves.Move{}
 			debug_root_pass := root_debug_trace_enabled && current_depth == depth && pv_index == 0
-			if debug_root_pass || (current_depth == depth && current_depth >= 9 && pv_index == 0) {
+			if debug_root_pass || prepare_clean_root_verify {
 				actual_root_tt_move = get_tt_move(b.hash)
 			}
 
@@ -3960,7 +3974,7 @@ search_position :: proc(
 			verify_from_clean_root := false
 			verify_tt_snapshot: []TTBucket
 			verify_st: SearchThread
-			if current_depth == depth && current_depth >= 9 && pv_index == 0 {
+			if prepare_clean_root_verify {
 				verify_from_clean_root = true
 				verify_tt_snapshot = snapshot_tt()
 				verify_st = clone_search_thread(st)
@@ -4082,7 +4096,36 @@ search_position :: proc(
 						depth_completed = false
 					}
 
-					if depth_completed && verify_from_clean_root {
+					run_clean_root_verify := fixed_depth_root_verify
+					if depth_completed && !run_clean_root_verify && timed_root_verify_prepared {
+						depth_elapsed_now := int(time.duration_milliseconds(time.since(depth_start)))
+						verify_best_move_changes := best_move_changes
+						if !moves.is_empty_move(prev_best_move) &&
+						   !moves.is_empty_move(current_best_move) &&
+						   !same_move(current_best_move, prev_best_move) {
+							verify_best_move_changes += 1
+						}
+
+						verify_score_drop := largest_score_drop
+						if have_completed_score {
+							current_score_for_budget := best_score + params.contempt
+							score_drop := previous_completed_score - current_score_for_budget
+							if score_drop > verify_score_drop {
+								verify_score_drop = score_drop
+							}
+						}
+
+						run_clean_root_verify = !should_start_next_depth(
+							search_limits,
+							depth_elapsed_now,
+							last_depth_ms,
+							verify_best_move_changes,
+							verify_score_drop,
+							aspiration_failures,
+						)
+					}
+
+					if depth_completed && verify_from_clean_root && run_clean_root_verify {
 						stat_add(&search_stats.aspiration_verifies)
 						if debug_root_pass {
 							fmt.printf("info string rootdebug verify action=clean_root start current_best=")
@@ -4110,7 +4153,7 @@ search_position :: proc(
 							current_best_move = verify_pass.best_move
 							best_pv = verify_pass.best_pv
 							found_move = verify_pass.found_move
-						} else {
+						} else if fixed_depth_root_verify {
 							depth_completed = false
 						}
 					}
