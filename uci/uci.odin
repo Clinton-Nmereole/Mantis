@@ -394,6 +394,11 @@ parse_go :: proc(command: string, b: ^board.Board) {
 		limits := search.calculate_time(tc, b.side, move_overhead)
 		search.search_limits = limits
 		search.use_time_management = true
+		// Keep TT inside the current clock search, but do not let prior
+		// game positions steer a new managed-clock move.
+		if !limits.is_movetime && !limits.is_infinite {
+			search.clear_tt()
+		}
 
 		// Use parallel search if threading enabled
 		if thread_count > 1 {

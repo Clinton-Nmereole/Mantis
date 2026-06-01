@@ -559,9 +559,68 @@ Conclusion: the UCI replay counter bug was real and fixed. The remaining
 practice-game issue is warm TT influence under clock play, especially at
 candidates 5 and 8.
 
+## Accepted: Clock-Managed TT Isolation
+
+First attempt: clear the warm TT only for a likely-final timed root depth. That
+fixed candidate 5 but candidate 8 still reproduced the PGN move. Candidate 8
+needed the whole timed target search to begin from a clean TT, not only the
+final root depth.
+
+Engine change: for normal UCI clock searches (`go wtime/btime/...`), Mantis now
+clears TT once at the start of the search. Fixed-depth analysis, `go movetime`,
+and infinite searches keep the previous behavior. This preserves TT use inside
+the current move search, but prevents earlier game positions from steering a
+new managed-clock move.
+
+Target replay with `./mantis_clock_isolated`:
+
+```sh
+python3 blunder_trace.py \
+  --pgn games/MantisVsViridthas0601.pgn \
+  --mode first-collapse \
+  --threshold-cp 150 \
+  --candidate-indexes 5 8 13 \
+  --limit 3 \
+  --binary ./mantis_clock_isolated \
+  --no-depths \
+  --clock 180000 180000 2000 2000 \
+  --stateful-replay \
+  --skip-cold \
+  --warm-depth 8 \
+  --timeout 120 \
+  --report games/mantis_vs_viridithas_0601_clock_isolated_targets.md \
+  --csv games/mantis_vs_viridithas_0601_clock_isolated_targets.csv
+```
+
+Result:
+
+| # | Played | Warm clock after engine change | Finding |
+| ---: | --- | --- | --- |
+| 5 | `d3e4` | `d3c2` | Avoids PGN blunder |
+| 8 | `f5d3` | `h2h3` | Avoids PGN blunder |
+| 13 | `f5c2` | `g3d6` | Avoids PGN blunder |
+
+Full 13-position stateful clock replay:
+
+| Category | Count | Positions |
+| --- | ---: | --- |
+| Avoids PGN blunder under searched limit | 9/13 | 1, 3, 4, 5, 7, 8, 9, 12, 13 |
+| Still prefers PGN blunder | 4/13 | 2, 6, 10, 11 |
+
+Validation:
+
+```text
+python3 correctness_test.py --binary ./mantis_clock_isolated
+python3 tactical_regression.py --binary ./mantis_clock_isolated
+python3 -m py_compile blunder_trace.py timed_root_trace.py stats_benchmark.py compare_candidates.py
+git diff --check
+```
+
+All passed.
+
 ## Next
 
-Add a clock-safe root verification mode that verifies the likely final timed
-root choice with TT cutoffs disabled or from an empty TT, then restores normal
-TT state. The goal is to keep useful TT across the game while preventing stale
-warm TT bounds/order from deciding the final move at unstable tactical roots.
+Investigate the four remaining first-collapse positions as genuine
+search/evaluation failures. Start with candidates 2 and 6 because they are
+middlegame tactical collapses that remain preferred even from clean timed
+searches.
