@@ -877,3 +877,33 @@ Next: make clean root verification choose its candidate set from a precomputed
 root snapshot, then add an explicit, tiny suspect-quiet list from the normal
 fail-low pass so moves like `h7g6` are considered deliberately rather than by
 verifier-history side effect.
+
+## Stable Snapshot Root Verification
+
+Implemented the behavior fix for the candidate-4 failure mode:
+
+- Clean root verification now precomputes candidate inclusion from the clean
+  root history snapshot, so verifier searches cannot mutate history and make
+  later quiets eligible by accident.
+- At depth 12+, fail-low clean verification scores a bounded suspect-quiet
+  pool from the clean root snapshot: first 20 root-order quiets that were
+  bound-pinned in the fail-low pass, keeping at most four by reduced-depth
+  full-window score.
+- The full verifier then scores candidates from the same TT/history snapshot
+  instead of sequentially contaminating later candidates.
+- Depths 9-11 keep the previous verifier path to avoid shallow opening drift.
+
+Candidate-4 fixed-depth result:
+
+```text
+go depth 14
+bestmove h7g6
+```
+
+The shallow benchmark gate is unchanged against `./mantis_timed_verify_guard`:
+depth 8 and depth 9 both had zero best-move, score, and node changes across all
+44 benchmark positions.
+
+Next: test this binary in practice games and then measure whether the same
+snapshot-verifier idea helps timed root verification without spending too much
+of the clock on suspect quiets.

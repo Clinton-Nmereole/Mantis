@@ -72,6 +72,14 @@ MultiPV_Result :: struct {
 	pv:    PV_Line,
 }
 
+RootSearchPassEntry :: struct {
+	move:         moves.Move,
+	order_index:  int,
+	score:        int,
+	alpha_before: int,
+	nodes:        u64,
+}
+
 RootSearchPassResult :: struct {
 	best_score:    int,
 	best_move:     moves.Move,
@@ -80,6 +88,20 @@ RootSearchPassResult :: struct {
 	completed:     bool,
 	root_tt_seen:  bool,
 	root_tt_score: int,
+	entries:       [256]RootSearchPassEntry,
+	count:         int,
+}
+
+RootVerifyCandidateSet :: struct {
+	include: [256]bool,
+	reason:  [256]string,
+	count:   int,
+}
+
+RootVerifySuspectResult :: struct {
+	moves: [4]moves.Move,
+	count: int,
+	nodes: u64,
 }
 
 
@@ -1249,6 +1271,8 @@ run_root_verify_trace_pass :: proc(
 	verify_all: bool = false,
 	extra_verify_move_1: moves.Move = moves.Move{},
 	extra_verify_move_2: moves.Move = moves.Move{},
+	candidate_set: ^RootVerifyCandidateSet = nil,
+	tt_snapshot: []TTBucket = nil,
 ) {
 	result.best_score = -eval.INF
 	result.best_move = moves.Move{}
@@ -1262,37 +1286,25 @@ run_root_verify_trace_pass :: proc(
 		history_score := 0
 		see_score := SEE_SCORE_UNKNOWN
 
-		if !verify_all &&
-		   !same_move(move, root_tt_move) &&
-		   !same_move(move, extra_verify_move_1) &&
-		   !same_move(move, extra_verify_move_2) {
-			if move.promoted != -1 {
-				reason = "promotion"
-			} else if move.capture {
-				see_score = see_capture(b, move)
-				if see_score < 0 {
-					included = false
-					reason = "negative_see_capture"
-				} else {
-					reason = "nonnegative_see_capture"
-				}
-			} else {
-				history_score = get_history_score(st, move)
-				if history_score <= 0 {
-					included = false
-					reason = "quiet_nonpositive_history"
-				} else {
-					reason = "positive_history_quiet"
-				}
-			}
-		} else if same_move(move, root_tt_move) {
-			reason = "root_seed"
-		} else if same_move(move, extra_verify_move_1) {
-			reason = "current_best"
-		} else if same_move(move, extra_verify_move_2) {
-			reason = "actual_tt"
-		} else if verify_all {
-			reason = "verify_all"
+		if candidate_set != nil && i < candidate_set.count {
+			included = verify_all || candidate_set.include[i]
+			reason = candidate_set.reason[i]
+		} else {
+			included, reason = root_verify_candidate_decision(
+				st,
+				b,
+				move,
+				root_tt_move,
+				verify_all,
+				extra_verify_move_1,
+				extra_verify_move_2,
+			)
+		}
+
+		if move.capture {
+			see_score = see_capture(b, move)
+		} else if move.promoted == -1 {
+			history_score = get_history_score(st, move)
 		}
 
 		entry_index := result.count
@@ -1335,22 +1347,39 @@ run_root_verify_trace_pass :: proc(
 			continue
 		}
 
-		nnue.update_accumulators(&state, b, move)
-
 		child_pv: PV_Line
-		nodes_before := st.nodes
-		score := -negamax(
-			st,
-			b,
-			-eval.INF,
-			eval.INF,
-			depth - 1,
-			1,
-			&child_pv,
-		)
-		nodes := st.nodes - nodes_before
-
 		board.unmake_move(b, &state)
+		nodes_before := st.nodes
+		score := 0
+		if len(tt_snapshot) > 0 {
+			scored := trace_score_root_child_from_snapshot(
+				st,
+				b,
+				move,
+				tt_snapshot,
+				depth,
+				-eval.INF,
+				eval.INF,
+				true,
+			)
+			st.nodes += scored.nodes
+			score = scored.score
+			child_pv = scored.pv
+		} else {
+			board.make_move_fast(b, move, &state)
+			nnue.update_accumulators(&state, b, move)
+			score = -negamax(
+				st,
+				b,
+				-eval.INF,
+				eval.INF,
+				depth - 1,
+				1,
+				&child_pv,
+			)
+			board.unmake_move(b, &state)
+		}
+		nodes := st.nodes - nodes_before
 
 		if entry_index < len(result.entries) {
 			result.entries[entry_index].score = score
@@ -1422,6 +1451,29 @@ trace_root_pipeline_print_verify_result :: proc(ran: bool, result: ^RootVerifyTr
 	} else {
 		fmt.printf(" verify=skip:%s", entry.reason)
 	}
+}
+
+root_search_pass_from_continuation_trace :: proc(src: ^ContinuationDivTraceResult) -> RootSearchPassResult {
+	result := RootSearchPassResult {
+		best_score = src.best_score,
+		best_move  = src.best_move,
+		found_move = !moves.is_empty_move(src.best_move),
+		completed  = true,
+	}
+	result.count = src.count
+	if result.count > len(result.entries) {
+		result.count = len(result.entries)
+	}
+	for i in 0 ..< result.count {
+		result.entries[i] = RootSearchPassEntry {
+			move         = src.entries[i].move,
+			order_index  = src.entries[i].index,
+			score        = src.entries[i].score,
+			alpha_before = src.entries[i].alpha_before,
+			nodes        = src.entries[i].nodes,
+		}
+	}
+	return result
 }
 
 trace_root_pipeline_scores :: proc(fen: string, depth: int, target_moves: []string) {
@@ -1555,17 +1607,71 @@ trace_root_pipeline_scores :: proc(fen: string, depth: int, target_moves: []stri
 			verify_ran = true
 			restore_tt(base_tt)
 			verify_st := clone_search_thread(&base_st)
-			run_root_verify_trace_pass(
-				&verify,
-				&verify_st,
-				&b,
-				&root_move_list,
-				depth,
-				root_tt_move,
-				false,
-				normal_best,
-				actual_root_tt_move,
-			)
+			if depth >= ROOT_VERIFY_SUSPECT_MIN_DEPTH {
+				base_verify_candidates: RootVerifyCandidateSet
+				verify_candidates: RootVerifyCandidateSet
+				prepare_root_verify_candidate_set(
+					&base_verify_candidates,
+					&verify_st,
+					&b,
+					&root_move_list,
+					root_tt_move,
+					false,
+					normal_best,
+					actual_root_tt_move,
+				)
+				research_as_root := root_search_pass_from_continuation_trace(&research)
+				suspect_quiets := collect_root_verify_suspect_quiets(
+					&verify_st,
+					&b,
+					&root_move_list,
+					depth,
+					&research_as_root,
+					base_tt,
+					&base_verify_candidates,
+				)
+				normal_st.nodes += suspect_quiets.nodes
+				prepare_root_verify_candidate_set(
+					&verify_candidates,
+					&verify_st,
+					&b,
+					&root_move_list,
+					root_tt_move,
+					false,
+					normal_best,
+					actual_root_tt_move,
+					suspect_quiets.moves[0],
+					suspect_quiets.moves[1],
+					suspect_quiets.moves[2],
+					suspect_quiets.moves[3],
+				)
+				restore_tt(base_tt)
+				run_root_verify_trace_pass(
+					&verify,
+					&verify_st,
+					&b,
+					&root_move_list,
+					depth,
+					root_tt_move,
+					false,
+					normal_best,
+					actual_root_tt_move,
+					&verify_candidates,
+					base_tt,
+				)
+			} else {
+				run_root_verify_trace_pass(
+					&verify,
+					&verify_st,
+					&b,
+					&root_move_list,
+					depth,
+					root_tt_move,
+					false,
+					normal_best,
+					actual_root_tt_move,
+				)
+			}
 			normal_st.nodes += verify_st.nodes
 			if verify_st.continuation_history != nil {
 				free(verify_st.continuation_history)
@@ -1806,6 +1912,189 @@ trace_root_pipeline_scores :: proc(fen: string, depth: int, target_moves: []stri
 		os.flush(os.stdout)
 		printed += 1
 	}
+}
+
+ROOT_VERIFY_SUSPECT_MIN_DEPTH :: 12
+ROOT_VERIFY_SUSPECT_PREFILTER_OFFSET :: 3
+ROOT_VERIFY_SUSPECT_ORDER_LIMIT :: 20
+
+root_verify_candidate_decision :: proc(
+	st: ^SearchThread,
+	b: ^board.Board,
+	move: moves.Move,
+	root_tt_move: moves.Move,
+	verify_all: bool,
+	extra_verify_move_1: moves.Move = moves.Move{},
+	extra_verify_move_2: moves.Move = moves.Move{},
+	suspect_quiet_1: moves.Move = moves.Move{},
+	suspect_quiet_2: moves.Move = moves.Move{},
+	suspect_quiet_3: moves.Move = moves.Move{},
+	suspect_quiet_4: moves.Move = moves.Move{},
+) -> (include: bool, reason: string) {
+	if verify_all {
+		return true, "verify_all"
+	}
+	if same_move(move, root_tt_move) {
+		return true, "root_seed"
+	}
+	if same_move(move, extra_verify_move_1) {
+		return true, "current_best"
+	}
+	if same_move(move, extra_verify_move_2) {
+		return true, "actual_tt"
+	}
+	if same_move(move, suspect_quiet_1) ||
+	   same_move(move, suspect_quiet_2) ||
+	   same_move(move, suspect_quiet_3) ||
+	   same_move(move, suspect_quiet_4) {
+		return true, "suspect_quiet"
+	}
+	if move.promoted != -1 {
+		return true, "promotion"
+	}
+	if move.capture {
+		if see_capture(b, move) < 0 {
+			return false, "negative_see_capture"
+		}
+		return true, "nonnegative_see_capture"
+	}
+	if get_history_score(st, move) <= 0 {
+		return false, "quiet_nonpositive_history"
+	}
+	return true, "positive_history_quiet"
+}
+
+prepare_root_verify_candidate_set :: proc(
+	set: ^RootVerifyCandidateSet,
+	st: ^SearchThread,
+	b: ^board.Board,
+	move_list: ^moves.MoveList,
+	root_tt_move: moves.Move,
+	verify_all: bool,
+	extra_verify_move_1: moves.Move = moves.Move{},
+	extra_verify_move_2: moves.Move = moves.Move{},
+	suspect_quiet_1: moves.Move = moves.Move{},
+	suspect_quiet_2: moves.Move = moves.Move{},
+	suspect_quiet_3: moves.Move = moves.Move{},
+	suspect_quiet_4: moves.Move = moves.Move{},
+) {
+	set^ = RootVerifyCandidateSet{}
+	set.count = move_list.count
+	for i in 0 ..< move_list.count {
+		include, reason := root_verify_candidate_decision(
+			st,
+			b,
+			move_list.moves[i],
+			root_tt_move,
+			verify_all,
+			extra_verify_move_1,
+			extra_verify_move_2,
+			suspect_quiet_1,
+			suspect_quiet_2,
+			suspect_quiet_3,
+			suspect_quiet_4,
+		)
+		set.include[i] = include
+		set.reason[i] = reason
+	}
+}
+
+root_verify_insert_suspect :: proc(result: ^RootVerifySuspectResult, move: moves.Move, score: int, scores: ^[4]int) {
+	insert_at := result.count
+	for i in 0 ..< result.count {
+		if score > scores[i] {
+			insert_at = i
+			break
+		}
+	}
+	if insert_at >= len(result.moves) {
+		return
+	}
+
+	limit := result.count
+	if limit >= len(result.moves) {
+		limit = len(result.moves) - 1
+	}
+	for i := limit; i > insert_at; i -= 1 {
+		result.moves[i] = result.moves[i - 1]
+		scores[i] = scores[i - 1]
+	}
+
+	result.moves[insert_at] = move
+	scores[insert_at] = score
+	if result.count < len(result.moves) {
+		result.count += 1
+	}
+}
+
+collect_root_verify_suspect_quiets :: proc(
+	st: ^SearchThread,
+	b: ^board.Board,
+	move_list: ^moves.MoveList,
+	depth: int,
+	research_pass: ^RootSearchPassResult,
+	tt_snapshot: []TTBucket,
+	base_candidates: ^RootVerifyCandidateSet,
+) -> RootVerifySuspectResult {
+	result: RootVerifySuspectResult
+	if depth < ROOT_VERIFY_SUSPECT_MIN_DEPTH {
+		return result
+	}
+
+	prefilter_depth := depth - ROOT_VERIFY_SUSPECT_PREFILTER_OFFSET
+	if prefilter_depth < 1 {
+		return result
+	}
+
+	scores := [4]int{-eval.INF, -eval.INF, -eval.INF, -eval.INF}
+	for i in 0 ..< research_pass.count {
+		if should_stop_search() {
+			break
+		}
+
+		entry := research_pass.entries[i]
+		if entry.order_index < 1 || entry.order_index > move_list.count {
+			continue
+		}
+		if entry.order_index > ROOT_VERIFY_SUSPECT_ORDER_LIMIT {
+			continue
+		}
+
+		move_idx := entry.order_index - 1
+		if base_candidates.include[move_idx] {
+			continue
+		}
+
+		move := entry.move
+		if move.capture || move.promoted != -1 {
+			continue
+		}
+		if get_history_score(st, move) > 0 {
+			continue
+		}
+		if entry.alpha_before <= -eval.INF / 2 {
+			continue
+		}
+		if entry.score > entry.alpha_before {
+			continue
+		}
+
+		score := trace_score_root_child_from_snapshot(
+			st,
+			b,
+			move,
+			tt_snapshot,
+			prefilter_depth,
+			-eval.INF,
+			eval.INF,
+			true,
+		)
+		result.nodes += score.nodes
+		root_verify_insert_suspect(&result, move, score.score, &scores)
+	}
+
+	restore_tt(tt_snapshot)
+	return result
 }
 
 trace_root_legal_move :: proc(b: ^board.Board, move: moves.Move) -> bool {
@@ -4421,6 +4710,16 @@ run_root_search_pass :: proc(
 		nodes_delta := st.nodes - nodes_before
 
 		board.unmake_move(b, &state)
+		if result.count < len(result.entries) {
+			result.entries[result.count] = RootSearchPassEntry {
+				move         = move,
+				order_index  = i + 1,
+				score        = score,
+				alpha_before = alpha_before,
+				nodes        = nodes_delta,
+			}
+			result.count += 1
+		}
 		if pv_index == 0 && !moves.is_empty_move(root_tt_move) && same_move(move, root_tt_move) {
 			result.root_tt_seen = true
 			result.root_tt_score = score
@@ -4489,6 +4788,7 @@ run_root_full_window_verification_pass :: proc(
 	verify_all: bool = false,
 	extra_verify_move_1: moves.Move = moves.Move{},
 	extra_verify_move_2: moves.Move = moves.Move{},
+	candidate_set: ^RootVerifyCandidateSet = nil,
 ) -> RootSearchPassResult {
 	result := RootSearchPassResult {
 		best_score    = -eval.INF,
@@ -4511,28 +4811,36 @@ run_root_full_window_verification_pass :: proc(
 
 		move := move_list.moves[i]
 		// Verify the stale TT move plus forcing/high-signal alternatives only.
-		if !verify_all &&
-		   !same_move(move, root_tt_move) &&
-		   !same_move(move, extra_verify_move_1) &&
-		   !same_move(move, extra_verify_move_2) {
-			if move.promoted != -1 {
-				// Always verify promotions.
-			} else if move.capture {
-				if see_capture(b, move) < 0 {
+		if !verify_all {
+			if candidate_set != nil && i < candidate_set.count {
+				if !candidate_set.include[i] {
 					if debug_trace {
 						fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
 						root_debug_print_move(move)
-						fmt.println(" reason=negative_see_capture")
+						fmt.printf(" reason=%s\n", candidate_set.reason[i])
 					}
 					continue
 				}
-			} else if get_history_score(st, move) <= 0 {
-				if debug_trace {
-					fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
-					root_debug_print_move(move)
-					fmt.println(" reason=quiet_nonpositive_history")
+			} else if !same_move(move, root_tt_move) &&
+			          !same_move(move, extra_verify_move_1) &&
+			          !same_move(move, extra_verify_move_2) {
+				include, reason := root_verify_candidate_decision(
+					st,
+					b,
+					move,
+					root_tt_move,
+					verify_all,
+					extra_verify_move_1,
+					extra_verify_move_2,
+				)
+				if !include {
+					if debug_trace {
+						fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
+						root_debug_print_move(move)
+						fmt.printf(" reason=%s\n", reason)
+					}
+					continue
 				}
-				continue
 			}
 		}
 
@@ -4625,6 +4933,162 @@ run_root_full_window_verification_pass :: proc(
 		fmt.printf("info string rootdebug pass_result phase=%s completed=%v found=%v best=", debug_phase, result.completed, result.found_move)
 		root_debug_print_move(result.best_move)
 		fmt.printf(" best_score=%d root_seed_seen=%v root_seed_score=%d\n", result.best_score, result.root_tt_seen, result.root_tt_score)
+		os.flush(os.stdout)
+	}
+
+	return result
+}
+
+run_root_snapshot_verification_pass :: proc(
+	st: ^SearchThread,
+	b: ^board.Board,
+	move_list: ^moves.MoveList,
+	depth: int,
+	root_tt_move: moves.Move,
+	pv_index: int,
+	root_pv_first_legal_counted: ^bool,
+	tt_snapshot: []TTBucket,
+	candidate_set: ^RootVerifyCandidateSet,
+	debug_trace: bool = false,
+	debug_phase: string = "",
+) -> RootSearchPassResult {
+	result := RootSearchPassResult {
+		best_score    = -eval.INF,
+		completed     = true,
+		root_tt_score = -eval.INF,
+	}
+
+	if debug_trace {
+		fmt.printf("info string rootdebug pass phase=%s depth=%d alpha=%d beta=%d root_seed=", debug_phase, depth, -eval.INF, eval.INF)
+		root_debug_print_move(root_tt_move)
+		fmt.println(" snapshot=true")
+		os.flush(os.stdout)
+	}
+
+	for i in 0 ..< move_list.count {
+		if should_stop_search() {
+			result.completed = false
+			break
+		}
+
+		move := move_list.moves[i]
+		if candidate_set != nil && i < candidate_set.count && !candidate_set.include[i] {
+			if debug_trace {
+				fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
+				root_debug_print_move(move)
+				fmt.printf(" reason=%s\n", candidate_set.reason[i])
+			}
+			continue
+		}
+
+		if !board.is_castling_legal_now(b, move) {
+			if debug_trace {
+				fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
+				root_debug_print_move(move)
+				fmt.println(" reason=castle_illegal")
+			}
+			continue
+		}
+
+		state: board.StateInfo
+		board.make_move_fast(b, move, &state)
+		king_sq := board.get_king_square(b, 1 - b.side)
+		illegal := board.is_square_attacked(b, king_sq, b.side)
+		board.unmake_move(b, &state)
+		if illegal {
+			stat_add(&search_stats.legal_rejects)
+			if debug_trace {
+				fmt.printf("info string rootdebug skip phase=%s idx=%d move=", debug_phase, i + 1)
+				root_debug_print_move(move)
+				fmt.println(" reason=self_check")
+			}
+			continue
+		}
+
+		if !root_pv_first_legal_counted^ && i == 0 && same_move(move, root_tt_move) {
+			stat_add(&search_stats.root_pv_first_legal)
+			root_pv_first_legal_counted^ = true
+		}
+
+		nodes_before := st.nodes
+		scored := trace_score_root_child_from_snapshot(
+			st,
+			b,
+			move,
+			tt_snapshot,
+			depth,
+			-eval.INF,
+			eval.INF,
+			true,
+		)
+		st.nodes += scored.nodes
+		nodes_delta := st.nodes - nodes_before
+		score := scored.score
+
+		if should_stop_search() {
+			result.completed = false
+			break
+		}
+
+		if result.count < len(result.entries) {
+			result.entries[result.count] = RootSearchPassEntry {
+				move         = move,
+				order_index  = i + 1,
+				score        = score,
+				alpha_before = -eval.INF,
+				nodes        = nodes_delta,
+			}
+			result.count += 1
+		}
+
+		if pv_index == 0 && !moves.is_empty_move(root_tt_move) && same_move(move, root_tt_move) {
+			result.root_tt_seen = true
+			result.root_tt_score = score
+		}
+
+		new_best := score > result.best_score
+		if score > result.best_score {
+			result.best_score = score
+			result.best_move = move
+			result.found_move = true
+
+			result.best_pv.moves[0] = move
+			for pv_i in 0 ..< scored.pv.count {
+				result.best_pv.moves[pv_i + 1] = scored.pv.moves[pv_i]
+			}
+			result.best_pv.count = scored.pv.count + 1
+		}
+
+		if debug_trace {
+			reason := "candidate"
+			if candidate_set != nil && i < candidate_set.count {
+				reason = candidate_set.reason[i]
+			}
+			fmt.printf("info string rootdebug child phase=%s idx=%d move=", debug_phase, i + 1)
+			root_debug_print_move(move)
+			fmt.printf(
+				" score=%d alpha_before=%d alpha_after=%d beta=%d nodes=%d new_best=%v root_seed=%v reason=%s pv=",
+				score,
+				-eval.INF,
+				eval.INF,
+				eval.INF,
+				nodes_delta,
+				new_best,
+				same_move(move, root_tt_move),
+				reason,
+			)
+			root_debug_print_pv(move, &scored.pv)
+			fmt.println()
+			os.flush(os.stdout)
+		}
+	}
+
+	restore_tt(tt_snapshot)
+
+	if debug_trace {
+		fmt.printf("info string rootdebug pass_result phase=%s completed=%v found=%v best=", debug_phase, result.completed, result.found_move)
+		root_debug_print_move(result.best_move)
+		fmt.printf(" best_score=%d root_seed_seen=%v root_seed_score=%d snapshot=true\n", result.best_score, result.root_tt_seen, result.root_tt_score)
 		os.flush(os.stdout)
 	}
 
@@ -4950,21 +5414,90 @@ search_position :: proc(
 							root_debug_print_move(current_best_move)
 							fmt.printf(" current_score=%d\n", best_score)
 						}
-						restore_tt(verify_tt_snapshot)
-						verify_pass := run_root_full_window_verification_pass(
-							&verify_st,
-							b,
-							&move_list,
-							current_depth,
-							root_tt_move,
-							pv_index,
-							&root_pv_first_legal_counted,
-							debug_root_pass,
-							"clean_root_verify",
-							false,
-							current_best_move,
-							actual_root_tt_move,
-						)
+
+						verify_pass: RootSearchPassResult
+						if current_depth >= ROOT_VERIFY_SUSPECT_MIN_DEPTH {
+							base_verify_candidates: RootVerifyCandidateSet
+							verify_candidates: RootVerifyCandidateSet
+							prepare_root_verify_candidate_set(
+								&base_verify_candidates,
+								&verify_st,
+								b,
+								&move_list,
+								root_tt_move,
+								false,
+								current_best_move,
+								actual_root_tt_move,
+							)
+							suspect_quiets := collect_root_verify_suspect_quiets(
+								&verify_st,
+								b,
+								&move_list,
+								current_depth,
+								&research_pass,
+								verify_tt_snapshot,
+								&base_verify_candidates,
+							)
+							st.nodes += suspect_quiets.nodes
+							if debug_root_pass && suspect_quiets.count > 0 {
+								fmt.printf("info string rootdebug verify suspect_quiets count=%d nodes=%d moves=", suspect_quiets.count, suspect_quiets.nodes)
+								for suspect_idx in 0 ..< suspect_quiets.count {
+									root_debug_print_move(suspect_quiets.moves[suspect_idx])
+									if suspect_idx + 1 < suspect_quiets.count {
+										fmt.printf(",")
+									}
+								}
+								fmt.println()
+							}
+							if should_stop_search() {
+								depth_completed = false
+							}
+							prepare_root_verify_candidate_set(
+								&verify_candidates,
+								&verify_st,
+								b,
+								&move_list,
+								root_tt_move,
+								false,
+								current_best_move,
+								actual_root_tt_move,
+								suspect_quiets.moves[0],
+								suspect_quiets.moves[1],
+								suspect_quiets.moves[2],
+								suspect_quiets.moves[3],
+							)
+							if depth_completed {
+								verify_pass = run_root_snapshot_verification_pass(
+									&verify_st,
+									b,
+									&move_list,
+									current_depth,
+									root_tt_move,
+									pv_index,
+									&root_pv_first_legal_counted,
+									verify_tt_snapshot,
+									&verify_candidates,
+									debug_root_pass,
+									"clean_root_verify",
+								)
+							}
+						} else {
+							restore_tt(verify_tt_snapshot)
+							verify_pass = run_root_full_window_verification_pass(
+								&verify_st,
+								b,
+								&move_list,
+								current_depth,
+								root_tt_move,
+								pv_index,
+								&root_pv_first_legal_counted,
+								debug_root_pass,
+								"clean_root_verify",
+								false,
+								current_best_move,
+								actual_root_tt_move,
+							)
+						}
 						st.nodes += verify_st.nodes
 						if verify_pass.completed && verify_pass.found_move {
 							best_score = verify_pass.best_score
