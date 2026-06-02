@@ -907,3 +907,46 @@ depth 8 and depth 9 both had zero best-move, score, and node changes across all
 Next: test this binary in practice games and then measure whether the same
 snapshot-verifier idea helps timed root verification without spending too much
 of the clock on suspect quiets.
+
+## Timed Snapshot Root Verification
+
+Implemented a bounded clock-mode version of the snapshot verifier:
+
+- Managed-clock clean verification now gets a small instability extension only
+  when the original hard limit was not already capped by time pressure.
+- Timed suspect prefiltering uses a shallower reduced-depth probe.
+- Timed snapshot verification compares suspects against the recovered root best
+  and verifies only the top suspect quiets plus forcing moves, so it can finish
+  before falling back to the previous completed depth.
+- Fixed-depth verification keeps the fuller candidate set.
+
+Candidate-4 3+2 clock result:
+
+```text
+go wtime 180000 btime 180000 winc 2000 binc 2000
+bestmove h7g6
+```
+
+Clock comparison against `./mantis_stable_verify`:
+
+| Suite | Bestmove changes | Avg depth | Nodes | Time | Max score delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Viridithas first-collapse FENs | 1/13 | 15.38 -> 15.46 | +10.71% | +11.15% | 3 cp |
+| 44-position 3+2 smoke, first 16 | 0/16 | 13.56 -> 13.62 | +6.51% | +7.07% | 20 cp |
+
+The only first-collapse bestmove change was candidate 4, `g8h8 -> h7g6`.
+Fixed-depth comparison against `./mantis_stable_verify` stayed exact at depths
+8 and 9 across all 44 benchmark positions: zero bestmove, node, and score
+changes.
+
+Validation passed:
+
+```text
+python3 tactical_regression.py --binary ./mantis_timed_snapshot_verify
+python3 correctness_test.py --binary ./mantis_timed_snapshot_verify
+python3 stats_benchmark.py --binary ./mantis_timed_snapshot_verify
+```
+
+Next: test `./mantis_timed_snapshot_verify` in practice games, then inspect any
+new Viridithas losses for fresh first-collapse positions rather than continuing
+to tune candidate 4.

@@ -238,3 +238,29 @@ should_prepare_timed_root_verify :: proc(
 
 	return elapsed + projected * 2 >= budget || elapsed >= limits.soft_time
 }
+
+extend_timed_root_verify_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+
+	// Only extend when the original hard limit had room to be a normal
+	// instability bound. If the hard limit was capped by time pressure,
+	// preserve the cap.
+	if limits.hard_time < limits.soft_time * 19 / 10 {
+		return
+	}
+
+	extended := limits.hard_time + limits.soft_time
+	cap := limits.soft_time * 3
+	if extended > cap {
+		extended = cap
+	}
+	if extended > limits.hard_time {
+		limits.hard_time = extended
+		limits.max_time = extended
+	}
+}
