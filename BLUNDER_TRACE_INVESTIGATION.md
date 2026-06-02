@@ -620,7 +620,69 @@ All passed.
 
 ## Next
 
-Investigate the four remaining first-collapse positions as genuine
-search/evaluation failures. Start with candidates 2 and 6 because they are
+Validate the remaining first-collapse positions with an external oracle before
+treating them as engine bugs. Start with candidates 2 and 6 because they are
 middlegame tactical collapses that remain preferred even from clean timed
 searches.
+
+## Accepted: External Oracle Validation
+
+Tooling change: `blunder_trace.py` now accepts `--oracle-binary`,
+`--oracle-depth`, `--oracle-multipv`, and `--oracle-timeout`. The report and
+CSV include the oracle best move, the PGN move's oracle rank, and the estimated
+root-move loss. This makes the PGN eval comments useful as a candidate source
+without assuming each eval drop is a true move-choice blunder.
+
+Command:
+
+```sh
+python3 blunder_trace.py \
+  --pgn games/MantisVsViridthas0601.pgn \
+  --mode first-collapse \
+  --threshold-cp 150 \
+  --limit 13 \
+  --binary ./mantis_clock_isolated \
+  --no-depths \
+  --clock 180000 180000 2000 2000 \
+  --stateful-replay \
+  --skip-cold \
+  --warm-depth 8 \
+  --oracle-binary ./stockfish-debug/src/stockfish \
+  --oracle-depth 18 \
+  --oracle-multipv 6 \
+  --oracle-timeout 120 \
+  --timeout 120 \
+  --report games/mantis_vs_viridithas_0601_clock_oracle_combined.md \
+  --csv games/mantis_vs_viridithas_0601_clock_oracle_combined.csv
+```
+
+Result:
+
+| # | Round | Played | Current Mantis | Oracle best | Finding |
+| ---: | ---: | --- | --- | --- | --- |
+| 2 | 5 | `d2c3` | `d2c3` | `d2c3` | False positive; oracle agrees with the played move. |
+| 6 | 12 | `b6b4` | `b6b4` | `b6b4` | False positive; oracle agrees with the played move. |
+| 10 | 21 | `d1f1` | `d1f1` | `d1f1` | False positive; oracle agrees with the played move. |
+| 11 | 22 | `d4c6` | `d4c6` | `d4c6` | False positive; oracle agrees with the played move. |
+| 4 | 10 | `e5f7` | `g8h8` | `h7g6` | Main remaining mismatch, about 53 cp behind oracle. |
+| 12 | 23 | `d7f7` | `d7e7` | `g1f1` | Smaller mismatch, about 21 cp behind oracle. |
+| 1 | 4 | `f8c5` | `c8c2` | `f8c5` | Minor mismatch, about 36 cp behind oracle. |
+
+Conclusion: the four "still preferred" positions after TT isolation are not
+currently good engine-bug targets. The latest binary already avoids most PGN
+first-collapse moves under reproduced clock conditions, and several remaining
+PGN eval drops are oracle-approved moves. The next engine target should be the
+largest current Mantis-vs-oracle mismatch, candidate 4:
+
+```text
+FEN: 1r3rk1/1p1b3q/3NpP1p/p2pn1p1/8/6P1/PP1QBR1P/2R3K1 b - - 0 25
+Mantis: g8h8
+Oracle: h7g6
+```
+
+## Next
+
+Build a focused root trace for candidate 4 with current clock settings and
+oracle MultiPV side by side. The question is whether `h7g6` is missed because
+of root ordering/aspiration behavior, pruning at non-PV nodes, or Mantis'
+static/search score calibration in already-lost middlegame positions.

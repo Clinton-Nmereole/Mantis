@@ -166,6 +166,7 @@ class BlunderCandidate:
     delta_cp: int
     comment: str
     engine_rows: list[dict[str, Any]] = field(default_factory=list)
+    oracle_rows: list[dict[str, Any]] = field(default_factory=list)
 
 
 def parse_eval_cp(comment: str) -> int | None:
@@ -192,6 +193,74 @@ def cp_label(value: int | None) -> str:
         sign = "+" if value > 0 else "-"
         return f"{sign}mate"
     return f"{value / 100.0:+.2f}"
+
+
+DEPTH_RE = re.compile(r"\bdepth (?P<depth>\d+)\b")
+MULTIPV_RE = re.compile(r"\bmultipv (?P<multipv>\d+)\b")
+SCORE_RE = re.compile(r"\bscore (?P<kind>cp|mate) (?P<score>-?\d+)\b")
+NODES_RE = re.compile(r"\bnodes (?P<nodes>\d+)\b")
+TIME_RE = re.compile(r"\btime (?P<time>\d+)\b")
+
+
+def score_to_cp(kind: str, score: int) -> int:
+    if kind == "mate":
+        return MATE_SCORE if score > 0 else -MATE_SCORE
+    return score
+
+
+def parse_multipv(output: str) -> list[dict[str, Any]]:
+    rows_by_rank: dict[int, dict[str, Any]] = {}
+    for line in output.splitlines():
+        if " multipv " not in line or " pv " not in line:
+            continue
+        multipv_match = MULTIPV_RE.search(line)
+        score_match = SCORE_RE.search(line)
+        if not multipv_match or not score_match:
+            continue
+        rank = int(multipv_match.group("multipv"))
+        pv_text = line.split(" pv ", 1)[1].strip()
+        pv_moves = pv_text.split()
+        if not pv_moves:
+            continue
+        depth_match = DEPTH_RE.search(line)
+        nodes_match = NODES_RE.search(line)
+        time_match = TIME_RE.search(line)
+        score_kind = score_match.group("kind")
+        score_value = int(score_match.group("score"))
+        rows_by_rank[rank] = {
+            "rank": rank,
+            "root": pv_moves[0],
+            "score_cp": score_to_cp(score_kind, score_value),
+            "score_kind": score_kind,
+            "score_raw": score_value,
+            "depth": int(depth_match.group("depth")) if depth_match else "",
+            "nodes": int(nodes_match.group("nodes")) if nodes_match else "",
+            "time_ms": int(time_match.group("time")) if time_match else "",
+            "pv": " ".join(pv_moves),
+        }
+    return [rows_by_rank[rank] for rank in sorted(rows_by_rank)]
+
+
+def oracle_summary(candidate: BlunderCandidate) -> dict[str, Any]:
+    if not candidate.oracle_rows:
+        return {}
+    best = candidate.oracle_rows[0]
+    played = next((row for row in candidate.oracle_rows if row["root"] == candidate.uci), None)
+    if played is None:
+        return {
+            "bestmove": best["root"],
+            "best_score_cp": best["score_cp"],
+            "played_rank": "",
+            "played_score_cp": "",
+            "played_loss_cp": "",
+        }
+    return {
+        "bestmove": best["root"],
+        "best_score_cp": best["score_cp"],
+        "played_rank": played["rank"],
+        "played_score_cp": played["score_cp"],
+        "played_loss_cp": best["score_cp"] - played["score_cp"],
+    }
 
 
 def side_name(game: chess.pgn.Game, color: chess.Color) -> str:
@@ -407,6 +476,52 @@ def run_engine_depths(
             candidate.engine_rows.append(row)
 
 
+def run_oracle_searches(
+    candidates: list[BlunderCandidate],
+    binary: str,
+    depth: int,
+    multipv: int,
+    timeout: float,
+    limit: int,
+) -> None:
+    selected = candidates[:limit]
+    total = len(selected)
+    for index, candidate in enumerate(selected, start=1):
+        print(
+            f"[oracle {index:>3}/{total}] round={candidate.round_name} "
+            f"ply={candidate.ply} move={candidate.uci} depth={depth} multipv={multipv}",
+            flush=True,
+        )
+        engine = UCIEngine(binary, timeout)
+        try:
+            engine.set_option("MultiPV", multipv)
+            _stats, wall_ms, output = engine.search_go_output_fen(
+                candidate.fen,
+                f"go depth {depth}",
+                timeout,
+            )
+        except subprocess.TimeoutExpired:
+            candidate.oracle_rows.append(
+                {
+                    "rank": "",
+                    "root": "timeout",
+                    "score_cp": "",
+                    "depth": depth,
+                    "nodes": "",
+                    "time_ms": int(timeout * 1000),
+                    "wall_ms": int(timeout * 1000),
+                    "pv": "",
+                }
+            )
+        else:
+            rows = parse_multipv(output)
+            for row in rows:
+                row["wall_ms"] = int(round(wall_ms))
+            candidate.oracle_rows.extend(rows)
+        finally:
+            engine.close()
+
+
 def run_stateful_replay(
     candidates: list[BlunderCandidate],
     pgn_path: Path,
@@ -597,6 +712,11 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
         "eval_before_mantis",
         "eval_after_mantis",
         "classification",
+        "oracle_bestmove",
+        "oracle_best_score_cp",
+        "oracle_played_rank",
+        "oracle_played_score_cp",
+        "oracle_played_loss_cp",
         "search_mode",
         "search_limit",
         "depth",
@@ -612,6 +732,7 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for candidate in candidates:
+            oracle = oracle_summary(candidate)
             if candidate.engine_rows:
                 for row in candidate.engine_rows:
                     writer.writerow(
@@ -628,6 +749,11 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                             "eval_before_mantis": candidate.eval_before_mantis_cp,
                             "eval_after_mantis": candidate.eval_after_mantis_cp,
                             "classification": classify(candidate),
+                            "oracle_bestmove": oracle.get("bestmove", ""),
+                            "oracle_best_score_cp": oracle.get("best_score_cp", ""),
+                            "oracle_played_rank": oracle.get("played_rank", ""),
+                            "oracle_played_score_cp": oracle.get("played_score_cp", ""),
+                            "oracle_played_loss_cp": oracle.get("played_loss_cp", ""),
                             "search_mode": row.get("search_mode", "cold"),
                             "search_limit": row.get("search_limit", row.get("depth", "")),
                             "depth": row.get("depth", ""),
@@ -655,6 +781,11 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                         "eval_before_mantis": candidate.eval_before_mantis_cp,
                         "eval_after_mantis": candidate.eval_after_mantis_cp,
                         "classification": classify(candidate),
+                        "oracle_bestmove": oracle.get("bestmove", ""),
+                        "oracle_best_score_cp": oracle.get("best_score_cp", ""),
+                        "oracle_played_rank": oracle.get("played_rank", ""),
+                        "oracle_played_score_cp": oracle.get("played_score_cp", ""),
+                        "oracle_played_loss_cp": oracle.get("played_loss_cp", ""),
                         "fen": candidate.fen,
                     }
                 )
@@ -668,6 +799,9 @@ def render_markdown(
     depths: list[int],
     movetimes_ms: list[int],
     clock_ms: dict[str, int] | None,
+    oracle_binary: str | None,
+    oracle_depth: int,
+    oracle_multipv: int,
     threshold_cp: int,
     max_before_abs_cp: int | None,
     mode: str,
@@ -708,6 +842,10 @@ def render_markdown(
             out.write("Stateful target hash: `cleared after warmup`\n\n")
         if target_from_fen:
             out.write("Stateful target position: `FEN`\n\n")
+    if oracle_binary:
+        out.write(
+            f"Oracle: `{oracle_binary}`, depth `{oracle_depth}`, MultiPV `{oracle_multipv}`\n\n"
+        )
     out.write("## Summary\n\n")
     out.write(f"- Games parsed: {stats['games']}\n")
     out.write(f"- Games with Mantis: {stats['mantis_games']}\n")
@@ -718,15 +856,30 @@ def render_markdown(
 
     section_title = "First Collapses" if mode == "first-collapse" else "Worst Drops"
     out.write(f"## {section_title}\n\n")
-    out.write("| # | Round | Ply | Side | Move | Mantis Before | Mantis After | Drop | Classification |\n")
-    out.write("| ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | --- |\n")
+    has_oracle = any(candidate.oracle_rows for candidate in selected)
+    if has_oracle:
+        out.write("| # | Round | Ply | Side | Move | Mantis Before | Mantis After | Drop | Classification | Oracle Best | Played Rank | Loss |\n")
+        out.write("| ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | --- | --- | ---: | ---: |\n")
+    else:
+        out.write("| # | Round | Ply | Side | Move | Mantis Before | Mantis After | Drop | Classification |\n")
+        out.write("| ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | --- |\n")
     for candidate in selected:
-        out.write(
+        base = (
             f"| {candidate.index} | {candidate.round_name} | {candidate.ply} | "
             f"{candidate.mantis_color} | `{candidate.uci}` `{candidate.san}` | "
             f"{cp_label(candidate.eval_before_mantis_cp)} | {cp_label(candidate.eval_after_mantis_cp)} | "
-            f"{candidate.delta_cp:+d} | {classify(candidate)} |\n"
+            f"{candidate.delta_cp:+d} | {classify(candidate)}"
         )
+        if has_oracle:
+            oracle = oracle_summary(candidate)
+            loss = oracle.get("played_loss_cp", "")
+            loss_label = cp_label(loss) if isinstance(loss, int) else ""
+            out.write(
+                f"{base} | `{oracle.get('bestmove', '')}` | "
+                f"{oracle.get('played_rank', '')} | {loss_label} |\n"
+            )
+        else:
+            out.write(f"{base} |\n")
     out.write("\n")
 
     for candidate in selected:
@@ -741,6 +894,19 @@ def render_markdown(
             f"{cp_label(candidate.eval_after_cp)}\n\n"
         )
         out.write(f"FEN: `{candidate.fen}`\n\n")
+        if candidate.oracle_rows:
+            out.write("### Oracle MultiPV\n\n")
+            out.write("| Rank | Root | Score | Depth | Nodes | Time ms | PV |\n")
+            out.write("| ---: | --- | ---: | ---: | ---: | ---: | --- |\n")
+            for row in candidate.oracle_rows:
+                score = row.get("score_cp", "")
+                score_label = cp_label(score) if isinstance(score, int) else "?"
+                out.write(
+                    f"| {row.get('rank', '')} | `{row.get('root', '')}` | {score_label} | "
+                    f"{row.get('depth', '')} | {row.get('nodes', '')} | {row.get('time_ms', '')} | "
+                    f"`{row.get('pv', '')}` |\n"
+                )
+            out.write("\n")
         if candidate.engine_rows:
             out.write("| Mode | Limit | Bestmove | Score | Nodes | Time ms | Asp low/high/retry/verify |\n")
             out.write("| --- | --- | --- | ---: | ---: | ---: | --- |\n")
@@ -819,6 +985,10 @@ def main() -> int:
         help="In stateful replay, set the target position from its FEN instead of replaying startpos moves",
     )
     parser.add_argument("--skip-cold", action="store_true", help="Only run stateful replay searches, not cold per-position searches")
+    parser.add_argument("--oracle-binary", help="Optional external UCI engine used to validate candidate root moves")
+    parser.add_argument("--oracle-depth", type=int, default=18, help="Depth for --oracle-binary searches")
+    parser.add_argument("--oracle-multipv", type=int, default=6, help="MultiPV count for --oracle-binary searches")
+    parser.add_argument("--oracle-timeout", type=float, default=120.0, help="Timeout per oracle search")
     parser.add_argument("--timeout", type=float, default=90.0, help="Timeout per engine search")
     parser.add_argument("--report", default="games/blunder_trace_report.md", help="Markdown report path")
     parser.add_argument("--csv", default="games/blunder_trace_report.csv", help="CSV report path")
@@ -831,6 +1001,10 @@ def main() -> int:
             parser.error("--clock WINC and BINC must be non-negative")
     if args.movestogo < 0:
         parser.error("--movestogo must be non-negative")
+    if args.oracle_depth <= 0:
+        parser.error("--oracle-depth must be positive")
+    if args.oracle_multipv <= 0:
+        parser.error("--oracle-multipv must be positive")
 
     pgn_path = Path(args.pgn)
     if not pgn_path.exists():
@@ -892,6 +1066,15 @@ def main() -> int:
             timeout=args.timeout,
             limit=args.limit,
         )
+    if args.oracle_binary:
+        run_oracle_searches(
+            candidates=candidates,
+            binary=args.oracle_binary,
+            depth=args.oracle_depth,
+            multipv=args.oracle_multipv,
+            timeout=args.oracle_timeout,
+            limit=args.limit,
+        )
 
     report = render_markdown(
         candidates=candidates,
@@ -901,6 +1084,9 @@ def main() -> int:
         depths=depths,
         movetimes_ms=movetimes_ms,
         clock_ms=clock_ms,
+        oracle_binary=args.oracle_binary,
+        oracle_depth=args.oracle_depth,
+        oracle_multipv=args.oracle_multipv,
         threshold_cp=args.threshold_cp,
         max_before_abs_cp=None if args.max_before_abs_cp == 0 else args.max_before_abs_cp,
         mode=args.mode,
