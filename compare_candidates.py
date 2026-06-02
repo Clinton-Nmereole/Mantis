@@ -235,6 +235,13 @@ def main() -> int:
         type=int,
         help="Exit nonzero if any absolute score delta exceeds this many centipawns",
     )
+    parser.add_argument(
+        "--fail-on-depth-loss",
+        type=int,
+        nargs="?",
+        const=1,
+        help="Exit nonzero if candidate depth is lower by at least this many plies; default threshold is 1",
+    )
     args = parser.parse_args()
     if args.depths and any(depth <= 0 for depth in args.depths):
         parser.error("--depths values must be positive")
@@ -250,6 +257,8 @@ def main() -> int:
         parser.error("--movestogo must be non-negative")
     if args.fail_on_score_delta is not None and args.fail_on_score_delta < 0:
         parser.error("--fail-on-score-delta must be non-negative")
+    if args.fail_on_depth_loss is not None and args.fail_on_depth_loss <= 0:
+        parser.error("--fail-on-depth-loss must be positive")
 
     try:
         fens = load_fens(args)
@@ -328,6 +337,26 @@ def main() -> int:
                 print(
                     f"  {row['mode']}={row['limit']} index={int(row['index'])}: "
                     f"score_delta={int(row['score_delta_cp']):+d} "
+                    f"{row['base_best']}->{row['cand_best']} fen={row['fen']}",
+                    flush=True,
+            )
+            return 1
+
+    if args.fail_on_depth_loss is not None:
+        depth_violations = [
+            row for row in all_rows
+            if int(row["base_depth"]) - int(row["cand_depth"]) >= args.fail_on_depth_loss
+        ]
+        if depth_violations:
+            print(
+                f"\nFAIL: {len(depth_violations)} candidate searches lost at least "
+                f"{args.fail_on_depth_loss} ply",
+                flush=True,
+            )
+            for row in depth_violations:
+                print(
+                    f"  {row['mode']}={row['limit']} index={int(row['index'])}: "
+                    f"depth={int(row['base_depth'])}->{int(row['cand_depth'])} "
                     f"{row['base_best']}->{row['cand_best']} fen={row['fen']}",
                     flush=True,
                 )

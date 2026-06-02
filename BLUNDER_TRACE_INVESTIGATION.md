@@ -1030,3 +1030,35 @@ rejected.
 The accepted change is diagnostic-only. Search behavior remains matched to
 `./mantis_score_parity`; the new trace gives the next pass direct evidence for
 TT-bound handling during root aspiration recovery.
+
+## Fail-High Clean Verify Rejection
+
+Tested a candidate `./mantis_failhigh_clean_verify` that reused the existing
+clean-root verification machinery after fail-high re-searches. It passed the
+small tactical suite once, but the broader first-collapse clock comparison
+against `./mantis_score_parity` rejected it:
+
+```text
+python3 compare_candidates.py \
+  --baseline ./mantis_score_parity \
+  --candidate ./mantis_failhigh_clean_verify \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 \
+  --timeout 90 \
+  --csv games/failhigh_clean_verify_compare_first_collapse.csv
+```
+
+Full 13-position result:
+
+```text
+avg_depth:        15.46 -> 14.62
+nodes:            18422938 -> 12543507 (-31.91%)
+time_ms:          77256 -> 62643 (-18.92%)
+changed:
+   4: h7g6 -> g8h8 score_delta=-1 node_delta=-1781737
+```
+
+Conclusion: fail-high verification can spend enough budget to lose a completed
+depth and undo the `h7g6` queen-defense improvement. Do not accept future root
+recovery candidates from the small tactical suite alone; run the first-collapse
+clock compare with `--fail-on-depth-loss` and `--fail-on-bestmove-change`.
