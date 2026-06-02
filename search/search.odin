@@ -4153,7 +4153,7 @@ search_position :: proc(
 							current_best_move = verify_pass.best_move
 							best_pv = verify_pass.best_pv
 							found_move = verify_pass.found_move
-						} else if fixed_depth_root_verify {
+						} else if fixed_depth_root_verify || timed_root_verify_prepared {
 							depth_completed = false
 						}
 					}

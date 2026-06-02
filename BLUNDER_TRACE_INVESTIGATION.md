@@ -779,3 +779,32 @@ Candidate 4's acceptance test is that a fixed-depth d14 trace promotes
 `h7g6`, and the clock trace either promotes `h7g6` or demonstrably verifies it
 before stopping. Keep the change narrow and re-run the 44-position benchmark,
 the first-collapse replay, tactical regression, and correctness tests.
+
+## Ambiguous Quiet Verification Attempt
+
+Status: rejected as an engine change.
+
+A narrow prototype collected up to four deep ambiguous queen quiets from
+fail-low root passes and made the clean verifier consider them explicitly. The
+shallow gate was later restricted to depth 12+ after the first version caused
+depth-9 opening drift, including `a2a3` flips in benchmark positions.
+
+After narrowing, the depth 8/9 comparison against `./mantis_clock_isolated`
+returned to zero move/score/node changes across all 44 positions, but the d14
+candidate-4 trace still did not produce a stable fix:
+
+| Trace | Result |
+| --- | --- |
+| Clean verifier with `h7g6` promoted early | `h7g6` searched, but scored below `g8h8`. |
+| Mantis MultiPV d14 | Still ranks `h7g6` first. |
+| `trace-root-child 14 h7g6` | Late null-window baseline pins `h7g6` at alpha even with TT, LMR, futility, LMP, NMP, RFP, razor, and probcut individually disabled. |
+
+Conclusion: this is not safely fixed by adding more quiet exceptions to the
+clean verifier. The root score depends too much on root/PVS/TT/history context.
+The next productive task is a root verification parity pass: score a small set
+of candidate root moves from comparable search state, then decide whether the
+normal root, clean verifier, or MultiPV path is producing the unstable score.
+
+One correctness fix from the experiment was kept: if a timed clean-root
+verification starts but does not complete, the depth is now treated as
+incomplete, matching fixed-depth verification behavior.
