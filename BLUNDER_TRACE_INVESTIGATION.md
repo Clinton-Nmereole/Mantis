@@ -1249,3 +1249,73 @@ oracle_loss:      no regressions
 The queen-defense tactical regression still reaches depth 14 and returns
 `h7g6`. The raw-search benchmark remains at `473960` nodes. The latest
 practice-game binary from this pass is `./mantis_time_shortpv`.
+
+## Rejected: Aspiration-Count Timed Verification
+
+Next target was the remaining first-collapse oracle losses:
+
+```text
+c8c2 -> f8c5, oracle_loss 36
+d3c2 -> d3e4, oracle_loss 24
+d7e7 -> g1f1, oracle_loss 21
+```
+
+Pipeline tracing showed different failure modes:
+
+- `c8c2`: fixed-depth normal search and isolated clean scores are inconsistent
+  with MultiPV; a simple MultiPV override is unsafe.
+- `d3c2`: fixed-depth final clean-root verification at depth 13 finds `d3e4`,
+  while clock search stops at depth 13 without that verification.
+- `d7e7`: the oracle move is only second in Mantis MultiPV at depth 14, so this
+  still looks like endgame/eval/search disagreement.
+
+Tested candidate binaries:
+
+```text
+./mantis_timed_verify_asp
+./mantis_timed_verify_quiets
+./mantis_timed_verify_core
+./mantis_timed_verify_clean
+```
+
+The final candidate prepared timed verification when aspiration failures were
+already high, kept core/root-seed moves plus positive-history quiets in the
+timed verification set, and removed the optimistic carried baseline from timed
+snapshot verification. It fixed the target row:
+
+```text
+d3c2 -> d3e4, oracle_loss 24 -> 0
+```
+
+But the 13-position first-collapse clock compare rejected it:
+
+```text
+python3 compare_candidates.py \
+  --baseline ./mantis_time_shortpv \
+  --candidate ./mantis_timed_verify_clean \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 \
+  --timeout 90 \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv games/timed_verify_clean_compare_first_collapse.csv
+```
+
+Summary:
+
+```text
+bestmove_changes: 5
+avg_depth:        14.77 -> 14.23
+time_ms:          76975 -> 68547 (-10.95%)
+oracle regressions:
+  e4e5 -> d5d4, oracle_loss 0 -> 91
+  g1g5 -> g1h1, oracle_loss 0 -> 60
+queen-defense regression:
+  h7g6 -> g8h8
+```
+
+Conclusion: aspiration-count alone is not a safe trigger for timed clean-root
+verification. The promising sub-result is narrower: if a future gate can
+identify the `d3c2` class without stealing time/depth from short-PV tactical
+positions, then timed verification can recover `d3e4`. Keep
+`./mantis_time_shortpv` as the latest practice-game binary.
