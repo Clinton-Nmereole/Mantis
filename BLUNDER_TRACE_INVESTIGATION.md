@@ -1189,3 +1189,63 @@ and Sicilian `...d6` transition positions, and confirmed `OwnBook=false` still
 forces search. The raw-search benchmark remains at `473960` nodes across the 44
 positions with book disabled. The latest practice-game binary from this pass is
 `./mantis_book_time_stability`.
+
+## Refined Timed Instability Extension
+
+The broad iteration-boundary instability extension was too permissive. A
+first-collapse clock comparison against `./mantis_opening_book_fix` showed no
+best-move improvements across 13 Viridithas collapse positions, but it spent
+substantially more time:
+
+```text
+./mantis_book_time_stability:
+bestmove_changes: 0
+avg_depth:        14.77 -> 15.46
+nodes:            15276407 -> 18422938 (+20.60%)
+time_ms:          75922 -> 90953 (+19.80%)
+```
+
+The worst case reached depth 18 instead of depth 13, but kept the same
+oracle-losing `d3c2` move:
+
+```text
+6k1/r4pp1/b1p2n1p/p2r4/N7/1PBB1P1P/P5P1/R5K1 w - - 1 26
+d3c2 -> d3c2, oracle_loss 24 -> 24
+```
+
+The useful queen-defense fix had a different signature: the bad stopping depth
+reported a clipped PV (`g8h8 d2a5`), while the no-benefit over-extensions had
+normal-length PVs. The accepted refinement only extends the hard budget at the
+iteration boundary when the just-completed PV has length two or less. Timed
+root verification still keeps its existing capped extension path.
+
+Validation:
+
+```text
+odin build . -out:mantis_time_shortpv -o:speed
+python3 compare_candidates.py \
+  --baseline ./mantis_opening_book_fix \
+  --candidate ./mantis_time_shortpv \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 \
+  --timeout 90 \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --csv games/time_shortpv_compare_first_collapse.csv
+python3 tactical_regression.py --binary ./mantis_time_shortpv
+python3 correctness_test.py --binary ./mantis_time_shortpv
+python3 stats_benchmark.py --binary ./mantis_time_shortpv --timeout 90
+```
+
+Comparison result:
+
+```text
+bestmove_changes: 0
+avg_depth:        14.77 -> 14.69
+nodes:            15276407 -> 14325244 (-6.23%)
+time_ms:          76243 -> 71338 (-6.43%)
+oracle_loss:      no regressions
+```
+
+The queen-defense tactical regression still reaches depth 14 and returns
+`h7g6`. The raw-search benchmark remains at `473960` nodes. The latest
+practice-game binary from this pass is `./mantis_time_shortpv`.

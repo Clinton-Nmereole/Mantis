@@ -5758,6 +5758,7 @@ search_position :: proc(
 		depth_elapsed := int(time.duration_milliseconds(time.since(depth_start)))
 		previous_depth_ms = last_depth_ms
 		last_depth_ms = depth_elapsed
+		last_completed_pv_len := 0
 		os.flush(os.stdout)
 
 		nps := u64(0)
@@ -5775,6 +5776,7 @@ search_position :: proc(
 
 		if len(multi_pv_results) > 0 {
 			current_score := multi_pv_results[0].score
+			last_completed_pv_len = multi_pv_results[0].pv.count
 			if have_completed_score {
 				score_drop := previous_completed_score - current_score
 				if score_drop > largest_score_drop {
@@ -5853,9 +5855,11 @@ search_position :: proc(
 
 			// A depth can become unstable after it completes, even if it was
 			// not close enough to the budget to prepare root verification at
-			// depth start. Give the next iteration the same conservative hard
-			// cap extension used by timed root verification.
-			if should_prepare_timed_root_verify(
+			// depth start. Only extend at this boundary when the completed PV
+			// is suspiciously short; normal-length PVs were stable in collapse
+			// tests and should not spend extra blitz time just because the
+			// projected next depth is expensive.
+			if last_completed_pv_len <= 2 && should_prepare_timed_root_verify(
 				search_limits,
 				last_depth_ms,
 				previous_depth_ms,
