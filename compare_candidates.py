@@ -157,6 +157,7 @@ def run_one(
     timeout: float,
     keep_hash: bool,
     staged_picker: bool,
+    own_book: bool,
 ) -> dict[str, Any]:
     depth = limit_value if mode == "depth" else None
     movetime_ms = limit_value if mode == "movetime" else None
@@ -168,6 +169,7 @@ def run_one(
         timeout,
         clear_hash=not keep_hash,
         staged_picker=staged_picker,
+        own_book=own_book,
         movetime_ms=movetime_ms,
         clock_ms=clock_ms,
     )
@@ -190,6 +192,7 @@ def compare_position(
         args.timeout,
         args.keep_hash,
         args.baseline_staged_picker,
+        args.baseline_own_book,
     )
     cand = run_one(
         args.candidate,
@@ -199,6 +202,7 @@ def compare_position(
         args.timeout,
         args.keep_hash,
         args.candidate_staged_picker,
+        args.candidate_own_book,
     )
 
     base_best = str(base.get("bestmove", "?"))
@@ -310,6 +314,8 @@ def main() -> int:
     parser.add_argument("--csv", type=Path, help="Optional CSV output path")
     parser.add_argument("--oracle-csv", type=Path, help="Optional blunder_trace oracle CSV for move rank/loss annotations")
     parser.add_argument("--keep-hash", action="store_true", help="Do not send ucinewgame between positions")
+    parser.add_argument("--baseline-own-book", action="store_true", help="Allow OwnBook moves for the baseline binary")
+    parser.add_argument("--candidate-own-book", action="store_true", help="Allow OwnBook moves for the candidate binary")
     parser.add_argument("--baseline-staged-picker", action="store_true", help="Enable StagedMovePicker on baseline")
     parser.add_argument("--candidate-staged-picker", action="store_true", help="Enable StagedMovePicker on candidate")
     parser.add_argument("--fail-on-bestmove-change", action="store_true", help="Exit nonzero if any bestmove changes")

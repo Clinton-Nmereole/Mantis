@@ -39,7 +39,7 @@ move_overhead: int = 10 // Default 10ms for network/GUI lag compensation
 multi_pv: int = 1 // Number of principal variations to display (1-500)
 ponder_enabled: bool = false // Whether pondering is allowed
 thread_count: int = 1 // Number of search threads (1-512)
-own_book: bool = false // Whether to use internal opening book
+own_book: bool = true // Whether to use internal opening book
 book_file: string = "2moves_v1.epd" // Path to opening book EPD file
 
 // Ponder State - manages background pondering
@@ -133,7 +133,7 @@ uci_loop :: proc() {
 			fmt.println("id author")
 			fmt.println("option name Hash type spin default 64 min 1 max 1024")
 			fmt.println("option name EvalFile type string default nn-c0ae49f08b40.nnue")
-			fmt.println("option name OwnBook type check default false")
+			fmt.println("option name OwnBook type check default true")
 			fmt.println("option name BookFile type string default 2moves_v1.epd")
 			fmt.println("option name Move Overhead type spin default 10 min 0 max 5000")
 			fmt.println("option name MultiPV type spin default 1 min 1 max 500")
@@ -253,21 +253,8 @@ parse_position :: proc(command: string, b: ^board.Board) {
 	if len(parts) < 2 {return}
 
 	if parts[1] == "startpos" {
-		// If opening book is enabled, pick a random book position
-		if own_book && book.has_book() && len(parts) == 2 {
-			// Only use book for pure "position startpos" (no moves specified)
-			fen := book.get_random_book_position()
-			if fen != "" {
-				b^ = board.parse_fen(fen)
-				move_start_index = len(parts) // No moves to parse
-			} else {
-				b^ = board.parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-				move_start_index = 2
-			}
-		} else {
-			b^ = board.parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-			move_start_index = 2
-		}
+		b^ = board.parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+		move_start_index = 2
 	} else if parts[1] == "fen" {
 		// Reconstruct FEN string (it might contain spaces)
 		// "position fen r... ... ... ... moves ..."
@@ -372,6 +359,23 @@ parse_go :: proc(command: string, b: ^board.Board) {
 
 	if depth == -1 {
 		depth = 64 // Default to max depth with time control
+	}
+
+	if own_book && !is_pondering {
+		fen := board.get_fen(b^)
+		defer delete(fen)
+		book_move_str := book.get_builtin_book_move(fen)
+		if book_move_str != "" {
+			book_move := parse_move(b, book_move_str)
+			if book_move.source != 0 || book_move.target != 0 {
+				fmt.printf("info string book move %s\n", book_move_str)
+				fmt.printf("bestmove ")
+				board.print_move(book_move)
+				fmt.println()
+				os.flush(os.stdout)
+				return
+			}
+		}
 	}
 
 	// Handle pondering

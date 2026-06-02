@@ -1104,3 +1104,36 @@ Harmful changed moves included `e4e5 -> d5d4`, `h2h3 -> f5d3`, and
 The comparison harness now supports `--oracle-csv` and
 `--fail-on-oracle-loss-regression` so future mixed candidates can be judged by
 known oracle loss, not only by raw bestmove changes.
+
+## UCI OwnBook Fix
+
+Found a separate opening weakness in the UCI book path: with `OwnBook` enabled,
+`position startpos` could replace the real game root with a random FEN from the
+EPD position file. Those EPD files contain positions, not playable `bm`/`pv`
+book moves, so this was not a valid opening book and could make Mantis search
+or return moves for the wrong board.
+
+Accepted fix:
+
+- `position startpos` now always sets the actual chess starting position.
+- `OwnBook` defaults to true for game play.
+- UCI `go` checks a small built-in legal move book before search and returns a
+  book move only when the current exact FEN is covered.
+- `stats_benchmark.py` and `compare_candidates.py` disable `OwnBook` by default
+  so search stats stay comparable; pass `--own-book` (or per-binary compare
+  flags) to intentionally include book moves.
+
+Validation:
+
+```text
+odin build . -out:mantis_opening_book_fix -o:speed
+python3 tactical_regression.py --binary ./mantis_opening_book_fix
+python3 correctness_test.py --binary ./mantis_opening_book_fix
+python3 stats_benchmark.py --binary ./mantis_opening_book_fix --timeout 90
+python3 stats_benchmark.py --binary ./mantis_opening_book_fix --own-book --limit 3 --timeout 30
+```
+
+The raw-search benchmark remains at `473960` nodes across the 44 positions with
+book disabled, while `--own-book --limit 3` returns immediate book moves at
+depth 0/nodes 0. The latest practice-game binary from this pass is
+`./mantis_opening_book_fix`.

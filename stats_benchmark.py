@@ -303,6 +303,7 @@ def run_position(
     timeout: float,
     clear_hash: bool,
     staged_picker: bool,
+    own_book: bool = False,
     movetime_ms: int | None = None,
     clock_ms: dict[str, int] | None = None,
 ) -> tuple[dict[str, int | str], str, float]:
@@ -326,6 +327,7 @@ def run_position(
         go_command = f"go depth {depth}"
     commands = [
         "uci",
+        f"setoption name OwnBook value {'true' if own_book else 'false'}",
         "setoption name SearchStats value true",
     ]
     if staged_picker:
@@ -520,6 +522,7 @@ def main() -> int:
     parser.add_argument("--fen-file", type=Path, help="Optional file with one FEN per line")
     parser.add_argument("--csv", type=Path, help="Optional CSV output path")
     parser.add_argument("--keep-hash", action="store_true", help="Do not send ucinewgame between positions")
+    parser.add_argument("--own-book", action="store_true", help="Allow internal OwnBook moves during the benchmark")
     parser.add_argument("--staged-picker", action="store_true", help="Enable the StagedMovePicker UCI option")
     parser.add_argument("--validate-only", action="store_true", help="Validate selected FENs and exit")
     args = parser.parse_args()
@@ -592,6 +595,7 @@ def main() -> int:
                 args.timeout,
                 clear_hash=not args.keep_hash,
                 staged_picker=args.staged_picker,
+                own_book=args.own_book,
                 movetime_ms=args.movetime,
                 clock_ms=clock_ms,
             )
