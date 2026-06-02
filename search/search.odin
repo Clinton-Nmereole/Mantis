@@ -1210,6 +1210,604 @@ trace_root_parity_scores :: proc(fen: string, depth: int, target_moves: []string
 	fmt.printf(" best_score=%d final_alpha=%d targets_seen=%d\n", best_score, current_alpha, targets_seen)
 }
 
+RootVerifyTraceEntry :: struct {
+	move:        moves.Move,
+	order_index: int,
+	included:    bool,
+	reason:      string,
+	score:       int,
+	nodes:       u64,
+	history:     int,
+	see:         int,
+}
+
+RootVerifyTraceResult :: struct {
+	best_move:  moves.Move,
+	best_score: int,
+	found_move: bool,
+	entries:    [256]RootVerifyTraceEntry,
+	count:      int,
+	total_nodes: u64,
+}
+
+find_root_verify_trace_entry :: proc(result: ^RootVerifyTraceResult, move: moves.Move) -> int {
+	for i in 0 ..< result.count {
+		if same_move(result.entries[i].move, move) {
+			return i
+		}
+	}
+	return -1
+}
+
+run_root_verify_trace_pass :: proc(
+	result: ^RootVerifyTraceResult,
+	st: ^SearchThread,
+	b: ^board.Board,
+	move_list: ^moves.MoveList,
+	depth: int,
+	root_tt_move: moves.Move,
+	verify_all: bool = false,
+	extra_verify_move_1: moves.Move = moves.Move{},
+	extra_verify_move_2: moves.Move = moves.Move{},
+) {
+	result.best_score = -eval.INF
+	result.best_move = moves.Move{}
+	result.found_move = false
+	result.count = 0
+
+	for i in 0 ..< move_list.count {
+		move := move_list.moves[i]
+		included := true
+		reason := "forced"
+		history_score := 0
+		see_score := SEE_SCORE_UNKNOWN
+
+		if !verify_all &&
+		   !same_move(move, root_tt_move) &&
+		   !same_move(move, extra_verify_move_1) &&
+		   !same_move(move, extra_verify_move_2) {
+			if move.promoted != -1 {
+				reason = "promotion"
+			} else if move.capture {
+				see_score = see_capture(b, move)
+				if see_score < 0 {
+					included = false
+					reason = "negative_see_capture"
+				} else {
+					reason = "nonnegative_see_capture"
+				}
+			} else {
+				history_score = get_history_score(st, move)
+				if history_score <= 0 {
+					included = false
+					reason = "quiet_nonpositive_history"
+				} else {
+					reason = "positive_history_quiet"
+				}
+			}
+		} else if same_move(move, root_tt_move) {
+			reason = "root_seed"
+		} else if same_move(move, extra_verify_move_1) {
+			reason = "current_best"
+		} else if same_move(move, extra_verify_move_2) {
+			reason = "actual_tt"
+		} else if verify_all {
+			reason = "verify_all"
+		}
+
+		entry_index := result.count
+		if entry_index < len(result.entries) {
+			result.entries[entry_index] = RootVerifyTraceEntry {
+				move        = move,
+				order_index = i + 1,
+				included    = included,
+				reason      = reason,
+				score       = -eval.INF,
+				nodes       = 0,
+				history     = history_score,
+				see         = see_score,
+			}
+		}
+		result.count += 1
+
+		if !included {
+			continue
+		}
+
+		if !board.is_castling_legal_now(b, move) {
+			if entry_index < len(result.entries) {
+				result.entries[entry_index].included = false
+				result.entries[entry_index].reason = "castle_illegal"
+			}
+			continue
+		}
+
+		state: board.StateInfo
+		board.make_move_fast(b, move, &state)
+
+		king_sq := board.get_king_square(b, 1 - b.side)
+		if board.is_square_attacked(b, king_sq, b.side) {
+			board.unmake_move(b, &state)
+			if entry_index < len(result.entries) {
+				result.entries[entry_index].included = false
+				result.entries[entry_index].reason = "self_check"
+			}
+			continue
+		}
+
+		nnue.update_accumulators(&state, b, move)
+
+		child_pv: PV_Line
+		nodes_before := st.nodes
+		score := -negamax(
+			st,
+			b,
+			-eval.INF,
+			eval.INF,
+			depth - 1,
+			1,
+			&child_pv,
+		)
+		nodes := st.nodes - nodes_before
+
+		board.unmake_move(b, &state)
+
+		if entry_index < len(result.entries) {
+			result.entries[entry_index].score = score
+			result.entries[entry_index].nodes = nodes
+		}
+
+		if score > result.best_score {
+			result.best_score = score
+			result.best_move = move
+			result.found_move = true
+		}
+	}
+
+	result.total_nodes = st.nodes
+}
+
+trace_root_pipeline_is_excluded :: proc(move: moves.Move, excluded: ^[8]moves.Move, excluded_count: int) -> bool {
+	for i in 0 ..< excluded_count {
+		if same_move(move, excluded[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+trace_root_pipeline_print_move_result :: proc(label: string, result: ^ContinuationDivTraceResult, move: moves.Move) {
+	idx := find_continuation_div_entry(result, move)
+	if idx >= 0 {
+		entry := &result.entries[idx]
+		fmt.printf(" %s=%d@%d/%d", label, entry.score, entry.alpha_before, entry.nodes)
+	} else {
+		fmt.printf(" %s=NA", label)
+	}
+}
+
+trace_root_pipeline_print_multipv_result :: proc(
+	label: string,
+	result: ^ContinuationDivTraceResult,
+	ran: bool,
+	move: moves.Move,
+	excluded: ^[8]moves.Move,
+	excluded_count: int,
+) {
+	if !ran {
+		fmt.printf(" %s=NA", label)
+		return
+	}
+	if trace_root_pipeline_is_excluded(move, excluded, excluded_count) {
+		fmt.printf(" %s=EXCLUDED", label)
+		return
+	}
+	trace_root_pipeline_print_move_result(label, result, move)
+}
+
+trace_root_pipeline_print_verify_result :: proc(ran: bool, result: ^RootVerifyTraceResult, move: moves.Move) {
+	if !ran {
+		fmt.printf(" verify=not_run")
+		return
+	}
+	idx := find_root_verify_trace_entry(result, move)
+	if idx < 0 {
+		fmt.printf(" verify=missing")
+		return
+	}
+
+	entry := &result.entries[idx]
+	if entry.included {
+		fmt.printf(" verify=%d/%d:%s", entry.score, entry.nodes, entry.reason)
+	} else {
+		fmt.printf(" verify=skip:%s", entry.reason)
+	}
+}
+
+trace_root_pipeline_scores :: proc(fen: string, depth: int, target_moves: []string) {
+	if depth < 1 {
+		fmt.println("Root pipeline trace FAILED: depth must be at least 1")
+		return
+	}
+
+	root_board := board.parse_fen(fen)
+	b := root_board
+	refresh_trace_accumulators(&b)
+
+	st: SearchThread
+	init_search_thread(&st, 0)
+	defer free(st.continuation_history)
+
+	reset_search_control()
+	sync.atomic_store(&total_nodes, 0)
+	st.nodes = 0
+
+	warmup_best_move: moves.Move
+	warmup_score := 0
+	warmup_depth := 0
+	if depth > 1 {
+		search_position(&st, &b, depth - 1, 1, output_bestmove = false)
+		warmup_best_move = last_completed_best_move
+		warmup_score = last_completed_best_score
+		warmup_depth = last_completed_depth
+		reset_search_control()
+		b = root_board
+		refresh_trace_accumulators(&b)
+	}
+
+	root_alpha := -eval.INF
+	root_beta := eval.INF
+	if depth >= 4 {
+		root_alpha = warmup_score - params.aspiration_window
+		root_beta = warmup_score + params.aspiration_window
+	}
+
+	all_moves: moves.MoveList
+	board.generate_all_moves(&b, &all_moves)
+
+	root_move_list := all_moves
+	root_tt_move := warmup_best_move
+	if moves.is_empty_move(root_tt_move) {
+		root_tt_move = get_tt_move(b.hash)
+	}
+	actual_root_tt_move := get_tt_move(b.hash)
+	sort_moves(&st, &root_move_list, &b, root_tt_move, 0, moves.Move{})
+
+	base_tt := snapshot_tt()
+	defer delete(base_tt)
+	base_st := clone_search_thread(&st)
+	defer free(base_st.continuation_history)
+
+	prev_stats_enabled := search_stats_enabled
+	prev_options := search_debug_options
+	search_debug_options = SearchDebugOptions{}
+	search_stats_enabled = false
+	defer {
+		search_stats_enabled = prev_stats_enabled
+		search_debug_options = prev_options
+	}
+
+	restore_tt(base_tt)
+	normal_st := clone_search_thread(&base_st)
+	defer free(normal_st.continuation_history)
+
+	initial := ContinuationDivTraceResult {
+		warmup_depth  = warmup_depth,
+		warmup_score  = warmup_score,
+		warmup_best   = warmup_best_move,
+		initial_alpha = root_alpha,
+		initial_beta  = root_beta,
+	}
+	run_continuation_div_root_pass(&initial, &normal_st, &b, &root_move_list, depth, root_alpha, root_beta, "initial")
+
+	normal_best := initial.best_move
+	normal_score := initial.best_score
+	normal_found := !moves.is_empty_move(normal_best)
+
+	root_tt_initial_score := -eval.INF
+	root_tt_initial_seen := false
+	if !moves.is_empty_move(root_tt_move) {
+		root_idx := find_continuation_div_entry(&initial, root_tt_move)
+		if root_idx >= 0 {
+			root_tt_initial_seen = true
+			root_tt_initial_score = initial.entries[root_idx].score
+		}
+	}
+	root_tt_failed_low := root_tt_initial_seen && root_tt_initial_score <= root_alpha && initial.best_score < root_beta
+	guard_forced_fail_low := root_tt_failed_low && initial.best_score > root_alpha
+
+	research := ContinuationDivTraceResult {
+		warmup_depth  = warmup_depth,
+		warmup_score  = warmup_score,
+		warmup_best   = warmup_best_move,
+		initial_alpha = root_alpha,
+		initial_beta  = root_beta,
+	}
+	retry := ContinuationDivTraceResult {
+		warmup_depth  = warmup_depth,
+		warmup_score  = warmup_score,
+		warmup_best   = warmup_best_move,
+		initial_alpha = root_alpha,
+		initial_beta  = root_beta,
+	}
+	verify := RootVerifyTraceResult{}
+
+	research_ran := false
+	research_reason := "none"
+	retry_ran := false
+	verify_ran := false
+
+	if initial.best_score <= root_alpha || root_tt_failed_low {
+		research_ran = true
+		if initial.best_score <= root_alpha {
+			research_reason = "window_fail_low"
+		} else {
+			research_reason = "root_seed_fail_low_guard"
+		}
+		run_continuation_div_root_pass(&research, &normal_st, &b, &root_move_list, depth, -eval.INF, root_beta, "fail_low_research")
+		if !moves.is_empty_move(research.best_move) {
+			normal_best = research.best_move
+			normal_score = research.best_score
+			normal_found = true
+		}
+
+		if depth >= 9 {
+			verify_ran = true
+			restore_tt(base_tt)
+			verify_st := clone_search_thread(&base_st)
+			run_root_verify_trace_pass(
+				&verify,
+				&verify_st,
+				&b,
+				&root_move_list,
+				depth,
+				root_tt_move,
+				false,
+				normal_best,
+				actual_root_tt_move,
+			)
+			normal_st.nodes += verify_st.nodes
+			if verify_st.continuation_history != nil {
+				free(verify_st.continuation_history)
+			}
+			if verify.found_move {
+				normal_best = verify.best_move
+				normal_score = verify.best_score
+				normal_found = true
+			}
+		}
+
+		if guard_forced_fail_low && normal_score >= root_beta {
+			retry_ran = true
+			run_continuation_div_root_pass(&retry, &normal_st, &b, &root_move_list, depth, root_alpha, eval.INF, "fail_low_beta_retry")
+			if !moves.is_empty_move(retry.best_move) {
+				normal_best = retry.best_move
+				normal_score = retry.best_score
+				normal_found = true
+			}
+		}
+	} else if initial.best_score >= root_beta {
+		research_ran = true
+		research_reason = "window_fail_high"
+		run_continuation_div_root_pass(&research, &normal_st, &b, &root_move_list, depth, root_alpha, eval.INF, "fail_high_research")
+		if !moves.is_empty_move(research.best_move) {
+			normal_best = research.best_move
+			normal_score = research.best_score
+			normal_found = true
+		}
+	}
+
+	mp_results: [3]ContinuationDivTraceResult
+	mp_ran: [3]bool
+	mp_excluded_counts: [3]int
+	excluded_moves: [8]moves.Move
+	excluded_count := 0
+	if normal_found {
+		excluded_moves[excluded_count] = normal_best
+		excluded_count += 1
+	}
+
+	for pv_index in 1 ..< 3 {
+		mp_excluded_counts[pv_index] = excluded_count
+		if excluded_count >= len(excluded_moves) {
+			break
+		}
+
+		mp_move_list: moves.MoveList
+		for i in 0 ..< all_moves.count {
+			if !trace_root_pipeline_is_excluded(all_moves.moves[i], &excluded_moves, excluded_count) {
+				moves.append_move(&mp_move_list, all_moves.moves[i])
+			}
+		}
+		if mp_move_list.count == 0 {
+			break
+		}
+
+		sort_moves(&normal_st, &mp_move_list, &b, moves.Move{}, 0, moves.Move{})
+		mp_results[pv_index] = ContinuationDivTraceResult {
+			warmup_depth  = warmup_depth,
+			warmup_score  = warmup_score,
+			warmup_best   = warmup_best_move,
+			initial_alpha = -eval.INF,
+			initial_beta  = eval.INF,
+		}
+		run_continuation_div_root_pass(&mp_results[pv_index], &normal_st, &b, &mp_move_list, depth, -eval.INF, eval.INF, "multipv")
+		mp_ran[pv_index] = true
+
+		if !moves.is_empty_move(mp_results[pv_index].best_move) {
+			excluded_moves[excluded_count] = mp_results[pv_index].best_move
+			excluded_count += 1
+		}
+	}
+
+	fmt.printf(
+		"Root pipeline trace depth=%d warmup_depth=%d warmup_score=%d window=[%d,%d] targets=%d fen=%s\n",
+		depth,
+		warmup_depth,
+		warmup_score,
+		root_alpha,
+		root_beta,
+		len(target_moves),
+		fen,
+	)
+	fmt.printf("root_seed=")
+	root_debug_print_move(root_tt_move)
+	fmt.printf(" actual_tt=")
+	root_debug_print_move(actual_root_tt_move)
+	fmt.printf(" root_seed_initial_seen=%v root_seed_initial_score=%d root_seed_failed_low=%v\n",
+		root_tt_initial_seen,
+		root_tt_initial_score,
+		root_tt_failed_low,
+	)
+	fmt.printf("normal initial_best=")
+	root_debug_print_move(initial.best_move)
+	fmt.printf(" initial_score=%d research=%v reason=%s", initial.best_score, research_ran, research_reason)
+	if research_ran {
+		fmt.printf(" research_best=")
+		root_debug_print_move(research.best_move)
+		fmt.printf(" research_score=%d", research.best_score)
+	}
+	fmt.printf(" verify=%v", verify_ran)
+	if verify_ran {
+		fmt.printf(" verify_best=")
+		root_debug_print_move(verify.best_move)
+		fmt.printf(" verify_score=%d", verify.best_score)
+	}
+	fmt.printf(" retry=%v", retry_ran)
+	if retry_ran {
+		fmt.printf(" retry_best=")
+		root_debug_print_move(retry.best_move)
+		fmt.printf(" retry_score=%d", retry.best_score)
+	}
+	fmt.printf(" final_best=")
+	root_debug_print_move(normal_best)
+	fmt.printf(" final_score=%d\n", normal_score)
+
+	for pv_index in 1 ..< 3 {
+		label := pv_index + 1
+		fmt.printf("multipv%d ran=%v best=", label, mp_ran[pv_index])
+		if mp_ran[pv_index] {
+			root_debug_print_move(mp_results[pv_index].best_move)
+			fmt.printf(" score=%d excluded_before=%d\n", mp_results[pv_index].best_score, mp_excluded_counts[pv_index])
+		} else {
+			fmt.printf("(none) score=NA excluded_before=%d\n", mp_excluded_counts[pv_index])
+		}
+	}
+
+	fmt.println("idx move target seed tt cap promo hist see init fail verify mp2 mp3 isolated note")
+	legal_index := 0
+	printed := 0
+	for i in 0 ..< root_move_list.count {
+		move := root_move_list.moves[i]
+		if !trace_root_legal_move(&b, move) {
+			continue
+		}
+		legal_index += 1
+
+		is_target := trace_root_parity_targeted(move, target_moves)
+		print_row := len(target_moves) == 0 ||
+			is_target ||
+			same_move(move, normal_best) ||
+			(verify_ran && same_move(move, verify.best_move)) ||
+			same_move(move, initial.best_move) ||
+			same_move(move, research.best_move) ||
+			same_move(move, root_tt_move) ||
+			same_move(move, actual_root_tt_move)
+		if !print_row {
+			continue
+		}
+
+		history_score := 0
+		see_score := SEE_SCORE_UNKNOWN
+		if move.capture {
+			see_score = see_capture(&b, move)
+		} else if move.promoted == -1 {
+			history_score = get_history_score(&base_st, move)
+		}
+
+		fmt.printf("%2d ", legal_index)
+		board.print_move(move)
+		fmt.printf(
+			" target=%v seed=%v tt=%v cap=%v promo=%d hist=%d",
+			is_target,
+			same_move(move, root_tt_move),
+			same_move(move, actual_root_tt_move),
+			move.capture,
+			move.promoted,
+			history_score,
+		)
+		if see_score == SEE_SCORE_UNKNOWN {
+			fmt.printf(" see=NA")
+		} else {
+			fmt.printf(" see=%d", see_score)
+		}
+
+		trace_root_pipeline_print_move_result("init", &initial, move)
+		if research_ran {
+			trace_root_pipeline_print_move_result("fail", &research, move)
+		} else {
+			fmt.printf(" fail=NA")
+		}
+		trace_root_pipeline_print_verify_result(verify_ran, &verify, move)
+		trace_root_pipeline_print_multipv_result("mp2", &mp_results[1], mp_ran[1], move, &excluded_moves, mp_excluded_counts[1])
+		trace_root_pipeline_print_multipv_result("mp3", &mp_results[2], mp_ran[2], move, &excluded_moves, mp_excluded_counts[2])
+
+		score_isolated := is_target || (len(target_moves) == 0 && printed < 8)
+		isolated_full_score := 0
+		isolated_pvs_score := 0
+		isolated_has_pvs := false
+		if score_isolated {
+			full := trace_score_root_child_from_snapshot(
+				&base_st,
+				&b,
+				move,
+				base_tt,
+				depth,
+				-eval.INF,
+				eval.INF,
+				true,
+			)
+			isolated_full_score = full.score
+			initial_idx := find_continuation_div_entry(&initial, move)
+			if initial_idx >= 0 && initial.entries[initial_idx].alpha_before > -eval.INF / 2 {
+				alpha_before := initial.entries[initial_idx].alpha_before
+				pvs := trace_score_root_child_from_snapshot(
+					&base_st,
+					&b,
+					move,
+					base_tt,
+					depth,
+					-alpha_before - 1,
+					-alpha_before,
+					false,
+				)
+				isolated_pvs_score = pvs.score
+				isolated_has_pvs = true
+				fmt.printf(" isolated=%d/%d:%d", full.score, pvs.score, full.score - pvs.score)
+			} else {
+				fmt.printf(" isolated=%d/NA:NA", full.score)
+			}
+		} else {
+			fmt.printf(" isolated=NA")
+		}
+
+		note := "ok"
+		verify_idx := find_root_verify_trace_entry(&verify, move)
+		initial_idx := find_continuation_div_entry(&initial, move)
+		if verify_ran && verify_idx >= 0 && !verify.entries[verify_idx].included && is_target {
+			note = "TARGET_VERIFY_SKIPPED"
+		} else if initial_idx >= 0 && initial.entries[initial_idx].alpha_before > -eval.INF / 2 && score_isolated && isolated_has_pvs {
+			alpha_before := initial.entries[initial_idx].alpha_before
+			if isolated_full_score > alpha_before && isolated_pvs_score <= alpha_before {
+				note = "ISOLATED_PVS_MISS"
+			}
+		}
+		fmt.printf(" note=%s\n", note)
+		os.flush(os.stdout)
+		printed += 1
+	}
+}
+
 trace_root_legal_move :: proc(b: ^board.Board, move: moves.Move) -> bool {
 	if !board.is_castling_legal_now(b, move) {
 		return false

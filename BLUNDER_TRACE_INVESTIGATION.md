@@ -843,3 +843,37 @@ consume TT/history differently enough to change the searched position tree.
 Next: make a parity scorer for the exact normal-root, clean-verifier, and
 MultiPV candidate sets so all three paths can be compared from identical
 snapshots before attempting another engine behavior change.
+
+## Root Pipeline Trace
+
+Added `trace-root-pipeline` as the next diagnostic. It warms to `depth - 1`,
+reconstructs the normal root aspiration pass, replays the clean verifier from
+the saved root snapshot, then runs MultiPV-style excluded root passes. For each
+requested move it prints normal root score, fail-low/research score, verifier
+inclusion/score, MultiPV score, and isolated full/PVS parity score.
+
+Example:
+
+```sh
+./mantis_root_pipeline trace-root-pipeline 14 g8h8 h7g6 e5f7 fen "1r3rk1/1p1b3q/3NpP1p/p2pn1p1/8/6P1/PP1QBR1P/2R3K1 b - - 0 25"
+```
+
+Candidate-4 result:
+
+| Move | Normal fail-low score | Verifier result | Isolated full/PVS | Finding |
+| --- | ---: | --- | --- | --- |
+| `g8h8` | -643 | -698, `root_seed` | -698 / -665 | Normal root stays on the seed, but clean full score is worse. |
+| `e5f7` | -643 | -907, `positive_history_quiet` | -529 / -666 | Isolated PVS misses a raise, but verifier context scores it poorly. |
+| `h7g6` | -643 | -550, `positive_history_quiet` | -510 / -666 | Best verifier result and another isolated PVS miss. |
+
+New finding: the verifier marked `h7g6` and `e5f7` as
+`positive_history_quiet` even though their base root histories were negative in
+the printed snapshot. That means the clean verifier's candidate set is not
+snapshot-stable; earlier full-window verifier searches can mutate history and
+make later quiet moves eligible. This happened to rescue `h7g6` here, but it is
+not a reliable candidate-selection rule.
+
+Next: make clean root verification choose its candidate set from a precomputed
+root snapshot, then add an explicit, tiny suspect-quiet list from the normal
+fail-low pass so moves like `h7g6` are considered deliberately rather than by
+verifier-history side effect.
