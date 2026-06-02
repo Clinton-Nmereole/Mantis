@@ -185,11 +185,16 @@ uci_loop :: proc() {
 			os.flush(os.stdout)
 		} else if command == "eval" {
 			score := eval.evaluate(&game_board)
-			fmt.printf("Static evaluation: %d (side to move perspective)\n", score)
+			score_cp := eval.score_to_uci_cp(score, &game_board)
+			if score_cp != score {
+				fmt.printf("Static evaluation: %d cp (%d internal, side to move perspective)\n", score_cp, score)
+			} else {
+				fmt.printf("Static evaluation: %d cp (side to move perspective)\n", score)
+			}
 			if nnue.sfnnv14_active {
 				bucket, psqt, positional, total, nnz, sum, hash, psq_stm_count, psq_stm_hash, psq_nstm_count, psq_nstm_hash, threat_stm_count, threat_stm_sum, threat_stm_hash, threat_nstm_count, threat_nstm_sum, threat_nstm_hash := nnue.trace_sfnnv14(&game_board)
 				fmt.printf(
-					"SFNNv14 trace: bucket=%d psqt=%d positional=%d total=%d transformed_nnz=%d transformed_sum=%d transformed_hash=%x psq_stm_count=%d psq_stm_hash=%x psq_nstm_count=%d psq_nstm_hash=%x threat_stm_count=%d threat_stm_sum=%d threat_stm_hash=%x threat_nstm_count=%d threat_nstm_sum=%d threat_nstm_hash=%x (side to move)\n",
+					"SFNNv14 trace: bucket=%d psqt=%d positional=%d raw_total=%d transformed_nnz=%d transformed_sum=%d transformed_hash=%x psq_stm_count=%d psq_stm_hash=%x psq_nstm_count=%d psq_nstm_hash=%x threat_stm_count=%d threat_stm_sum=%d threat_stm_hash=%x threat_nstm_count=%d threat_nstm_sum=%d threat_nstm_hash=%x (side to move)\n",
 					bucket,
 					psqt,
 					positional,

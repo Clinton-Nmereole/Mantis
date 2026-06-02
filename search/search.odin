@@ -5760,6 +5760,7 @@ search_position :: proc(
 			// Output each PV line
 			for pv_idx in 0 ..< len(multi_pv_results) {
 				result := &multi_pv_results[pv_idx]
+				uci_score := eval.score_to_uci_cp(result.score, b)
 
 				if multi_pv_count > 1 {
 					// MultiPV format
@@ -5767,7 +5768,7 @@ search_position :: proc(
 						"info depth %d multipv %d score cp %d nodes %d time %d nps %d pv ",
 						current_depth,
 						pv_idx + 1,
-						result.score,
+						uci_score,
 						get_total_nodes(),
 						ms_int,
 						nps,
@@ -5777,7 +5778,7 @@ search_position :: proc(
 					fmt.printf(
 						"info depth %d score cp %d nodes %d time %d nps %d pv ",
 						current_depth,
-						result.score,
+						uci_score,
 						get_total_nodes(),
 						ms_int,
 						nps,

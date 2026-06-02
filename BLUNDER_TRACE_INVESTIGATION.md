@@ -950,3 +950,49 @@ python3 stats_benchmark.py --binary ./mantis_timed_snapshot_verify
 Next: test `./mantis_timed_snapshot_verify` in practice games, then inspect any
 new Viridithas losses for fresh first-collapse positions rather than continuing
 to tune candidate 4.
+
+## Score-Scale Reporting Pass
+
+Added oracle reporting for the move selected by the current test binary, not
+just the move that appeared in the saved PGN. The report now shows Mantis best,
+oracle rank, and oracle loss per engine search row.
+
+Found that SFNNv14 feature parity was intact on late-game false-collapse
+positions, but Mantis was emitting raw Stockfish internal NNUE units as UCI
+centipawns. Example:
+
+```text
+raw_total=-1319
+Static evaluation: -345 cp (-1319 internal, side to move perspective)
+```
+
+The conservative fix keeps search on the existing raw internal units, converts
+UCI `score cp` output through Stockfish's material WDL scale, and raises the
+time-management score-drop thresholds to internal-unit equivalents. A fuller
+Stockfish final-eval formula was tested but backed out because it changed root
+choices in the existing Viridithas regression set.
+
+Candidate-4 3+2 clock result remains fixed:
+
+```text
+go wtime 180000 btime 180000 winc 2000 binc 2000
+bestmove h7g6
+```
+
+Score-parity first-collapse oracle run on `./mantis_score_parity`:
+
+| Suite | Max current Mantis loss | Candidate 4 |
+| --- | ---: | --- |
+| Viridithas first-collapse FENs | 36 cp | `h7g6`, oracle rank 1 |
+
+Validation passed:
+
+```text
+python3 tactical_regression.py --binary ./mantis_score_parity
+python3 correctness_test.py --binary ./mantis_score_parity
+python3 stats_benchmark.py --binary ./mantis_score_parity
+```
+
+Next: use `./mantis_score_parity` for practice games, then run the broader
+worst-playable trace with the scaled score output to separate real move-choice
+losses from old raw-score false collapses.

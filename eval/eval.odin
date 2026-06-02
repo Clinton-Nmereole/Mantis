@@ -9,8 +9,18 @@ import "../utils"
 INF :: 50000
 MATE :: 49000
 
+// Convert an internal search value to UCI centipawns.
+// SFNNv14 follows Stockfish internal Value units; the UCI protocol expects cp.
+score_to_uci_cp :: proc(score: int, b: ^board.Board) -> int {
+	if nnue.sfnnv14_active {
+		return nnue.sfnnv14_value_to_cp(score, b)
+	}
+	return score
+}
+
 // Evaluate the board position
-// Returns score in centipawns (from side to move perspective)
+// Returns score from side-to-move perspective.
+// SFNNv14 returns Stockfish-style internal units; HCE/legacy return centipawns.
 evaluate :: proc(b: ^board.Board) -> int {
 	// Try NNUE (either SFNNv14 or legacy)
 	if nnue.is_initialized || nnue.sfnnv14_active {

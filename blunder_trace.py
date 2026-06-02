@@ -245,21 +245,31 @@ def oracle_summary(candidate: BlunderCandidate) -> dict[str, Any]:
     if not candidate.oracle_rows:
         return {}
     best = candidate.oracle_rows[0]
-    played = next((row for row in candidate.oracle_rows if row["root"] == candidate.uci), None)
-    if played is None:
-        return {
-            "bestmove": best["root"],
-            "best_score_cp": best["score_cp"],
-            "played_rank": "",
-            "played_score_cp": "",
-            "played_loss_cp": "",
-        }
+    played = oracle_move_summary(candidate, candidate.uci)
     return {
         "bestmove": best["root"],
         "best_score_cp": best["score_cp"],
-        "played_rank": played["rank"],
-        "played_score_cp": played["score_cp"],
-        "played_loss_cp": best["score_cp"] - played["score_cp"],
+        "played_rank": played.get("rank", ""),
+        "played_score_cp": played.get("score_cp", ""),
+        "played_loss_cp": played.get("loss_cp", ""),
+    }
+
+
+def oracle_move_summary(candidate: BlunderCandidate, move: str | None) -> dict[str, Any]:
+    if not candidate.oracle_rows or not move:
+        return {}
+    best = candidate.oracle_rows[0]
+    found = next((row for row in candidate.oracle_rows if row["root"] == move), None)
+    if found is None:
+        return {
+            "rank": "",
+            "score_cp": "",
+            "loss_cp": "",
+        }
+    return {
+        "rank": found["rank"],
+        "score_cp": found["score_cp"],
+        "loss_cp": best["score_cp"] - found["score_cp"],
     }
 
 
@@ -717,6 +727,9 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
         "oracle_played_rank",
         "oracle_played_score_cp",
         "oracle_played_loss_cp",
+        "oracle_engine_rank",
+        "oracle_engine_score_cp",
+        "oracle_engine_loss_cp",
         "search_mode",
         "search_limit",
         "depth",
@@ -735,6 +748,7 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
             oracle = oracle_summary(candidate)
             if candidate.engine_rows:
                 for row in candidate.engine_rows:
+                    engine_oracle = oracle_move_summary(candidate, row.get("bestmove", ""))
                     writer.writerow(
                         {
                             "index": candidate.index,
@@ -754,6 +768,9 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                             "oracle_played_rank": oracle.get("played_rank", ""),
                             "oracle_played_score_cp": oracle.get("played_score_cp", ""),
                             "oracle_played_loss_cp": oracle.get("played_loss_cp", ""),
+                            "oracle_engine_rank": engine_oracle.get("rank", ""),
+                            "oracle_engine_score_cp": engine_oracle.get("score_cp", ""),
+                            "oracle_engine_loss_cp": engine_oracle.get("loss_cp", ""),
                             "search_mode": row.get("search_mode", "cold"),
                             "search_limit": row.get("search_limit", row.get("depth", "")),
                             "depth": row.get("depth", ""),
@@ -786,6 +803,9 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                         "oracle_played_rank": oracle.get("played_rank", ""),
                         "oracle_played_score_cp": oracle.get("played_score_cp", ""),
                         "oracle_played_loss_cp": oracle.get("played_loss_cp", ""),
+                        "oracle_engine_rank": "",
+                        "oracle_engine_score_cp": "",
+                        "oracle_engine_loss_cp": "",
                         "fen": candidate.fen,
                     }
                 )
@@ -858,8 +878,8 @@ def render_markdown(
     out.write(f"## {section_title}\n\n")
     has_oracle = any(candidate.oracle_rows for candidate in selected)
     if has_oracle:
-        out.write("| # | Round | Ply | Side | Move | Mantis Before | Mantis After | Drop | Classification | Oracle Best | Played Rank | Loss |\n")
-        out.write("| ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | --- | --- | ---: | ---: |\n")
+        out.write("| # | Round | Ply | Side | Move | Mantis Before | Mantis After | Drop | Classification | Oracle Best | Mantis Best | Mantis Rank | Mantis Loss | Played Rank | Played Loss |\n")
+        out.write("| ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: |\n")
     else:
         out.write("| # | Round | Ply | Side | Move | Mantis Before | Mantis After | Drop | Classification |\n")
         out.write("| ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | --- |\n")
@@ -872,11 +892,16 @@ def render_markdown(
         )
         if has_oracle:
             oracle = oracle_summary(candidate)
-            loss = oracle.get("played_loss_cp", "")
-            loss_label = cp_label(loss) if isinstance(loss, int) else ""
+            played_loss = oracle.get("played_loss_cp", "")
+            played_loss_label = cp_label(played_loss) if isinstance(played_loss, int) else ""
+            engine_row = candidate.engine_rows[-1] if candidate.engine_rows else {}
+            engine_oracle = oracle_move_summary(candidate, engine_row.get("bestmove", ""))
+            engine_loss = engine_oracle.get("loss_cp", "")
+            engine_loss_label = cp_label(engine_loss) if isinstance(engine_loss, int) else ""
             out.write(
                 f"{base} | `{oracle.get('bestmove', '')}` | "
-                f"{oracle.get('played_rank', '')} | {loss_label} |\n"
+                f"`{engine_row.get('bestmove', '')}` | {engine_oracle.get('rank', '')} | "
+                f"{engine_loss_label} | {oracle.get('played_rank', '')} | {played_loss_label} |\n"
             )
         else:
             out.write(f"{base} |\n")
@@ -908,18 +933,35 @@ def render_markdown(
                 )
             out.write("\n")
         if candidate.engine_rows:
-            out.write("| Mode | Limit | Bestmove | Score | Nodes | Time ms | Asp low/high/retry/verify |\n")
-            out.write("| --- | --- | --- | ---: | ---: | ---: | --- |\n")
+            if candidate.oracle_rows:
+                out.write("| Mode | Limit | Bestmove | Score | Oracle Rank | Oracle Loss | Nodes | Time ms | Asp low/high/retry/verify |\n")
+                out.write("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |\n")
+            else:
+                out.write("| Mode | Limit | Bestmove | Score | Nodes | Time ms | Asp low/high/retry/verify |\n")
+                out.write("| --- | --- | --- | ---: | ---: | ---: | --- |\n")
             for row in candidate.engine_rows:
                 score = row.get("score_cp", "")
                 score_label = cp_label(int(score)) if isinstance(score, int) else "?"
-                out.write(
+                prefix = (
                     f"| {row.get('search_mode', 'cold')} | {row.get('search_limit', row.get('depth', ''))} | "
-                    f"`{row.get('bestmove', '')}` | "
-                    f"{score_label} | {row.get('nodes', '')} | {row.get('time_ms', '')} | "
-                    f"{row.get('asp_low', 0)}/{row.get('asp_high', 0)}/"
-                    f"{row.get('asp_retry', 0)}/{row.get('asp_verify', 0)} |\n"
+                    f"`{row.get('bestmove', '')}` | {score_label}"
                 )
+                if candidate.oracle_rows:
+                    engine_oracle = oracle_move_summary(candidate, row.get("bestmove", ""))
+                    engine_loss = engine_oracle.get("loss_cp", "")
+                    engine_loss_label = cp_label(engine_loss) if isinstance(engine_loss, int) else ""
+                    out.write(
+                        f"{prefix} | {engine_oracle.get('rank', '')} | {engine_loss_label} | "
+                        f"{row.get('nodes', '')} | {row.get('time_ms', '')} | "
+                        f"{row.get('asp_low', 0)}/{row.get('asp_high', 0)}/"
+                        f"{row.get('asp_retry', 0)}/{row.get('asp_verify', 0)} |\n"
+                    )
+                else:
+                    out.write(
+                        f"{prefix} | {row.get('nodes', '')} | {row.get('time_ms', '')} | "
+                        f"{row.get('asp_low', 0)}/{row.get('asp_high', 0)}/"
+                        f"{row.get('asp_retry', 0)}/{row.get('asp_verify', 0)} |\n"
+                    )
             out.write("\n")
     return out.getvalue()
 

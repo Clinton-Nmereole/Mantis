@@ -26,6 +26,12 @@ SearchLimits :: struct {
 search_limits: SearchLimits
 use_time_management := false
 
+// Search scores are Stockfish-style internal values when SFNNv14 is active.
+// These thresholds approximate 35/75/150 UCI cp score drops near normal material.
+SCORE_DROP_SMALL :: 140
+SCORE_DROP_MEDIUM :: 300
+SCORE_DROP_LARGE :: 600
+
 // Calculate time allocation for this move.
 // Heavily influenced by how modern engines (Stockfish, Ethereal, etc.)
 // allocate time for blitz/rapid/classical.
@@ -174,11 +180,11 @@ time_budget_with_instability :: proc(
 	budget += limits.soft_time * best_move_changes / 4
 	budget += limits.soft_time * aspiration_failures / 3
 
-	if score_drop >= 150 {
+	if score_drop >= SCORE_DROP_LARGE {
 		budget += limits.soft_time
-	} else if score_drop >= 75 {
+	} else if score_drop >= SCORE_DROP_MEDIUM {
 		budget += limits.soft_time / 2
-	} else if score_drop >= 35 {
+	} else if score_drop >= SCORE_DROP_SMALL {
 		budget += limits.soft_time / 4
 	}
 

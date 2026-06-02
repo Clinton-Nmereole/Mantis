@@ -15,6 +15,8 @@ package nnue
 //   score = (fc_2_out + fwdOut + psqt) / OUTPUT_SCALE
 
 import "../board"
+import "../constants"
+import "../utils"
 import "core:fmt"
 import "core:os"
 
@@ -326,7 +328,8 @@ clipped_relu :: #force_inline proc(x: i32) -> u8 {
 //         bucket — layer stack index (0..7, based on piece count)
 //         stm — side to move (0=White, 1=Black)
 //
-// Result: centipawn score (Stockfish Value ≈ 1cp per unit after OUTPUT_SCALE division)
+// Result: raw Stockfish NNUE internal value from side-to-move perspective.
+// Use sfnnv14_value_to_cp when emitting UCI "score cp" text.
 
 evaluate_sfnnv14 :: proc(acc: [HALF_DIMENSIONS]u8, psqt: i32, bucket: int, stm: int) -> int {
 	if !initialized { return 0 }
@@ -399,6 +402,31 @@ evaluate_sfnnv14 :: proc(acc: [HALF_DIMENSIONS]u8, psqt: i32, bucket: int, stm: 
 	out += fwd_out
 
 	return int(psqt / OUTPUT_SCALE) + int(out / OUTPUT_SCALE)
+}
+
+sfnnv14_piece_count :: #force_inline proc(b: ^board.Board, piece: int) -> int {
+	return utils.count_bits(b.bitboards[piece]) + utils.count_bits(b.bitboards[piece + 6])
+}
+
+sfnnv14_wdl_material_count :: proc(b: ^board.Board) -> int {
+	material := sfnnv14_piece_count(b, constants.PAWN) +
+	            3 * sfnnv14_piece_count(b, constants.KNIGHT) +
+	            3 * sfnnv14_piece_count(b, constants.BISHOP) +
+	            5 * sfnnv14_piece_count(b, constants.ROOK) +
+	            9 * sfnnv14_piece_count(b, constants.QUEEN)
+	if material < 17 { return 17 }
+	if material > 78 { return 78 }
+	return material
+}
+
+sfnnv14_value_to_cp :: proc(value: int, b: ^board.Board) -> int {
+	m := f64(sfnnv14_wdl_material_count(b)) / 58.0
+	a := (((-72.32565836 * m + 185.93832038) * m - 144.58862193) * m) + 416.44950446
+	scaled := 100.0 * f64(value) / a
+	if scaled >= 0 {
+		return int(scaled + 0.5)
+	}
+	return int(scaled - 0.5)
 }
 
 trace_sfnnv14 :: proc(
