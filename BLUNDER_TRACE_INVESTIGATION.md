@@ -1319,3 +1319,59 @@ verification. The promising sub-result is narrower: if a future gate can
 identify the `d3c2` class without stealing time/depth from short-PV tactical
 positions, then timed verification can recover `d3e4`. Keep
 `./mantis_time_shortpv` as the latest practice-game binary.
+
+## Mixed-Instability Timed Verification
+
+The accepted follow-up keeps the existing short-PV timed verification behavior
+unchanged, but adds a narrower mixed-instability trigger for the `d3c2` class.
+The trigger only prepares the expanded timed clean-root verification when all
+of these hold:
+
+- timed search is active at root PV index 0,
+- current depth is at least 12,
+- the previous completed PV was nearly full length,
+- aspiration history has both repeated fail-lows and fail-highs.
+
+That signature hit the target row but avoided the previously rejected
+queen-defense, row-7, and row-9 regressions. For this mixed path, timed
+verification keeps core/root-seed/current-best moves and positive-history
+quiets, and it does not seed snapshot verification with the optimistic carried
+baseline. Ordinary timed verification still uses the previous capped candidate
+set and baseline behavior.
+
+Validation:
+
+```text
+odin build . -out:mantis_timed_verify_mixed -o:speed
+python3 compare_candidates.py \
+  --baseline ./mantis_time_shortpv \
+  --candidate ./mantis_timed_verify_mixed \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 \
+  --timeout 90 \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv games/timed_verify_mixed_compare_first_collapse.csv
+python3 tactical_regression.py --binary ./mantis_timed_verify_mixed
+python3 correctness_test.py --binary ./mantis_timed_verify_mixed
+python3 stats_benchmark.py --binary ./mantis_timed_verify_mixed --timeout 90
+python3 stats_benchmark.py --binary ./mantis_timed_verify_mixed --own-book --limit 3 --timeout 30
+```
+
+First-collapse clock compare:
+
+```text
+bestmove_changes: 1
+avg_depth:        14.77 -> 14.77
+nodes:            15276407 -> 16422810 (+7.50%)
+time_ms:          76985 -> 82896 (+7.68%)
+abs_score_delta:  1 cp
+changed:
+  d3c2 -> d3e4, oracle_loss 24 -> 0
+oracle regressions: none
+```
+
+The raw-search benchmark remains at `473960` nodes. Tactical regression and
+perft correctness passed, and book smoke still returns immediate zero-node
+book moves for the first three benchmark positions. The latest practice-game
+binary from this pass is `./mantis_timed_verify_mixed`.

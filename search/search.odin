@@ -2013,7 +2013,7 @@ prepare_root_verify_candidate_set :: proc(
 	}
 }
 
-limit_timed_root_verify_candidate_set :: proc(set: ^RootVerifyCandidateSet) {
+limit_timed_root_verify_candidate_set :: proc(set: ^RootVerifyCandidateSet, include_positive_quiets: bool = false) {
 	for i in 0 ..< set.count {
 		if !set.include[i] {
 			continue
@@ -2022,7 +2022,13 @@ limit_timed_root_verify_candidate_set :: proc(set: ^RootVerifyCandidateSet) {
 		priority := set.priority[i]
 		is_top_suspect := priority >= ROOT_VERIFY_PRIORITY_SUSPECT_BASE &&
 		                  priority < ROOT_VERIFY_PRIORITY_SUSPECT_BASE + 2
+		is_positive_quiet := include_positive_quiets &&
+			(priority == ROOT_VERIFY_PRIORITY_CORE ||
+			 priority == ROOT_VERIFY_PRIORITY_QUIET)
 		if is_top_suspect || priority == ROOT_VERIFY_PRIORITY_FORCING {
+			continue
+		}
+		if is_positive_quiet {
 			continue
 		}
 
@@ -5246,6 +5252,9 @@ search_position :: proc(
 	best_move_changes := 0
 	largest_score_drop := 0
 	aspiration_failures := 0
+	aspiration_fail_low_count := 0
+	aspiration_fail_high_count := 0
+	previous_completed_pv_len := 0
 	previous_depth_ms := 0
 	last_depth_ms := 0
 
@@ -5319,6 +5328,7 @@ search_position :: proc(
 
 			fixed_depth_root_verify := current_depth == depth && current_depth >= 9 && pv_index == 0
 			timed_root_verify_prepared := false
+			timed_mixed_root_verify_prepared := false
 			if current_depth >= 9 && pv_index == 0 && use_time_management {
 				timed_root_verify_prepared = should_prepare_timed_root_verify(
 					search_limits,
@@ -5328,6 +5338,14 @@ search_position :: proc(
 					largest_score_drop,
 					aspiration_failures,
 				)
+				if !timed_root_verify_prepared &&
+				   current_depth >= 12 &&
+				   previous_completed_pv_len >= current_depth - 1 &&
+				   aspiration_fail_low_count >= 4 &&
+				   aspiration_fail_high_count >= 3 {
+					timed_mixed_root_verify_prepared = true
+					timed_root_verify_prepared = true
+				}
 			}
 			prepare_clean_root_verify := fixed_depth_root_verify || timed_root_verify_prepared
 
@@ -5448,6 +5466,7 @@ search_position :: proc(
 				}
 				if best_score <= alpha || root_tt_failed_low {
 					aspiration_failures += 1
+					aspiration_fail_low_count += 1
 					stat_add(&search_stats.aspiration_fail_low)
 					alpha = -eval.INF
 					if debug_root_pass {
@@ -5569,10 +5588,10 @@ search_position :: proc(
 								suspect_quiets.moves[3],
 							)
 							if timed_limited_root_verify {
-								limit_timed_root_verify_candidate_set(&verify_candidates)
+								limit_timed_root_verify_candidate_set(&verify_candidates, timed_mixed_root_verify_prepared)
 							}
 							if depth_completed {
-								if timed_limited_root_verify {
+								if timed_limited_root_verify && !timed_mixed_root_verify_prepared {
 									verify_pass = run_root_snapshot_verification_pass(
 										&verify_st,
 										b,
@@ -5635,6 +5654,7 @@ search_position :: proc(
 
 					if depth_completed && guard_forced_fail_low && best_score >= beta {
 						aspiration_failures += 1
+						aspiration_fail_high_count += 1
 						stat_add(&search_stats.aspiration_fail_high)
 						stat_add(&search_stats.aspiration_retries)
 						alpha = window_alpha
@@ -5666,6 +5686,7 @@ search_position :: proc(
 					}
 				} else if best_score >= beta {
 					aspiration_failures += 1
+					aspiration_fail_high_count += 1
 					stat_add(&search_stats.aspiration_fail_high)
 					beta = eval.INF
 					if debug_root_pass {
@@ -5832,6 +5853,8 @@ search_position :: proc(
 				os.flush(os.stdout)
 			}
 		}
+
+		previous_completed_pv_len = last_completed_pv_len
 
 		// Check for stop signal (from ponder stop or user interrupt)
 		if should_stop_search() {
