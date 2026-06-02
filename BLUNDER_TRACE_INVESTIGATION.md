@@ -686,3 +686,96 @@ Build a focused root trace for candidate 4 with current clock settings and
 oracle MultiPV side by side. The question is whether `h7g6` is missed because
 of root ordering/aspiration behavior, pruning at non-PV nodes, or Mantis'
 static/search score calibration in already-lost middlegame positions.
+
+## Accepted: Candidate 4 Clock Root Trace
+
+Tooling change: `timed_root_trace.py` now supports UCI clock searches through
+`--clock WTIME BTIME WINC BINC` and can include an external oracle MultiPV
+table through `--oracle-binary`. The engine-side `RootDebugTrace` option now
+also prints root-debug lines for managed-clock searches; the option is still
+off by default, so normal play is unchanged.
+
+Diagnostic binary: `./mantis_candidate4_trace`
+
+Clock command:
+
+```sh
+python3 timed_root_trace.py \
+  --pgn games/MantisVsViridthas0601.pgn \
+  --binary ./mantis_candidate4_trace \
+  --target 10:50 \
+  --clock 180000 180000 2000 2000 \
+  --warm-depth 8 \
+  --multipv 8 \
+  --root-debug \
+  --oracle-binary ./stockfish-debug/src/stockfish \
+  --oracle-depth 18 \
+  --oracle-multipv 6 \
+  --timeout 240 \
+  --report games/candidate4_clock_root_trace.md \
+  --csv games/candidate4_clock_root_trace.csv
+```
+
+Clock result:
+
+| Search | Bestmove | Score | Depth | Finding |
+| --- | --- | ---: | ---: | --- |
+| Normal clock | `g8h8` | -5.87 | 14 | Still misses oracle best. |
+| Stockfish d18 | `h7g6` | -3.60 | 18 | `g8h8` is oracle rank 3, about 53 cp worse. |
+
+At clock depth 14, the normal search fails low and starts clean-root
+verification, but the verification pass runs out of time after checking only
+`g8h8`:
+
+```text
+clean_root_verify completed=false best=g8h8
+```
+
+Fixed-depth command:
+
+```sh
+python3 timed_root_trace.py \
+  --pgn games/MantisVsViridthas0601.pgn \
+  --binary ./mantis_candidate4_trace \
+  --target 10:50 \
+  --depths 14 \
+  --warm-depth 8 \
+  --multipv 8 \
+  --root-debug \
+  --oracle-binary ./stockfish-debug/src/stockfish \
+  --oracle-depth 18 \
+  --oracle-multipv 6 \
+  --timeout 300 \
+  --report games/candidate4_depth14_root_trace.md \
+  --csv games/candidate4_depth14_root_trace.csv
+```
+
+Fixed-depth result:
+
+| Search | Bestmove | Score | Depth | Finding |
+| --- | --- | ---: | ---: | --- |
+| Normal d14 | `g8h8` | -5.90 | 14 | Still misses `h7g6`. |
+| Mantis MultiPV d14 | `h7g6` | -5.13 | 14 | Mantis can find the better move when forced through MultiPV. |
+| Mantis MultiPV d14 rank 2 | `g8h8` | -6.94 | 14 | Mantis itself scores `g8h8` much worse in MultiPV. |
+
+The fixed-depth clean-root verifier completed, but skipped `h7g6`:
+
+```text
+move=h7g6 reason=quiet_nonpositive_history
+```
+
+Conclusion: candidate 4 is not primarily a static-eval or NNUE blindness case.
+Mantis can find `h7g6` in MultiPV at the same depth. The normal root path loses
+it because fail-low recovery returns bound-like scores for many quiet moves,
+then the scoped clean verifier filters out quiet moves with nonpositive
+history. In clock mode there is a second issue: the verifier starts too late
+and can spend the remaining time on `g8h8` alone.
+
+## Next
+
+Make root fail-low verification include a tiny set of ambiguous quiet moves
+from the failed/recovered root pass, not only quiets with positive history.
+Candidate 4's acceptance test is that a fixed-depth d14 trace promotes
+`h7g6`, and the clock trace either promotes `h7g6` or demonstrably verifies it
+before stopping. Keep the change narrow and re-run the 44-position benchmark,
+the first-collapse replay, tactical regression, and correctness tests.

@@ -15,6 +15,7 @@ import chess
 import chess.pgn
 
 import blunder_trace
+import stats_benchmark
 
 
 DEPTH_RE = re.compile(r"\bdepth (?P<depth>\d+)\b")
@@ -27,7 +28,7 @@ TIME_RE = re.compile(r"\btime (?P<time>\d+)\b")
 @dataclass(frozen=True)
 class SearchSpec:
     kind: str
-    value: int
+    value: int | dict[str, int]
 
     @property
     def label(self) -> str:
@@ -35,6 +36,9 @@ class SearchSpec:
             return f"d{self.value}"
         if self.kind == "movetime":
             return f"{self.value}ms"
+        if self.kind == "clock":
+            assert isinstance(self.value, dict)
+            return stats_benchmark.clock_label(self.value)
         raise ValueError(f"unknown search kind: {self.kind}")
 
     @property
@@ -43,7 +47,17 @@ class SearchSpec:
             return f"go depth {self.value}"
         if self.kind == "movetime":
             return f"go movetime {self.value}"
+        if self.kind == "clock":
+            assert isinstance(self.value, dict)
+            return stats_benchmark.clock_go_command(self.value)
         raise ValueError(f"unknown search kind: {self.kind}")
+
+    @property
+    def csv_value(self) -> str | int:
+        if self.kind == "clock":
+            return self.label
+        assert isinstance(self.value, int)
+        return self.value
 
 
 @dataclass
@@ -59,6 +73,7 @@ class TargetTrace:
     normal_rows: list[dict[str, Any]]
     multipv_summaries: list[dict[str, Any]]
     multipv_rows: dict[str, list[dict[str, Any]]]
+    oracle_rows: list[dict[str, Any]]
 
 
 def parse_target_arg(text: str) -> tuple[str, int]:
@@ -85,10 +100,13 @@ def default_report_paths(
     targets: list[tuple[str, int]],
     depths: list[int],
     movetimes_ms: list[int],
+    clock_ms: dict[str, int] | None,
 ) -> tuple[Path, Path]:
-    if depths and not movetimes_ms:
+    if clock_ms is not None and not depths and not movetimes_ms:
+        prefix = "clock_root_trace"
+    elif depths and not movetimes_ms and clock_ms is None:
         prefix = "stateful_depth_root_trace"
-    elif movetimes_ms and not depths:
+    elif movetimes_ms and not depths and clock_ms is None:
         prefix = "timed_root_trace"
     else:
         prefix = "stateful_root_trace"
@@ -256,7 +274,7 @@ def run_normal_trace(
         return {
             "trace_mode": "normal",
             "search_kind": spec.kind,
-            "search_value": spec.value,
+            "search_value": spec.csv_value,
             "search_label": spec.label,
             "warm_positions": warmed,
             "bestmove": stats.get("bestmove", "?"),
@@ -295,7 +313,7 @@ def run_multipv_trace(
         summary = {
             "trace_mode": f"multipv{multipv}",
             "search_kind": spec.kind,
-            "search_value": spec.value,
+            "search_value": spec.csv_value,
             "search_label": spec.label,
             "warm_positions": warmed,
             "bestmove": stats.get("bestmove", "?"),
@@ -310,11 +328,39 @@ def run_multipv_trace(
         engine.close()
 
 
+def run_oracle_trace(
+    binary: str | None,
+    target: TraceTarget,
+    depth: int,
+    multipv: int,
+    timeout: float,
+) -> list[dict[str, Any]]:
+    if binary is None:
+        return []
+    engine = blunder_trace.UCIEngine(binary, timeout)
+    try:
+        engine.set_option("MultiPV", multipv)
+        _stats, wall_ms, output = engine.search_go_output_fen(
+            target.candidate.fen,
+            f"go depth {depth}",
+            timeout,
+        )
+        rows = blunder_trace.parse_multipv(output)
+        for row in rows:
+            row["wall_ms"] = int(round(wall_ms))
+        return rows
+    finally:
+        engine.close()
+
+
 def write_reports(
     traces: list[TargetTrace],
     binary: str,
     warm_depth: int,
     multipv: int,
+    oracle_binary: str | None,
+    oracle_depth: int,
+    oracle_multipv: int,
     report_path: Path,
     csv_path: Path,
 ) -> None:
@@ -323,6 +369,11 @@ def write_reports(
     out.write(f"Binary: `{binary}`\n\n")
     out.write(f"Warm depth: `{warm_depth}`\n\n")
     out.write(f"MultiPV: `{multipv}`\n\n")
+    if oracle_binary:
+        out.write(
+            f"Oracle: `{oracle_binary}`, depth `{oracle_depth}`, "
+            f"MultiPV `{oracle_multipv}`\n\n"
+        )
 
     for trace in traces:
         target = trace.target
@@ -335,6 +386,20 @@ def write_reports(
             f"({candidate.delta_cp:+d} cp)\n\n"
         )
         out.write(f"FEN: `{candidate.fen}`\n\n")
+
+        if trace.oracle_rows:
+            out.write("### Oracle MultiPV\n\n")
+            out.write("| Rank | Root | Score | Depth | Nodes | Time ms | PV |\n")
+            out.write("| ---: | --- | ---: | ---: | ---: | ---: | --- |\n")
+            for row in trace.oracle_rows:
+                score = row.get("score_cp", "")
+                score_text = blunder_trace.cp_label(score) if isinstance(score, int) else "?"
+                out.write(
+                    f"| {row.get('rank', '')} | `{row.get('root', '')}` | {score_text} | "
+                    f"{row.get('depth', '')} | {row.get('nodes', '')} | "
+                    f"{row.get('time_ms', '')} | `{row.get('pv', '')}` |\n"
+                )
+            out.write("\n")
 
         out.write("### Normal Search\n\n")
         out.write("| Limit | Bestmove | Score | Depth | Nodes | Engine ms | Wall ms | Warm positions |\n")
@@ -435,6 +500,29 @@ def write_reports(
                         "pv": " | ".join(row.get("root_debug_lines", [])),
                     }
                 )
+            for row in trace.oracle_rows:
+                writer.writerow(
+                    {
+                        "target": ident,
+                        "round": candidate.round_name,
+                        "ply": candidate.ply,
+                        "played": candidate.uci,
+                        "san": candidate.san,
+                        "fen": candidate.fen,
+                        "search_kind": "oracle-depth",
+                        "search_value": oracle_depth,
+                        "search_label": f"d{oracle_depth}",
+                        "trace_mode": "oracle",
+                        "rank": row.get("rank", ""),
+                        "root": row.get("root", ""),
+                        "bestmove": trace.oracle_rows[0].get("root", "") if trace.oracle_rows else "",
+                        "score_cp": row.get("score_cp", ""),
+                        "depth": row.get("depth", ""),
+                        "nodes": row.get("nodes", ""),
+                        "time_ms": row.get("time_ms", ""),
+                        "pv": row.get("pv", ""),
+                    }
+                )
             for summary in trace.multipv_summaries:
                 spec_label = str(summary["search_label"])
                 for row in trace.multipv_rows.get(spec_label, []):
@@ -476,26 +564,62 @@ def main() -> int:
     parser.add_argument("--ply", type=int, default=36, help="Single-target ply fallback")
     parser.add_argument("--depths", type=int, nargs="*", default=None)
     parser.add_argument("--movetimes-ms", type=int, nargs="*", default=None)
+    parser.add_argument(
+        "--clock",
+        type=int,
+        nargs=4,
+        metavar=("WTIME", "BTIME", "WINC", "BINC"),
+        help="UCI clock budget for target searches, in milliseconds",
+    )
+    parser.add_argument("--movestogo", type=int, default=0, help="Optional UCI movestogo for --clock")
     parser.add_argument("--warm-depth", type=int, default=8)
     parser.add_argument("--multipv", type=int, default=8)
     parser.add_argument("--root-debug", action="store_true", help="Enable RootDebugTrace during normal searches")
+    parser.add_argument("--oracle-binary", help="Optional external UCI engine for reference MultiPV")
+    parser.add_argument("--oracle-depth", type=int, default=18)
+    parser.add_argument("--oracle-multipv", type=int, default=6)
+    parser.add_argument("--oracle-timeout", type=float, default=120.0)
     parser.add_argument("--timeout", type=float, default=90.0)
     parser.add_argument("--report")
     parser.add_argument("--csv")
     args = parser.parse_args()
+    if args.clock:
+        wtime, btime, winc, binc = args.clock
+        if wtime <= 0 or btime <= 0:
+            parser.error("--clock WTIME and BTIME must be positive")
+        if winc < 0 or binc < 0:
+            parser.error("--clock WINC and BINC must be non-negative")
+    if args.movestogo < 0:
+        parser.error("--movestogo must be non-negative")
+    if args.oracle_depth <= 0:
+        parser.error("--oracle-depth must be positive")
+    if args.oracle_multipv <= 0:
+        parser.error("--oracle-multipv must be positive")
 
     target_specs = args.target if args.target else [(args.round_name, args.ply)]
     depths = args.depths or []
     if args.movetimes_ms is None:
-        movetimes_ms = [] if depths else [250, 750, 1500, 3000]
+        movetimes_ms = [] if depths or args.clock else [250, 750, 1500, 3000]
     else:
         movetimes_ms = args.movetimes_ms
-    if not depths and not movetimes_ms:
-        parser.error("provide at least one depth or movetime search limit")
+    clock_ms: dict[str, int] | None = None
+    if args.clock:
+        wtime, btime, winc, binc = args.clock
+        clock_ms = {
+            "wtime": wtime,
+            "btime": btime,
+            "winc": winc,
+            "binc": binc,
+            "movestogo": args.movestogo,
+        }
+    if not depths and not movetimes_ms and clock_ms is None:
+        parser.error("provide at least one depth, movetime, or clock search limit")
 
     specs = [SearchSpec("depth", depth) for depth in depths]
     specs.extend(SearchSpec("movetime", movetime_ms) for movetime_ms in movetimes_ms)
-    default_report, default_csv = default_report_paths(target_specs, depths, movetimes_ms)
+    if clock_ms is not None:
+        specs.append(SearchSpec("clock", clock_ms))
+    default_report, default_csv = default_report_paths(target_specs, depths, movetimes_ms, clock_ms)
     report_path = Path(args.report) if args.report else default_report
     csv_path = Path(args.csv) if args.csv else default_csv
 
@@ -510,6 +634,13 @@ def main() -> int:
         normal_rows: list[dict[str, Any]] = []
         multipv_summaries: list[dict[str, Any]] = []
         multipv_rows: dict[str, list[dict[str, Any]]] = {}
+        oracle_rows = run_oracle_trace(
+            binary=args.oracle_binary,
+            target=target,
+            depth=args.oracle_depth,
+            multipv=args.oracle_multipv,
+            timeout=args.oracle_timeout,
+        )
 
         for spec in specs:
             print(f"normal target={target_id(target)} search={spec.label}", flush=True)
@@ -541,6 +672,7 @@ def main() -> int:
                 normal_rows=normal_rows,
                 multipv_summaries=multipv_summaries,
                 multipv_rows=multipv_rows,
+                oracle_rows=oracle_rows,
             )
         )
 
@@ -549,6 +681,9 @@ def main() -> int:
         binary=args.binary,
         warm_depth=args.warm_depth,
         multipv=args.multipv,
+        oracle_binary=args.oracle_binary,
+        oracle_depth=args.oracle_depth,
+        oracle_multipv=args.oracle_multipv,
         report_path=report_path,
         csv_path=csv_path,
     )

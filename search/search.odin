@@ -3960,7 +3960,7 @@ search_position :: proc(
 				}
 			}
 			actual_root_tt_move := moves.Move{}
-			debug_root_pass := root_debug_trace_enabled && current_depth == depth && pv_index == 0
+			debug_root_pass := root_debug_trace_enabled && pv_index == 0 && (current_depth == depth || use_time_management)
 			if debug_root_pass || prepare_clean_root_verify {
 				actual_root_tt_move = get_tt_move(b.hash)
 			}
