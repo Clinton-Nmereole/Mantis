@@ -128,6 +128,38 @@ main :: proc() {
 		}
 	}
 
+	if len(args) >= 3 && args[1] == "trace-root-parity" {
+		depth, ok := strconv.parse_int(args[2])
+		if ok && depth >= 1 {
+			init_cli_search_runtime()
+			fen := START_FEN
+			fen_alloc := ""
+			target_moves: [dynamic]string
+			defer delete(target_moves)
+
+			fen_arg := len(args)
+			for i in 3 ..< len(args) {
+				if args[i] == "fen" {
+					fen_arg = i
+					break
+				}
+				append(&target_moves, args[i])
+			}
+
+			if fen_arg + 1 < len(args) {
+				if fen_arg + 2 == len(args) {
+					fen = args[fen_arg + 1]
+				} else {
+					fen_alloc = strings.join(args[fen_arg + 1:], " ")
+					defer delete(fen_alloc)
+					fen = fen_alloc
+				}
+			}
+			search.trace_root_parity_scores(fen, depth, target_moves[:])
+			return
+		}
+	}
+
 	if len(args) >= 3 && args[1] == "trace-order" {
 		depth, ok := strconv.parse_int(args[2])
 		if ok && depth >= 1 {

@@ -990,6 +990,226 @@ trace_root_move_scores :: proc(fen: string, depth: int) {
 	fmt.printf(" best_score=%d misses=%d researches=%d\n", best_score, misses, researches)
 }
 
+RootParityScore :: struct {
+	score: int,
+	nodes: u64,
+	pv:    PV_Line,
+}
+
+trace_score_root_child_from_snapshot :: proc(
+	st: ^SearchThread,
+	b: ^board.Board,
+	move: moves.Move,
+	tt_snapshot: []TTBucket,
+	depth: int,
+	alpha: int,
+	beta: int,
+	is_pv: bool,
+) -> RootParityScore {
+	restore_tt(tt_snapshot)
+
+	probe_st := clone_search_thread(st)
+	defer free(probe_st.continuation_history)
+	probe_st.nodes = 0
+
+	state: board.StateInfo
+	board.make_move_fast(b, move, &state)
+	nnue.update_accumulators(&state, b, move)
+
+	child_pv: PV_Line
+	score := -negamax(
+		&probe_st,
+		b,
+		alpha,
+		beta,
+		depth - 1,
+		1,
+		&child_pv,
+		{}, // no excluded move
+		is_pv,
+	)
+
+	board.unmake_move(b, &state)
+	restore_tt(tt_snapshot)
+
+	return RootParityScore {
+		score = score,
+		nodes = probe_st.nodes,
+		pv    = child_pv,
+	}
+}
+
+trace_root_parity_targeted :: proc(move: moves.Move, target_moves: []string) -> bool {
+	for target in target_moves {
+		if move_matches_uci(move, target) {
+			return true
+		}
+	}
+	return false
+}
+
+trace_root_parity_scores :: proc(fen: string, depth: int, target_moves: []string) {
+	if depth < 1 {
+		fmt.println("Root parity trace FAILED: depth must be at least 1")
+		return
+	}
+
+	b := board.parse_fen(fen)
+	refresh_trace_accumulators(&b)
+
+	st: SearchThread
+	init_search_thread(&st, 0)
+	defer free(st.continuation_history)
+
+	reset_search_control()
+	sync.atomic_store(&total_nodes, 0)
+	st.nodes = 0
+
+	warmup_best_move: moves.Move
+	warmup_score := 0
+	warmup_depth := 0
+	if depth > 1 {
+		search_position(&st, &b, depth - 1, 1, output_bestmove = false)
+		warmup_best_move = last_completed_best_move
+		warmup_score = last_completed_best_score
+		warmup_depth = last_completed_depth
+		reset_search_control()
+	}
+
+	move_list: moves.MoveList
+	board.generate_all_moves(&b, &move_list)
+	root_tt_move := warmup_best_move
+	if moves.is_empty_move(root_tt_move) {
+		root_tt_move = get_tt_move(b.hash)
+	}
+	sort_moves(&st, &move_list, &b, root_tt_move, 0, moves.Move{})
+
+	tt_snapshot := snapshot_tt()
+	defer delete(tt_snapshot)
+
+	fmt.printf("Root parity trace depth=%d warmup_depth=%d warmup_score=%d warmup_best=", depth, warmup_depth, warmup_score)
+	if !moves.is_empty_move(root_tt_move) {
+		board.print_move(root_tt_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" targets=%d fen=%s\n", len(target_moves), fen)
+	fmt.println("idx move target alpha full pvs delta full_nodes pvs_nodes pvs_raises note full_pv")
+
+	current_alpha := -eval.INF
+	best_score := -eval.INF
+	best_move: moves.Move
+	legal_moves := 0
+	scored_moves := 0
+	targets_seen := 0
+	default_limit := 12
+
+	for i in 0 ..< move_list.count {
+		move := move_list.moves[i]
+		if !trace_root_legal_move(&b, move) {
+			continue
+		}
+
+		is_target := trace_root_parity_targeted(move, target_moves)
+		if len(target_moves) == 0 && scored_moves >= default_limit {
+			break
+		}
+
+		full := trace_score_root_child_from_snapshot(
+			&st,
+			&b,
+			move,
+			tt_snapshot,
+			depth,
+			-eval.INF,
+			eval.INF,
+			true,
+		)
+
+		alpha_before := current_alpha
+		pvs_score := 0
+		pvs_nodes: u64 = 0
+		pvs_raises := false
+		delta := 0
+		note := "first"
+		if legal_moves > 0 && alpha_before > -eval.INF / 2 {
+			pvs := trace_score_root_child_from_snapshot(
+				&st,
+				&b,
+				move,
+				tt_snapshot,
+				depth,
+				-alpha_before - 1,
+				-alpha_before,
+				false,
+			)
+			pvs_score = pvs.score
+			pvs_nodes = pvs.nodes
+			pvs_raises = pvs_score > alpha_before
+			delta = full.score - pvs_score
+			note = "ok"
+			if full.score > alpha_before && !pvs_raises {
+				note = "PVS_MISS"
+			} else if delta != 0 {
+				note = "BOUND_DIFF"
+			}
+		}
+
+		fmt.printf("%2d ", legal_moves + 1)
+		board.print_move(move)
+		if legal_moves > 0 && alpha_before > -eval.INF / 2 {
+			fmt.printf(
+				" target=%v alpha=%d full=%d pvs=%d delta=%d full_nodes=%d pvs_nodes=%d pvs_raises=%v note=%s full_pv=",
+				is_target,
+				alpha_before,
+				full.score,
+				pvs_score,
+				delta,
+				full.nodes,
+				pvs_nodes,
+				pvs_raises,
+				note,
+			)
+		} else {
+			fmt.printf(
+				" target=%v alpha=NA full=%d pvs=NA delta=NA full_nodes=%d pvs_nodes=0 pvs_raises=false note=%s full_pv=",
+				is_target,
+				full.score,
+				full.nodes,
+				note,
+			)
+		}
+		root_debug_print_pv(move, &full.pv)
+		fmt.println()
+		os.flush(os.stdout)
+
+		if full.score > best_score {
+			best_score = full.score
+			best_move = move
+		}
+		if full.score > current_alpha {
+			current_alpha = full.score
+		}
+
+		legal_moves += 1
+		scored_moves += 1
+		if is_target {
+			targets_seen += 1
+		}
+		if len(target_moves) > 0 && targets_seen >= len(target_moves) {
+			break
+		}
+	}
+
+	fmt.printf("summary scored=%d legal_seen=%d best=", scored_moves, legal_moves)
+	if !moves.is_empty_move(best_move) {
+		board.print_move(best_move)
+	} else {
+		fmt.printf("(none)")
+	}
+	fmt.printf(" best_score=%d final_alpha=%d targets_seen=%d\n", best_score, current_alpha, targets_seen)
+}
+
 trace_root_legal_move :: proc(b: ^board.Board, move: moves.Move) -> bool {
 	if !board.is_castling_legal_now(b, move) {
 		return false

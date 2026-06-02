@@ -808,3 +808,38 @@ normal root, clean verifier, or MultiPV path is producing the unstable score.
 One correctness fix from the experiment was kept: if a timed clean-root
 verification starts but does not complete, the depth is now treated as
 incomplete, matching fixed-depth verification behavior.
+
+## Root Parity Trace
+
+Added `trace-root-parity` as a focused diagnostic. It warms to `depth - 1`,
+sorts root moves normally, then scores each requested root candidate from the
+same TT snapshot and cloned history. This avoids the usual root-order
+contamination while still using the same NNUE/search stack.
+
+Example:
+
+```sh
+./mantis_root_parity trace-root-parity 14 g8h8 h7g6 fen "1r3rk1/1p1b3q/3NpP1p/p2pn1p1/8/6P1/PP1QBR1P/2R3K1 b - - 0 25"
+```
+
+Candidate-4 result:
+
+| Move | Comparable full score | Comparable PVS score | Finding |
+| --- | ---: | ---: | --- |
+| `g8h8` | -698 | n/a | First root move in normal ordering. |
+| `e5f7` | -529 | -697 | Full-window score raises alpha, PVS/bound score hides it. |
+| `h7g6` | -510 | -529 | Best comparable full score; PVS equality misses the raise. |
+
+This proves the normal root can lose candidates because bound-style root
+searches return alpha even when a comparable full-window search would raise it.
+
+A root equality re-search prototype was tested and rejected. It gave true
+full-window searches to deep equality-bound root probes, but the focused d14
+trace still chose `g8h8`, took roughly 69 seconds for the normal search, and
+shifted MultiPV back toward `g8h8`. The likely problem is not a single root
+equality rule; it is that root, clean-verifier, and MultiPV paths update and
+consume TT/history differently enough to change the searched position tree.
+
+Next: make a parity scorer for the exact normal-root, clean-verifier, and
+MultiPV candidate sets so all three paths can be compared from identical
+snapshots before attempting another engine behavior change.
