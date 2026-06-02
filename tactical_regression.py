@@ -34,17 +34,31 @@ TESTS = [
         "depth": 4,
         "banned": {"c4b5"},
     },
+    {
+        "name": "Viridithas 2026-06-01: keep queen defense",
+        "fen": "1r3rk1/1p1b3q/3NpP1p/p2pn1p1/8/6P1/PP1QBR1P/2R3K1 b - - 0 25",
+        "clock": (180000, 180000, 2000, 2000),
+        "expected": {"h7g6"},
+        "timeout": 60,
+    },
 ]
 
 
-def bestmove(binary: str, fen: str, depth: int) -> tuple[str, str]:
-    command = f"uci\nisready\nposition fen {fen}\ngo depth {depth}\nquit\n"
+def bestmove(binary: str, test: dict) -> tuple[str, str]:
+    fen = test["fen"]
+    if "clock" in test:
+        wtime, btime, winc, binc = test["clock"]
+        go = f"go wtime {wtime} btime {btime} winc {winc} binc {binc}"
+    else:
+        go = f"go depth {test['depth']}"
+
+    command = f"uci\nisready\nposition fen {fen}\n{go}\nquit\n"
     output = subprocess.check_output(
         [binary],
         input=command,
         text=True,
         stderr=subprocess.STDOUT,
-        timeout=30,
+        timeout=test.get("timeout", 30),
     )
     match = re.search(r"bestmove\s+(\S+)", output)
     if not match:
@@ -58,8 +72,13 @@ def main() -> int:
     args = parser.parse_args()
 
     for test in TESTS:
-        move, output = bestmove(args.binary, test["fen"], test["depth"])
-        if move in test["banned"]:
+        move, output = bestmove(args.binary, test)
+        if "expected" in test and move not in test["expected"]:
+            expected = ", ".join(sorted(test["expected"]))
+            print(f"FAIL {test['name']}: bestmove={move}, expected one of {{{expected}}}")
+            print(output)
+            return 1
+        if move in test.get("banned", set()):
             print(f"FAIL {test['name']}: bestmove={move}")
             print(output)
             return 1
