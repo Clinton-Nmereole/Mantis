@@ -51,6 +51,88 @@ def limit_label(mode: str, limit_value: Any) -> str:
     return f"{mode}={limit_value}"
 
 
+def parse_optional_int(value: Any) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def add_oracle_move(
+    moves: dict[str, dict[str, int]],
+    move: str | None,
+    rank: Any,
+    score_cp: Any,
+    loss_cp: Any,
+) -> None:
+    if not move:
+        return
+    rank_value = parse_optional_int(rank)
+    loss_value = parse_optional_int(loss_cp)
+    score_value = parse_optional_int(score_cp)
+    if rank_value is None and loss_value is None and score_value is None:
+        return
+    entry: dict[str, int] = {}
+    if rank_value is not None:
+        entry["rank"] = rank_value
+    if score_value is not None:
+        entry["score_cp"] = score_value
+    if loss_value is not None:
+        entry["loss_cp"] = loss_value
+    moves[move] = entry
+
+
+def load_oracle_moves(path: Path | None) -> dict[str, dict[str, dict[str, int]]]:
+    if path is None:
+        return {}
+
+    oracle: dict[str, dict[str, dict[str, int]]] = {}
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            fen = row.get("fen", "")
+            if not fen:
+                continue
+            moves = oracle.setdefault(fen, {})
+            add_oracle_move(
+                moves,
+                row.get("oracle_bestmove"),
+                1,
+                row.get("oracle_best_score_cp"),
+                0,
+            )
+            add_oracle_move(
+                moves,
+                row.get("played"),
+                row.get("oracle_played_rank"),
+                row.get("oracle_played_score_cp"),
+                row.get("oracle_played_loss_cp"),
+            )
+            add_oracle_move(
+                moves,
+                row.get("bestmove"),
+                row.get("oracle_engine_rank"),
+                row.get("oracle_engine_score_cp"),
+                row.get("oracle_engine_loss_cp"),
+            )
+    return oracle
+
+
+def annotate_oracle(row: dict[str, Any], oracle_moves: dict[str, dict[str, dict[str, int]]]) -> None:
+    moves = oracle_moves.get(str(row["fen"]), {})
+    base = moves.get(str(row["base_best"]), {})
+    cand = moves.get(str(row["cand_best"]), {})
+    row["base_oracle_rank"] = base.get("rank", "")
+    row["cand_oracle_rank"] = cand.get("rank", "")
+    row["base_oracle_loss_cp"] = base.get("loss_cp", "")
+    row["cand_oracle_loss_cp"] = cand.get("loss_cp", "")
+    row["oracle_loss_delta_cp"] = ""
+    if "loss_cp" in base and "loss_cp" in cand:
+        row["oracle_loss_delta_cp"] = cand["loss_cp"] - base["loss_cp"]
+
+
 def load_fens(args: argparse.Namespace) -> list[str]:
     if args.fen_file:
         fens = [
@@ -226,6 +308,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=90.0, help="Timeout per engine/position in seconds")
     parser.add_argument("--fen-file", type=Path, help="Optional file with one FEN per line")
     parser.add_argument("--csv", type=Path, help="Optional CSV output path")
+    parser.add_argument("--oracle-csv", type=Path, help="Optional blunder_trace oracle CSV for move rank/loss annotations")
     parser.add_argument("--keep-hash", action="store_true", help="Do not send ucinewgame between positions")
     parser.add_argument("--baseline-staged-picker", action="store_true", help="Enable StagedMovePicker on baseline")
     parser.add_argument("--candidate-staged-picker", action="store_true", help="Enable StagedMovePicker on candidate")
@@ -241,6 +324,11 @@ def main() -> int:
         nargs="?",
         const=1,
         help="Exit nonzero if candidate depth is lower by at least this many plies; default threshold is 1",
+    )
+    parser.add_argument(
+        "--fail-on-oracle-loss-regression",
+        type=int,
+        help="Exit nonzero if known candidate oracle loss exceeds known baseline loss by more than this many centipawns",
     )
     args = parser.parse_args()
     if args.depths and any(depth <= 0 for depth in args.depths):
@@ -259,12 +347,15 @@ def main() -> int:
         parser.error("--fail-on-score-delta must be non-negative")
     if args.fail_on_depth_loss is not None and args.fail_on_depth_loss <= 0:
         parser.error("--fail-on-depth-loss must be positive")
+    if args.fail_on_oracle_loss_regression is not None and args.fail_on_oracle_loss_regression < 0:
+        parser.error("--fail-on-oracle-loss-regression must be non-negative")
 
     try:
         fens = load_fens(args)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    oracle_moves = load_oracle_moves(args.oracle_csv)
     all_rows: list[dict[str, Any]] = []
     total_changes = 0
     limits: list[tuple[str, Any]] = []
@@ -299,19 +390,27 @@ def main() -> int:
                 print(f"FAIL {mode}={limit_value} index={index}: timed out after {args.timeout}s\n{exc.output}", file=sys.stderr)
                 return 1
 
+            annotate_oracle(row, oracle_moves)
             limit_rows.append(row)
             all_rows.append(row)
             marker = "!" if int(row["bestmove_changed"]) else " "
             depth_note = ""
             if mode in {"movetime", "clock"}:
                 depth_note = f" depth={int(row['base_depth'])}->{int(row['cand_depth'])}"
+            oracle_note = ""
+            if args.oracle_csv:
+                base_loss = row["base_oracle_loss_cp"]
+                cand_loss = row["cand_oracle_loss_cp"]
+                if base_loss != "" or cand_loss != "":
+                    oracle_note = f" oracle_loss={base_loss}->{cand_loss}"
             print(
                 f"{marker} {limit_label(mode, limit_value)} {index:2d}/{len(fens):2d} "
                 f"{row['base_best']}->{row['cand_best']} "
                 f"score={int(row['score_delta_cp']):+5d} "
                 f"nodes={int(row['node_delta']):+8d} "
                 f"time={int(row['time_delta_ms']):+6d}ms"
-                f"{depth_note}",
+                f"{depth_note}"
+                f"{oracle_note}",
                 flush=True,
             )
 
@@ -357,6 +456,26 @@ def main() -> int:
                 print(
                     f"  {row['mode']}={row['limit']} index={int(row['index'])}: "
                     f"depth={int(row['base_depth'])}->{int(row['cand_depth'])} "
+                    f"{row['base_best']}->{row['cand_best']} fen={row['fen']}",
+                    flush=True,
+            )
+            return 1
+
+    if args.fail_on_oracle_loss_regression is not None:
+        oracle_violations = [
+            row for row in all_rows
+            if row["oracle_loss_delta_cp"] != "" and int(row["oracle_loss_delta_cp"]) > args.fail_on_oracle_loss_regression
+        ]
+        if oracle_violations:
+            print(
+                f"\nFAIL: {len(oracle_violations)} known oracle losses worsened by more than "
+                f"{args.fail_on_oracle_loss_regression} cp",
+                flush=True,
+            )
+            for row in oracle_violations:
+                print(
+                    f"  {row['mode']}={row['limit']} index={int(row['index'])}: "
+                    f"oracle_loss={row['base_oracle_loss_cp']}->{row['cand_oracle_loss_cp']} "
                     f"{row['base_best']}->{row['cand_best']} fen={row['fen']}",
                     flush=True,
                 )

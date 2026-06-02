@@ -1062,3 +1062,45 @@ Conclusion: fail-high verification can spend enough budget to lose a completed
 depth and undo the `h7g6` queen-defense improvement. Do not accept future root
 recovery candidates from the small tactical suite alone; run the first-collapse
 clock compare with `--fail-on-depth-loss` and `--fail-on-bestmove-change`.
+
+## Fail-High Beta-Floor Rejection
+
+Tested `./mantis_failhigh_beta_floor`, which changed fail-high aspiration
+re-search to use the failed beta bound as the new root alpha. This is cheaper
+than clean verification and did find some oracle-known improvements:
+
+```text
+1: c8c2 -> f8c5, oracle_loss 36 -> 0
+5: d3c2 -> d3e4, oracle rank 2 -> 1
+```
+
+The broader first-collapse clock compare still rejected it:
+
+```text
+python3 compare_candidates.py \
+  --baseline ./mantis_score_parity \
+  --candidate ./mantis_failhigh_beta_floor \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 \
+  --timeout 90 \
+  --fail-on-depth-loss \
+  --fail-on-bestmove-change \
+  --csv games/failhigh_beta_floor_compare_first_collapse.csv
+```
+
+Full result:
+
+```text
+bestmove_changes: 5
+avg_depth:        15.46 -> 15.31
+nodes:            18422938 -> 17566559 (-4.65%)
+time_ms:          77215 -> 87616 (+13.47%)
+FAIL: 6 candidate searches lost at least 1 ply
+```
+
+Harmful changed moves included `e4e5 -> d5d4`, `h2h3 -> f5d3`, and
+`d7e7 -> d7f7`, all worse by the existing Stockfish oracle notes.
+
+The comparison harness now supports `--oracle-csv` and
+`--fail-on-oracle-loss-regression` so future mixed candidates can be judged by
+known oracle loss, not only by raw bestmove changes.
