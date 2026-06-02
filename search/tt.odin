@@ -96,6 +96,68 @@ score_from_tt :: proc(score: int, ply: int) -> int {
 	return score
 }
 
+TTDebugInfo :: struct {
+	hit:          bool,
+	depth_ok:     bool,
+	slot:         int,
+	depth:        int,
+	flag:         u8,
+	age:          u8,
+	raw_score:    int,
+	score:        int,
+	exact_cutoff: bool,
+	alpha_cutoff: bool,
+	beta_cutoff:  bool,
+}
+
+probe_tt_debug :: proc(key: u64, alpha: int, beta: int, depth: int, ply: int) -> TTDebugInfo {
+	info: TTDebugInfo
+	if len(tt) == 0 { return info }
+
+	index := key % u64(len(tt))
+	bucket := &tt[index]
+
+	for i in 0 ..< 2 {
+		entry := &bucket.entries[i]
+		entry_key := sync.atomic_load(&entry.key)
+		if entry_key != key {
+			continue
+		}
+
+		entry_info := TTDebugInfo {
+			hit       = true,
+			depth_ok  = entry.depth >= depth,
+			slot      = i,
+			depth     = entry.depth,
+			flag      = entry.flag,
+			age       = entry.age,
+			raw_score = entry.score,
+			score     = score_from_tt(entry.score, ply),
+		}
+		if entry_info.depth_ok {
+			entry_info.exact_cutoff = entry.flag == TT_FLAG_EXACT
+			entry_info.alpha_cutoff = entry.flag == TT_FLAG_ALPHA && entry_info.score <= alpha
+			entry_info.beta_cutoff = entry.flag == TT_FLAG_BETA && entry_info.score >= beta
+		}
+
+		if entry_info.exact_cutoff || entry_info.alpha_cutoff || entry_info.beta_cutoff {
+			return entry_info
+		}
+		if !info.hit || (!info.depth_ok && entry_info.depth_ok) {
+			info = entry_info
+		}
+	}
+
+	return info
+}
+
+tt_flag_name :: proc(flag: u8) -> string {
+	if flag == TT_FLAG_EXACT { return "exact" }
+	if flag == TT_FLAG_ALPHA { return "alpha" }
+	if flag == TT_FLAG_BETA { return "beta" }
+	return "unknown"
+}
+
 // Probe TT
 // Returns: score, found
 probe_tt :: proc(key: u64, alpha: int, beta: int, depth: int, ply: int) -> (int, bool) {

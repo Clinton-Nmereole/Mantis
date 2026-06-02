@@ -996,3 +996,37 @@ python3 stats_benchmark.py --binary ./mantis_score_parity
 Next: use `./mantis_score_parity` for practice games, then run the broader
 worst-playable trace with the scaled score output to separate real move-choice
 losses from old raw-score false collapses.
+
+## Root TT-Bound Recovery Diagnostic
+
+Added `RootDebugTrace` child TT metadata so root aspiration traces now print
+the child search window plus the pre-search TT entry for each root child:
+slot, flag, stored depth, requested depth, decoded score, raw score, age,
+depth usability, and cutoff kind.
+
+Sensitive FEN:
+
+```text
+1r3rk1/1p1b3q/3NpP1p/p2pn1p1/8/6P1/PP1QBR1P/2R3K1 b - - 0 25
+```
+
+Depth-11 trace on `./mantis_tt_bound_trace` explains why fail-high recovery can
+collapse to the lower edge:
+
+```text
+phase=fail_high_research move=g8h8 score=-549
+child_window=[-50000,549]
+child_tt=hit(slot=0 flag=beta depth=10/10 score=549 ... cutoff=beta)
+```
+
+The initial aspiration pass keeps searching after a root fail-high and can
+produce invalid child windows once `current_alpha >= beta`. A candidate that
+stopped the root pass immediately on beta was tested as
+`./mantis_root_beta_cut`; it fixed the depth-11 `h7g6` trace and removed the
+invalid-window tail, but it failed the existing tactical suite by reviving the
+bad `h4g3` move in the 2026-05-29 Viridithas position. That behavior change was
+rejected.
+
+The accepted change is diagnostic-only. Search behavior remains matched to
+`./mantis_score_parity`; the new trace gives the next pass direct evidence for
+TT-bound handling during root aspiration recovery.

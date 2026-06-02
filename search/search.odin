@@ -4735,13 +4735,20 @@ run_root_search_pass :: proc(
 
 		child_pv: PV_Line
 		alpha_before := current_alpha
+		child_alpha := -beta
+		child_beta := -current_alpha
+		child_depth := depth - 1
+		child_tt_info: TTDebugInfo
+		if debug_trace {
+			child_tt_info = probe_tt_debug(b.hash, child_alpha, child_beta, child_depth, 1)
+		}
 		nodes_before := st.nodes
 		score := -negamax(
 			st,
 			b,
-			-beta,
-			-current_alpha,
-			depth - 1,
+			child_alpha,
+			child_beta,
+			child_depth,
 			1,
 			&child_pv,
 		)
@@ -4788,7 +4795,7 @@ run_root_search_pass :: proc(
 			)
 			root_debug_print_move(move)
 			fmt.printf(
-				" score=%d alpha_before=%d alpha_after=%d beta=%d nodes=%d new_best=%v root_seed=%v pv=",
+				" score=%d alpha_before=%d alpha_after=%d beta=%d nodes=%d new_best=%v root_seed=%v child_window=[%d,%d] child_tt=",
 				score,
 				alpha_before,
 				current_alpha,
@@ -4796,11 +4803,38 @@ run_root_search_pass :: proc(
 				nodes_delta,
 				new_best,
 				same_move(move, root_tt_move),
+				child_alpha,
+				child_beta,
 			)
+			if child_tt_info.hit {
+				cutoff := "none"
+				if child_tt_info.exact_cutoff {
+					cutoff = "exact"
+				} else if child_tt_info.alpha_cutoff {
+					cutoff = "alpha"
+				} else if child_tt_info.beta_cutoff {
+					cutoff = "beta"
+				}
+				fmt.printf(
+					"hit(slot=%d flag=%s depth=%d/%d score=%d raw=%d age=%d depth_ok=%v cutoff=%s) pv=",
+					child_tt_info.slot,
+					tt_flag_name(child_tt_info.flag),
+					child_tt_info.depth,
+					child_depth,
+					child_tt_info.score,
+					child_tt_info.raw_score,
+					child_tt_info.age,
+					child_tt_info.depth_ok,
+					cutoff,
+				)
+			} else {
+				fmt.printf("miss pv=")
+			}
 			root_debug_print_pv(move, &child_pv)
 			fmt.println()
 			os.flush(os.stdout)
 		}
+
 	}
 
 	if debug_trace {
