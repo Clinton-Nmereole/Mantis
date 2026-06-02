@@ -5850,6 +5850,21 @@ search_position :: proc(
 				best_move_changes += 1
 			}
 			prev_best_move = best_move
+
+			// A depth can become unstable after it completes, even if it was
+			// not close enough to the budget to prepare root verification at
+			// depth start. Give the next iteration the same conservative hard
+			// cap extension used by timed root verification.
+			if should_prepare_timed_root_verify(
+				search_limits,
+				last_depth_ms,
+				previous_depth_ms,
+				best_move_changes,
+				largest_score_drop,
+				aspiration_failures,
+			) {
+				extend_timed_root_verify_budget(&search_limits)
+			}
 		}
 
 		// Check if we should stop iterative deepening

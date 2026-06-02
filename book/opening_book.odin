@@ -119,6 +119,11 @@ get_builtin_book_move :: proc(fen: string) -> string {
 			return entry.move
 		}
 	}
+	for entry in BUILTIN_BOOK_EXTRA_MOVES {
+		if fen == entry.fen {
+			return entry.move
+		}
+	}
 	return ""
 }
 

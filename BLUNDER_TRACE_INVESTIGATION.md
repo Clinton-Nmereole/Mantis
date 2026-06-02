@@ -1137,3 +1137,55 @@ The raw-search benchmark remains at `473960` nodes across the 44 positions with
 book disabled, while `--own-book --limit 3` returns immediate book moves at
 depth 0/nodes 0. The latest practice-game binary from this pass is
 `./mantis_opening_book_fix`.
+
+## Opening Repertoire And Timed Instability Extension
+
+Several search-quality candidates were tested and rejected before accepting
+this pass:
+
+- `./mantis_staged_picker`: fixed-depth score gates and first-collapse clock
+  compare showed bad bestmove churn and depth losses.
+- `./mantis_timed_seed_verify`: tried preparing a timed clean-root snapshot
+  when the carried root seed looked like a losing capture, but it still kept
+  the bad `c8c2` candidate and lost a completed ply.
+- `./mantis_fail_low_tie` and `./mantis_fail_low_tie_timed`: fail-low
+  tie-break variants fixed one narrow trace but changed too many timed
+  first-collapse moves and lost depth.
+
+The accepted practical change expands the exact-FEN built-in book with a compact
+repertoire covering common Ruy Lopez, Italian, Scotch, Sicilian, French, Caro,
+Scandinavian, Pirc/Modern, QGD/Slav/KID/Nimzo/London, English, and Reti
+prefixes. The table is generated from Mantis' own FEN output, so en-passant and
+move counters match the engine's UCI positions.
+
+During validation, `./mantis_book_repertoire` exposed a timed-search cliff in
+the 2026-06-01 Viridithas queen-defense regression:
+
+```text
+depth 13: bestmove g8h8
+depth 14: bestmove h7g6
+```
+
+The old binary sometimes reached depth 14 because timed root verification had
+extended the hard budget; the book-repertoire binary stopped at depth 13 when a
+few milliseconds changed the next-depth projection. The accepted timing fix
+reuses the existing conservative hard-time extension at the iteration boundary
+when the just-completed depth is unstable or close to the projected budget. This
+does not affect fixed-depth search or `go movetime`; it only gives unstable
+clock searches the same capped extra time already used by timed root
+verification.
+
+Validation:
+
+```text
+odin build . -out:mantis_book_time_stability -o:speed
+python3 tactical_regression.py --binary ./mantis_book_time_stability
+python3 correctness_test.py --binary ./mantis_book_time_stability
+python3 stats_benchmark.py --binary ./mantis_book_time_stability --timeout 90
+```
+
+Book smoke checks confirmed exact book hits for the root, Ruy Lopez, Italian,
+and Sicilian `...d6` transition positions, and confirmed `OwnBook=false` still
+forces search. The raw-search benchmark remains at `473960` nodes across the 44
+positions with book disabled. The latest practice-game binary from this pass is
+`./mantis_book_time_stability`.
