@@ -61,8 +61,9 @@ stop_search :: proc() {
 
 // PV Line Structure
 PV_Line :: struct {
-	moves: [MAX_PLY]moves.Move,
-	count: int,
+	moves:       [MAX_PLY]moves.Move,
+	count:       int,
+	tb_terminal: bool,
 }
 
 // MultiPV Result - stores move, score, and PV for each line
@@ -3875,6 +3876,20 @@ negamax :: proc(
 	prev_move: moves.Move = moves.Move{}, // Previous move for counter-moves
 ) -> int {
 	count_nodes(st)
+	pv_line.count = 0
+	pv_line.tb_terminal = false
+
+	// Syzygy WDL probes are exact; let them outrank cached TT bounds and
+	// apply on PV nodes as well as cut nodes once tablebases are enabled.
+	if depth >= 1 && moves.is_empty_move(excluded_move) && tb.syzygy_enabled {
+		stat_add(&search_stats.tb_probes)
+		tb_score, tb_hit := tb.probe_wdl(b)
+		if tb_hit {
+			stat_add(&search_stats.tb_hits)
+			pv_line.tb_terminal = true
+			return tb_score
+		}
+	}
 
 	// TT Probe
 	if moves.is_empty_move(excluded_move) && !search_debug_options.disable_tt_cutoffs {
@@ -3882,16 +3897,6 @@ negamax :: proc(
 		if tt_hit {
 			stat_add(&search_stats.tt_cutoffs)
 			return tt_score
-		}
-	}
-
-	// Syzygy WDL Probe (during search, for exact endgame scores)
-	if !is_pv && depth >= 1 {
-		stat_add(&search_stats.tb_probes)
-		tb_score, tb_hit := tb.probe_wdl(b)
-		if tb_hit {
-			stat_add(&search_stats.tb_hits)
-			return tb_score
 		}
 	}
 
@@ -4377,6 +4382,7 @@ negamax :: proc(
 				pv_line.moves[pv_i + 1] = child_pv.moves[pv_i]
 			}
 			pv_line.count = child_pv.count + 1
+			pv_line.tb_terminal = child_pv.tb_terminal
 		}
 
 		if score > current_alpha {
@@ -4787,6 +4793,7 @@ run_root_search_pass :: proc(
 				result.best_pv.moves[i + 1] = child_pv.moves[i]
 			}
 			result.best_pv.count = child_pv.count + 1
+			result.best_pv.tb_terminal = child_pv.tb_terminal
 		}
 
 		if score > current_alpha {
@@ -4982,6 +4989,7 @@ run_root_full_window_verification_pass :: proc(
 				result.best_pv.moves[i + 1] = child_pv.moves[i]
 			}
 			result.best_pv.count = child_pv.count + 1
+			result.best_pv.tb_terminal = child_pv.tb_terminal
 		}
 
 		if debug_trace {
@@ -5160,6 +5168,7 @@ run_root_snapshot_verification_pass :: proc(
 					result.best_pv.moves[pv_i + 1] = scored.pv.moves[pv_i]
 				}
 				result.best_pv.count = scored.pv.count + 1
+				result.best_pv.tb_terminal = scored.pv.tb_terminal
 			}
 
 			if debug_trace {
@@ -5780,6 +5789,7 @@ search_position :: proc(
 		previous_depth_ms = last_depth_ms
 		last_depth_ms = depth_elapsed
 		last_completed_pv_len := 0
+		last_completed_pv_tb_terminal := false
 		os.flush(os.stdout)
 
 		nps := u64(0)
@@ -5798,6 +5808,7 @@ search_position :: proc(
 		if len(multi_pv_results) > 0 {
 			current_score := multi_pv_results[0].score
 			last_completed_pv_len = multi_pv_results[0].pv.count
+			last_completed_pv_tb_terminal = multi_pv_results[0].pv.tb_terminal
 			if have_completed_score {
 				score_drop := previous_completed_score - current_score
 				if score_drop > largest_score_drop {
@@ -5882,7 +5893,8 @@ search_position :: proc(
 			// is suspiciously short; normal-length PVs were stable in collapse
 			// tests and should not spend extra blitz time just because the
 			// projected next depth is expensive.
-			if last_completed_pv_len <= 2 && should_prepare_timed_root_verify(
+			if last_completed_pv_len <= 2 && !last_completed_pv_tb_terminal &&
+			   should_prepare_timed_root_verify(
 				search_limits,
 				last_depth_ms,
 				previous_depth_ms,

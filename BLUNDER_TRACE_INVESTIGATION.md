@@ -1375,3 +1375,50 @@ The raw-search benchmark remains at `473960` nodes. Tactical regression and
 perft correctness passed, and book smoke still returns immediate zero-node
 book moves for the first three benchmark positions. The latest practice-game
 binary from this pass is `./mantis_timed_verify_mixed`.
+
+## Accepted: PV Syzygy WDL Probing
+
+Change: internal Syzygy WDL probes now run before TT cutoffs and are available
+at PV nodes as well as cut nodes, while still skipping singular-extension
+excluded searches. The path is guarded by `tb.syzygy_enabled`, so normal
+no-tablebase searches do not pay extra probe overhead. When `SyzygyPath` is
+configured, exact tablebase WDL scores can no longer be hidden by a cached TT
+bound on the principal line. PV lines that end because of a tablebase cutoff
+are marked as tablebase-terminal, so the short-PV timed extension does not
+mistake a legitimate exact endgame cutoff for an unstable clipped PV.
+
+Validation:
+
+```text
+odin build . -out:mantis_syzygy_pv -o:speed
+python3 compare_candidates.py \
+  --baseline ./mantis_timed_verify_mixed \
+  --candidate ./mantis_syzygy_pv \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 \
+  --timeout 90 \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv games/syzygy_pv_compare_first_collapse.csv
+python3 tactical_regression.py --binary ./mantis_syzygy_pv
+python3 correctness_test.py --binary ./mantis_syzygy_pv
+python3 stats_benchmark.py --binary ./mantis_syzygy_pv --timeout 90
+python3 stats_benchmark.py --binary ./mantis_syzygy_pv --own-book --limit 3 --timeout 30
+```
+
+First-collapse clock compare with no local Syzygy path loaded:
+
+```text
+positions:        13
+bestmove_changes: 0
+avg_depth:        14.69 -> 14.69
+nodes:            15471647 -> 15471647 (+0.00%)
+time_ms:          77889 -> 77929 (+0.05%)
+abs_score_delta:  0 cp
+max_score_delta:  0 cp
+oracle regressions: none
+```
+
+Tactical regression, perft correctness, raw stats benchmark, and the three-move
+own-book smoke test passed. The raw-search benchmark remains at `473960` nodes.
+The latest practice-game binary from this pass is `./mantis_syzygy_pv`.
