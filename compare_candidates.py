@@ -158,6 +158,7 @@ def run_one(
     keep_hash: bool,
     staged_picker: bool,
     own_book: bool,
+    options: list[tuple[str, str]],
 ) -> dict[str, Any]:
     depth = limit_value if mode == "depth" else None
     movetime_ms = limit_value if mode == "movetime" else None
@@ -172,6 +173,7 @@ def run_one(
         own_book=own_book,
         movetime_ms=movetime_ms,
         clock_ms=clock_ms,
+        options=options,
     )
     stats["wall_ms"] = int(wall_ms)
     return stats
@@ -193,6 +195,7 @@ def compare_position(
         args.keep_hash,
         args.baseline_staged_picker,
         args.baseline_own_book,
+        args.baseline_options,
     )
     cand = run_one(
         args.candidate,
@@ -203,6 +206,7 @@ def compare_position(
         args.keep_hash,
         args.candidate_staged_picker,
         args.candidate_own_book,
+        args.candidate_options,
     )
 
     base_best = str(base.get("bestmove", "?"))
@@ -452,6 +456,9 @@ def main() -> int:
     parser.add_argument("--candidate-own-book", action="store_true", help="Allow OwnBook moves for the candidate binary")
     parser.add_argument("--baseline-staged-picker", action="store_true", help="Enable StagedMovePicker on baseline")
     parser.add_argument("--candidate-staged-picker", action="store_true", help="Enable StagedMovePicker on candidate")
+    parser.add_argument("--option", action="append", default=[], help="UCI option Name=Value applied to both binaries; repeatable")
+    parser.add_argument("--baseline-option", action="append", default=[], help="UCI option Name=Value applied only to baseline; repeatable")
+    parser.add_argument("--candidate-option", action="append", default=[], help="UCI option Name=Value applied only to candidate; repeatable")
     parser.add_argument("--fail-on-bestmove-change", action="store_true", help="Exit nonzero if any bestmove changes")
     parser.add_argument(
         "--fail-on-score-delta",
@@ -497,6 +504,12 @@ def main() -> int:
         parser.error("--fail-on-oracle-loss-regression must be non-negative")
     if args.oracle_summary_limit < 0:
         parser.error("--oracle-summary-limit must be non-negative")
+    try:
+        common_options = stats_benchmark.parse_engine_options(args.option)
+        args.baseline_options = common_options + stats_benchmark.parse_engine_options(args.baseline_option)
+        args.candidate_options = common_options + stats_benchmark.parse_engine_options(args.candidate_option)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     try:
         fens = load_fens(args)

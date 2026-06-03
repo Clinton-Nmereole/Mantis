@@ -230,6 +230,26 @@ def clock_go_command(clock: dict[str, int]) -> str:
     return command
 
 
+def parse_engine_options(raw_options: list[str] | None) -> list[tuple[str, str]]:
+    """Parse repeated Name=Value CLI options into UCI setoption pairs."""
+    options: list[tuple[str, str]] = []
+    for raw in raw_options or []:
+        if "=" not in raw:
+            raise ValueError(f"engine option must be Name=Value: {raw}")
+        name, value = raw.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name or not value:
+            raise ValueError(f"engine option must be Name=Value: {raw}")
+        options.append((name, value))
+    return options
+
+
+def setoption_command(option: tuple[str, str]) -> str:
+    name, value = option
+    return f"setoption name {name} value {value}"
+
+
 def parse_stats(output: str) -> dict[str, int | str]:
     stats: dict[str, int | str] = {}
     for line in output.splitlines():
@@ -306,6 +326,7 @@ def run_position(
     own_book: bool = False,
     movetime_ms: int | None = None,
     clock_ms: dict[str, int] | None = None,
+    options: list[tuple[str, str]] | None = None,
 ) -> tuple[dict[str, int | str], str, float]:
     modes = sum(
         1
@@ -328,8 +349,9 @@ def run_position(
     commands = [
         "uci",
         f"setoption name OwnBook value {'true' if own_book else 'false'}",
-        "setoption name SearchStats value true",
     ]
+    commands.extend(setoption_command(option) for option in options or [])
+    commands.append("setoption name SearchStats value true")
     if staged_picker:
         commands.append("setoption name StagedMovePicker value true")
     commands.append("isready")
@@ -524,6 +546,7 @@ def main() -> int:
     parser.add_argument("--keep-hash", action="store_true", help="Do not send ucinewgame between positions")
     parser.add_argument("--own-book", action="store_true", help="Allow internal OwnBook moves during the benchmark")
     parser.add_argument("--staged-picker", action="store_true", help="Enable the StagedMovePicker UCI option")
+    parser.add_argument("--option", action="append", default=[], help="UCI option Name=Value applied before each search; repeatable")
     parser.add_argument("--validate-only", action="store_true", help="Validate selected FENs and exit")
     args = parser.parse_args()
     if args.depth <= 0:
@@ -542,6 +565,10 @@ def main() -> int:
         parser.error("--winc and --binc must be non-negative")
     if args.movestogo < 0:
         parser.error("--movestogo must be non-negative")
+    try:
+        engine_options = parse_engine_options(args.option)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.fen_file:
         fens = [
@@ -598,6 +625,7 @@ def main() -> int:
                 own_book=args.own_book,
                 movetime_ms=args.movetime,
                 clock_ms=clock_ms,
+                options=engine_options,
             )
         except subprocess.CalledProcessError as exc:
             print(f"FAIL {index}: engine exited with {exc.returncode}\n{exc.output}", file=sys.stderr)

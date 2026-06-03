@@ -2488,3 +2488,56 @@ python3 tactical_regression.py --binary ./mantis_trace_iir_diag
 python3 correctness_test.py --binary ./mantis_trace_iir_diag --random 20 --seed 0603
 python3 stats_benchmark.py --binary ./mantis_trace_iir_diag --limit 3 --timeout 90
 ```
+
+## Accepted: UCI Option Benchmark Comparison
+
+`stats_benchmark.py` and `compare_candidates.py` now accept arbitrary repeated
+UCI tuning options:
+
+```text
+python3 stats_benchmark.py \
+  --binary ./mantis_timed_capture_verify \
+  --limit 1 \
+  --option FutilityMargin=400
+
+python3 compare_candidates.py \
+  --baseline ./mantis_timed_capture_verify \
+  --candidate ./mantis_timed_capture_verify \
+  --limit 1 \
+  --depths 6 \
+  --candidate-option FutilityMargin=400
+```
+
+The smoke verifies option delivery: depth-6 startpos changes from `8077` nodes
+to `8095` nodes when `FutilityMargin=400` is applied.
+
+This was used to re-screen the stale best UCI tuning set from
+`tuning_progress.json`:
+
+```text
+NmpReductionBase=1
+NmpReductionDiv=6
+RfpMargin=86
+RfpDepth=7
+LmrMinDepth=3
+FutilityMargin=271
+LmpBase=3
+LmpDiv=3
+```
+
+Current fixed-depth comparison rejects it as a default change:
+
+```text
+Depth 6: 9/44 bestmove changes, nodes 473960 -> 682603 (+44.02%)
+Depth 7: 15/44 bestmove changes, nodes 963416 -> 1590727 (+65.11%)
+```
+
+A 12-game 80 ms self-play sanity check was neutral:
+
+```text
+Wins: 4, Losses: 4, Draws: 4, Win %: 50.00%
+```
+
+Conclusion: keep the option-comparison harness improvement, but do not promote
+the stale tuned parameters.  Future local tuning should compare candidates with
+these option gates before touching `search/tuning.odin`.
