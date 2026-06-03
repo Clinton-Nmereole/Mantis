@@ -1757,3 +1757,46 @@ regressions. Tactical regression, perft correctness, raw stats benchmark, and
 own-book smoke passed. The raw-search benchmark remains at `473960` nodes, and
 UCI now reports `SyzygyProbeLimit` default `7`. The latest accepted
 practice-game binary from this pass is `./mantis_syzygy7_default`.
+
+## Accepted: Interruptible UCI Infinite Search
+
+Change: `go infinite` now runs through the existing background-search lifecycle
+instead of blocking the UCI input loop. The shared background state now tracks
+whether a worker is a ponder search or a plain infinite search, and `stop` /
+`quit` join and destroy the worker cleanly. `ponderhit` remains limited to
+actual ponder searches, while infinite search can answer `isready` and then
+return a normal `bestmove` after `stop`.
+
+Validation:
+
+```text
+odin build . -out:mantis_uci_infinite_stop -o:speed
+python3 compare_candidates.py \
+  --baseline ./mantis_syzygy7_default \
+  --candidate ./mantis_uci_infinite_stop \
+  --depth 8 \
+  --timeout 60 \
+  --csv games/uci_infinite_stop_depth8_compare.csv
+python3 tactical_regression.py --binary ./mantis_uci_infinite_stop
+python3 correctness_test.py --binary ./mantis_uci_infinite_stop
+python3 stats_benchmark.py --binary ./mantis_uci_infinite_stop --timeout 90
+python3 stats_benchmark.py --binary ./mantis_uci_infinite_stop --own-book --limit 3 --timeout 30
+```
+
+Targeted UCI smokes passed for immediate `go infinite` / `stop`, `go infinite`
+with `isready` answered before `stop`, `go ponder` / `ponderhit`, and the same
+background paths with `Threads=2`.
+
+Fixed-depth depth-8 comparison stayed exact across all 44 benchmark FENs:
+
+```text
+positions:        44
+bestmove_changes: 0
+nodes:            1559564 -> 1559564 (+0.00%)
+abs_score_delta:  0 cp
+max_score_delta:  0 cp
+```
+
+Tactical regression, perft correctness, raw stats benchmark, and own-book smoke
+passed. The raw-search benchmark remains at `473960` nodes. The latest accepted
+practice-game binary from this pass is `./mantis_uci_infinite_stop`.

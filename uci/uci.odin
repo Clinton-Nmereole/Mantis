@@ -42,10 +42,11 @@ thread_count: int = 1 // Number of search threads (1-512)
 own_book: bool = true // Whether to use internal opening book
 book_file: string = "2moves_v1.epd" // Path to opening book EPD file
 
-// Ponder State - manages background pondering
+// Background Search State - manages ponder and interruptible infinite search
 Ponder_State :: struct {
 	thread_handle: ^thread.Thread,
 	is_active:     i32, // Using i32 for atomic operations
+	is_ponder:     i32,
 	board:         board.Board,
 	time_control:  search.TimeControl,
 	depth:         int,
@@ -120,13 +121,7 @@ uci_loop :: proc() {
 		if len(command) == 0 {continue}
 
 		if command == "quit" {
-			// Clean up ponder thread if active
-			if sync.atomic_load(&ponder_state.is_active) != 0 {
-				search.stop_search()
-				thread.join(ponder_state.thread_handle)
-				thread.destroy(ponder_state.thread_handle)
-				sync.atomic_store(&ponder_state.is_active, i32(0))
-			}
+			join_background_search(true)
 			break
 		} else if command == "uci" {
 			fmt.println("id name Mantis")
@@ -161,7 +156,8 @@ uci_loop :: proc() {
 			parse_setoption(command)
 		} else if command == "ponderhit" {
 			// Opponent made the predicted move - convert ponder to normal search
-			if sync.atomic_load(&ponder_state.is_active) != 0 {
+			if sync.atomic_load(&ponder_state.is_active) != 0 &&
+			   sync.atomic_load(&ponder_state.is_ponder) != 0 {
 				// Trigger ponderhit flag to apply time management
 				sync.atomic_store(&search.search_control.ponderhit_triggered, i32(1))
 
@@ -174,10 +170,7 @@ uci_loop :: proc() {
 				}
 
 				// Wait for ponder thread to complete
-				thread.join(ponder_state.thread_handle)
-				thread.destroy(ponder_state.thread_handle)
-				sync.atomic_store(&ponder_state.is_active, i32(0))
-				search.use_time_management = false
+				join_background_search(false)
 			}
 		} else if command == "d" {
 			board.print_board(game_board)
@@ -226,18 +219,62 @@ uci_loop :: proc() {
 		} else if command == "bench" || strings.has_prefix(command, "bench ") {
 			run_benchmark(command)
 		} else if command == "stop" {
-			// Stop current search (including pondering)
-			if sync.atomic_load(&ponder_state.is_active) != 0 {
-				// Signal search to stop immediately
-				search.stop_search()
-
-				// Wait for ponder thread to finish
-				thread.join(ponder_state.thread_handle)
-				thread.destroy(ponder_state.thread_handle)
-				sync.atomic_store(&ponder_state.is_active, i32(0))
-			}
+			join_background_search(true)
 		}
 	}
+}
+
+background_search_running :: proc() -> bool {
+	return ponder_state.thread_handle != nil ||
+	       sync.atomic_load(&ponder_state.is_active) != 0
+}
+
+join_background_search :: proc(signal_stop: bool) {
+	if ponder_state.thread_handle == nil {
+		sync.atomic_store(&ponder_state.is_active, i32(0))
+		sync.atomic_store(&ponder_state.is_ponder, i32(0))
+		return
+	}
+
+	if signal_stop {
+		search.stop_search()
+	}
+
+	thread.join(ponder_state.thread_handle)
+	thread.destroy(ponder_state.thread_handle)
+	ponder_state.thread_handle = nil
+	sync.atomic_store(&ponder_state.is_active, i32(0))
+	sync.atomic_store(&ponder_state.is_ponder, i32(0))
+	sync.atomic_store(&search.search_control.ponder_mode, i32(0))
+	sync.atomic_store(&search.search_control.ponderhit_triggered, i32(0))
+	search.use_time_management = false
+}
+
+start_background_search :: proc(
+	b: ^board.Board,
+	tc: search.TimeControl,
+	depth: int,
+	is_ponder: bool,
+) {
+	if background_search_running() {
+		join_background_search(true)
+	}
+
+	search.reset_search_control()
+	search.use_time_management = false
+	if is_ponder {
+		sync.atomic_store(&search.search_control.ponder_mode, i32(1))
+	}
+
+	ponder_state.board = b^
+	ponder_state.time_control = tc
+	ponder_state.depth = depth
+	sync.atomic_store(&ponder_state.is_ponder, is_ponder ? i32(1) : i32(0))
+	sync.atomic_store(&ponder_state.is_active, i32(1))
+
+	ponder_state.thread_handle = thread.create(ponder_search_thread)
+	ponder_state.thread_handle.data = &ponder_state
+	thread.start(ponder_state.thread_handle)
 }
 
 // Parse 'position' command
@@ -361,6 +398,10 @@ parse_go :: proc(command: string, b: ^board.Board) {
 		depth = 64 // Default to max depth with time control
 	}
 
+	if background_search_running() {
+		join_background_search(true)
+	}
+
 	if own_book && !is_pondering {
 		fen := board.get_fen(b^)
 		defer delete(fen)
@@ -380,26 +421,20 @@ parse_go :: proc(command: string, b: ^board.Board) {
 
 	// Handle pondering
 	if is_pondering {
-		// Store board state and parameters for ponder search
-		ponder_state.board = b^
-		ponder_state.time_control = tc
-		ponder_state.depth = depth
-		sync.atomic_store(&ponder_state.is_active, i32(1))
+		start_background_search(b, tc, depth, true)
+		return
+	}
 
-		// Spawn background ponder thread
-		ponder_state.thread_handle = thread.create(ponder_search_thread)
-		ponder_state.thread_handle.data = &ponder_state
-		thread.start(ponder_state.thread_handle)
-
-		// Return immediately - search continues in background
+	if tc.infinite {
+		start_background_search(b, tc, depth, false)
 		return
 	}
 
 	// Regular search (non-ponder)
 	search.reset_search_control()
 
-	// If time control, movetime, or infinite specified, use time management
-	if tc.wtime > 0 || tc.btime > 0 || tc.movetime > 0 || tc.infinite {
+	// If time control or movetime specified, use time management
+	if tc.wtime > 0 || tc.btime > 0 || tc.movetime > 0 {
 		limits := search.calculate_time(tc, b.side, move_overhead)
 		search.search_limits = limits
 		search.use_time_management = true
@@ -729,20 +764,34 @@ parse_move :: proc(b: ^board.Board, move_str: string) -> moves.Move {
 	return moves.Move{}
 }
 
-// Ponder Search Thread - runs in background
+// Background Search Thread - runs ponder or infinite searches in background
 ponder_search_thread :: proc(t: ^thread.Thread) {
 	state := cast(^Ponder_State)t.data
+	is_ponder := sync.atomic_load(&state.is_ponder) != 0
 
-	// Reset and configure search control for pondering
-	search.reset_search_control()
-	sync.atomic_store(&search.search_control.ponder_mode, i32(1))
+	if !is_ponder &&
+	   (state.time_control.wtime > 0 ||
+	    state.time_control.btime > 0 ||
+	    state.time_control.movetime > 0 ||
+	    state.time_control.infinite) {
+		limits := search.calculate_time(state.time_control, state.board.side, move_overhead)
+		search.search_limits = limits
+		search.use_time_management = true
+		if !limits.is_movetime && !limits.is_infinite {
+			search.clear_tt()
+		}
+	}
 
-	// Run search with ponder mode (infinite until ponderhit or stop)
-	st: search.SearchThread
-	search.init_search_thread(&st, 0)
-	defer free(st.continuation_history)
-	search.search_position(&st, &state.board, state.depth, multi_pv)
+	if thread_count > 1 {
+		search.parallel_search(&state.board, state.depth, multi_pv)
+	} else {
+		st: search.SearchThread
+		search.init_search_thread(&st, 0)
+		defer free(st.continuation_history)
+		search.search_position(&st, &state.board, state.depth, multi_pv)
+	}
 
-	// Mark ponder as inactive when done
+	search.use_time_management = false
+	sync.atomic_store(&search.search_control.ponder_mode, i32(0))
 	sync.atomic_store(&ponder_state.is_active, i32(0))
 }
