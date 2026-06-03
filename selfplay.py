@@ -854,7 +854,8 @@ def play_game(engine_a_path: str, engine_b_path: str,
         engine_a_path: Path to the first engine binary (plays White).
         engine_b_path: Path to the second engine binary (plays Black).
         time_control: Dict with keys 'movetime', 'wtime', 'btime', 'winc', 'binc', 'depth'.
-        max_moves: Maximum moves before forced draw (default 400 ≈ 200 full moves).
+                      Clock mode updates wtime/btime after every searched move.
+        max_moves: Maximum plies before forced draw (default 400 ≈ 200 full moves).
         adjudicate_eval: If one engine eval exceeds this for N moves, declare win.
         adjudicate_moves: Number of consecutive moves eval must exceed threshold.
         opening_moves: List of UCI moves to start from (overrides opening_fen).
@@ -877,6 +878,16 @@ def play_game(engine_a_path: str, engine_b_path: str,
         moves = []
         scores = []
         eval_history = []  # Track evals for adjudication
+        clock_mode = (
+            time_control.get('wtime') is not None and
+            time_control.get('btime') is not None and
+            time_control.get('movetime') is None and
+            time_control.get('depth') is None
+        )
+        white_clock = int(time_control.get('wtime', 0) or 0)
+        black_clock = int(time_control.get('btime', 0) or 0)
+        winc = int(time_control.get('winc', 0) or 0)
+        binc = int(time_control.get('binc', 0) or 0)
 
         # Apply opening moves if provided
         if opening_moves:
@@ -904,12 +915,42 @@ def play_game(engine_a_path: str, engine_b_path: str,
             engine.set_position(moves, opening_fen)
 
             # Build go command arguments from time_control
-            tc_args = {}
-            for key in ['movetime', 'wtime', 'btime', 'winc', 'binc', 'depth']:
-                if key in time_control and time_control[key] is not None:
-                    tc_args[key] = time_control[key]
+            if clock_mode:
+                tc_args = {
+                    'wtime': max(1, white_clock),
+                    'btime': max(1, black_clock),
+                    'winc': winc,
+                    'binc': binc,
+                }
+            else:
+                tc_args = {}
+                for key in ['movetime', 'wtime', 'btime', 'winc', 'binc', 'depth']:
+                    if key in time_control and time_control[key] is not None:
+                        tc_args[key] = time_control[key]
 
+            search_start = time.time()
             bestmove, score = engine.go(**tc_args)
+            elapsed_ms = max(0, int((time.time() - search_start) * 1000))
+
+            if clock_mode:
+                if is_white_turn:
+                    white_clock -= elapsed_ms
+                    if white_clock <= 0:
+                        return GameResult(
+                            result='0-1', moves=moves[:], scores=scores[:],
+                            reason=f"time forfeit (white, elapsed {elapsed_ms} ms)",
+                            white_engine=engine_a_path, black_engine=engine_b_path,
+                        )
+                    white_clock += winc
+                else:
+                    black_clock -= elapsed_ms
+                    if black_clock <= 0:
+                        return GameResult(
+                            result='1-0', moves=moves[:], scores=scores[:],
+                            reason=f"time forfeit (black, elapsed {elapsed_ms} ms)",
+                            white_engine=engine_a_path, black_engine=engine_b_path,
+                        )
+                    black_clock += binc
 
             if bestmove is None:
                 # No legal move — should have been caught above, but handle defensively
@@ -962,7 +1003,10 @@ def play_game(engine_a_path: str, engine_b_path: str,
             if verbose:
                 side_str = "W" if is_white_turn else "B"
                 eval_str = f" cp {score}" if score is not None else ""
-                print(f"{move_number+1:3d}. {side_str}: {bestmove}{eval_str}")
+                clock_str = ""
+                if clock_mode:
+                    clock_str = f" clock W:{white_clock}ms B:{black_clock}ms"
+                print(f"{move_number+1:3d}. {side_str}: {bestmove}{eval_str}{clock_str}")
 
         # Max moves reached — declare draw
         return GameResult(
@@ -1104,6 +1148,9 @@ def run_tournament(engine_a: str, engine_b: str,
                    games: int, time_control: dict,
                    concurrency: int = 1,
                    openings: Optional[List[str]] = None,
+                   max_moves: int = 400,
+                   adjudicate_eval: int = 800,
+                   adjudicate_moves: int = 5,
                    engine_a_options: Optional[List[Tuple[str, str]]] = None,
                    engine_b_options: Optional[List[Tuple[str, str]]] = None,
                    verbose: bool = False,
@@ -1118,6 +1165,9 @@ def run_tournament(engine_a: str, engine_b: str,
         time_control: Passed directly to play_game().
         concurrency: Number of games to run in parallel.
         openings: List of opening FENs or move sequences.
+        max_moves: Maximum plies before a game is declared drawn.
+        adjudicate_eval: Evaluation threshold for early adjudication.
+        adjudicate_moves: Consecutive eval count needed for adjudication.
         engine_a_options: UCI options applied whenever engine A is launched.
         engine_b_options: UCI options applied whenever engine B is launched.
         verbose: Print per-game results.
@@ -1148,7 +1198,7 @@ def run_tournament(engine_a: str, engine_b: str,
         opening_moves = None
         opening_fen = None
         if opening:
-            if ' ' in opening or '/' in opening:
+            if '/' in opening or opening == "startpos":
                 opening_fen = opening  # FEN string
             else:
                 opening_moves = opening.split()  # Space-separated moves
@@ -1156,6 +1206,9 @@ def run_tournament(engine_a: str, engine_b: str,
         result = play_game(
             white_path, black_path,
             time_control=time_control,
+            max_moves=max_moves,
+            adjudicate_eval=adjudicate_eval,
+            adjudicate_moves=adjudicate_moves,
             opening_moves=opening_moves,
             opening_fen=opening_fen,
             engine_a_options=white_options,
@@ -1355,7 +1408,7 @@ Examples:
     parser.add_argument("--openings", default=None,
                         help="File with opening FENs (one per line)")
     parser.add_argument("--max-moves", type=int, default=400,
-                        help="Max moves before forced draw (default: 400)")
+                        help="Max plies before forced draw (default: 400)")
     parser.add_argument("--adjudicate-eval", type=int, default=800,
                         help="Adjudicate if eval exceeds this (default: 800)")
     parser.add_argument("--adjudicate-moves", type=int, default=5,
@@ -1484,6 +1537,9 @@ Examples:
         games=args.games, time_control=tc,
         concurrency=args.concurrency,
         openings=openings,
+        max_moves=args.max_moves,
+        adjudicate_eval=args.adjudicate_eval,
+        adjudicate_moves=args.adjudicate_moves,
         engine_a_options=engine_a_options,
         engine_b_options=engine_b_options,
         verbose=args.verbose,

@@ -1886,3 +1886,68 @@ assignments, runs a self-play evaluation without rebuilding, and completes with
 zero illegal moves or failed games. Explicit `--optimizer nevergrad` without the
 package installed now reports a clean error instead of a Python traceback.
 `git diff --check` passed.
+
+## Accepted: Real Self-Play Clock Accounting
+
+Change: `selfplay.py` now maintains per-side clocks in `wtime`/`btime` mode
+instead of sending the original starting clocks on every move. It subtracts
+measured search time, applies the configured increment after completed moves,
+and adjudicates a time forfeit when a side flags. The tournament runner now
+also passes `--max-moves`, `--adjudicate-eval`, and `--adjudicate-moves` through
+to each game, making short tuning screens and bounded validation runs behave as
+requested. Opening lines containing move sequences such as `e2e4 e7e5` are no
+longer misclassified as FENs just because they contain spaces.
+
+Validation:
+
+```text
+python3 -m py_compile selfplay.py nevergrad_tuner.py
+python3 selfplay.py \
+  --engine-a ./mantis_uci_tune_options \
+  --engine-b ./mantis_uci_tune_options \
+  --games 1 \
+  --wtime 1000 \
+  --btime 1000 \
+  --winc 100 \
+  --binc 100 \
+  --max-moves 6 \
+  --concurrency 1 \
+  --option OwnBook=false \
+  --verbose
+python3 selfplay.py \
+  --engine-a ./mantis_uci_tune_options \
+  --engine-b ./mantis_uci_tune_options \
+  --games 1 \
+  --wtime 1 \
+  --btime 1000 \
+  --max-moves 4 \
+  --concurrency 1 \
+  --option OwnBook=false
+python3 selfplay.py \
+  --engine-a ./mantis_uci_tune_options \
+  --engine-b ./mantis_uci_tune_options \
+  --games 1 \
+  --movetime 10 \
+  --max-moves 4 \
+  --concurrency 1 \
+  --option OwnBook=false
+python3 nevergrad_tuner.py \
+  --engine ./mantis_uci_tune_options \
+  --baseline ./mantis_uci_tune_options \
+  --optimizer auto \
+  --budget 1 \
+  --games 2 \
+  --depth 1 \
+  --max-moves 4 \
+  --concurrency 1 \
+  --no-openings \
+  --resume /tmp/mantis_tuner_clock_path_progress.json \
+  --output /tmp/mantis_tuner_clock_path_best.json \
+  --seed 10
+```
+
+The clock smoke printed changing clocks and stopped after exactly six plies via
+`max moves reached`; the flag smoke produced a white time forfeit; the movetime
+smoke still reached `max moves reached`; the tuner smoke completed through the
+now-functional `--max-moves` path; and an in-memory `e2e4 e7e5` opening sequence
+smoke passed through `run_tournament()`.
