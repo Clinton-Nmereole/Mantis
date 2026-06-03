@@ -118,6 +118,10 @@ parallel_search :: proc(b: ^board.Board, depth: int, multi_pv: int) {
 	defer free(st.continuation_history)
 	search_position(&st, b, depth, multi_pv, reset_shared_state = false)
 
+	// The main thread has emitted the move. Stop helpers promptly so the UCI
+	// loop can accept the next command instead of waiting on stale analysis.
+	stop_search()
+
 	// Wait for all helper threads to complete
 	for t in global_thread_pool.threads {
 		thread.join(t)

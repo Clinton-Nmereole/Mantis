@@ -1669,3 +1669,42 @@ Tactical regression, perft correctness, raw stats benchmark, own-book smoke,
 and a `Threads=2` UCI SearchStats smoke passed. The raw-search benchmark
 remains at `473960` nodes. The latest accepted practice-game binary from this
 pass is `./mantis_thread_reset_fix`.
+
+## Accepted: Lazy SMP Helper Shutdown
+
+Change: after the main Lazy SMP thread finishes `search_position` and emits the
+root move, `parallel_search` now signals `stop_search()` before joining helper
+threads. This prevents helper threads from continuing stale analysis after the
+move has already been chosen, while preserving their TT-sharing contribution
+during the actual search.
+
+Validation:
+
+```text
+odin build . -out:mantis_thread_stop_fix -o:speed
+python3 compare_candidates.py \
+  --baseline ./mantis_thread_reset_fix \
+  --candidate ./mantis_thread_stop_fix \
+  --depth 8 \
+  --timeout 60 \
+  --csv games/thread_stop_fix_depth8_compare.csv
+python3 tactical_regression.py --binary ./mantis_thread_stop_fix
+python3 correctness_test.py --binary ./mantis_thread_stop_fix
+python3 stats_benchmark.py --binary ./mantis_thread_stop_fix --timeout 90
+python3 stats_benchmark.py --binary ./mantis_thread_stop_fix --own-book --limit 3 --timeout 30
+```
+
+Fixed-depth depth-8 comparison stayed exact across all 44 benchmark FENs:
+
+```text
+positions:        44
+bestmove_changes: 0
+nodes:            1559564 -> 1559564 (+0.00%)
+abs_score_delta:  0 cp
+max_score_delta:  0 cp
+```
+
+Tactical regression, perft correctness, raw stats benchmark, own-book smoke,
+`Threads=2` UCI SearchStats smoke, and `Threads=4` depth-12 UCI smoke passed.
+The raw-search benchmark remains at `473960` nodes. The latest accepted
+practice-game binary from this pass is `./mantis_thread_stop_fix`.
