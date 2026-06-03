@@ -2985,3 +2985,64 @@ python3 selfplay.py --engine-a ./mantis_movetime_check_clear \
 Candidate scored `18W-15L-7D` from engine A's perspective.  Two wins came from
 illegal `a1a1` moves by the baseline/current engine, so the match is supportive
 but noisy rather than decisive.
+
+## Rejected: Aborted Initial-Pass Fallback
+
+Experiment: when an aspiration re-search timed out after a completed initial
+root pass, return that initial pass' root best move instead of the previous
+completed-depth best.  The narrow version only applied to root check evasions in
+exact movetime searches with a post-overhead hard budget at or below 100ms.
+
+Motivation: the current 2026-06-03 meta run still had one short movetime
+check-evasion horizon failure after the TT-clear change:
+
+```text
+FEN: r7/ppp2p1k/7r/2q1Nb1p/P7/5P2/1P4PP/2KR4 w - - 0 24
+Played: e5c4 (Nc4)
+Oracle best: c1d2; e5c4 is mate-losing
+```
+
+Direct root tracing showed the 80ms search completed the depth-9 initial pass
+with `c1d2`, then timed out during the fail-low re-search and restored the older
+completed depth's `e5c4`.
+
+Useful evidence:
+
+```text
+Focused candidate-4/12 replay:
+  Round 20 ply 95 remained fixed: f5g5 at 80/250 cold and stateful.
+  Round 8 ply 43 became fixed: c1d2 at 80/250 cold and stateful.
+
+Tactical regression: passed.
+Perft correctness:   passed.
+Stats benchmark:     normal.
+
+Default compare:
+  80ms:  1/44 bestmove change, e2d2 -> c4d5 on a non-check FEN.
+         Stockfish targeted depth-14 searchmoves preferred c4d5 by about 90 cp.
+  250ms: 0/44 bestmove changes.
+
+Keep-hash compare:
+  80ms:  0/44 bestmove changes.
+  250ms: 0/44 bestmove changes.
+```
+
+Rejected because self-play did not support the patch:
+
+```text
+candidate vs baseline, 40x80ms:
+  candidate scored 6W-14L-20D as engine A.
+  one illegal a1a1 occurred while candidate was White.
+
+baseline vs candidate, 40x80ms:
+  baseline scored 18W-8L-14D as engine A.
+  one illegal a1a1 occurred while baseline was White.
+
+Combined candidate score: 31/80.
+```
+
+Conclusion: the fallback is attractive for the specific candidate-12 failure,
+but it gives under-validated aborted-depth root output too much authority in
+short check evasions.  Keep the trace as a warning and look for a safer fix that
+either completes the verification or improves the depth before the fail-low
+re-search is started.
