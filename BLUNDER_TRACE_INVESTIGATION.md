@@ -3162,3 +3162,45 @@ engine, giving the candidate one win.  Combined candidate score was `47/80`, so
 self-play is neutral-to-mildly-negative noise, not positive proof.  The patch is
 accepted on the deterministic tactical fix plus clean compare surface, with this
 self-play caveat documented.
+
+## Accepted: UCI No-Move Formatting
+
+The recurring self-play `a1a1` illegal move was reproducible from a terminal
+mate position, not from a searched legal move:
+
+```text
+FEN: 4rrk1/p1p3Qp/1p6/5P1N/8/P2q4/1PR5/RKB4b b - - 0 29
+python-chess: check=True, mate=True, legal_count=0
+```
+
+Before the fix, Mantis correctly found no legal moves but printed the zero-value
+move sentinel as coordinates:
+
+```text
+info string CRITICAL: no legal moves found!
+bestmove a1a1
+```
+
+Change: `board.print_move()` now emits UCI `0000` for an empty `Move{}`.
+`selfplay.py` also treats `bestmove 0000` the same as `(none)`, so future
+self-play runs record the game result instead of awarding an illegal-move
+forfeit after mate or stalemate.
+
+Verification:
+
+```text
+odin build . -out:mantis_no_move_uci -o:speed
+python3 -m py_compile selfplay.py
+patched mate repro: bestmove 0000
+selfplay Engine.go(depth=1) on the mate FEN: (None, None)
+python3 tactical_regression.py --binary ./mantis_no_move_uci
+python3 correctness_test.py --binary ./mantis_no_move_uci --random 20 --seed 0603
+python3 stats_benchmark.py --binary ./mantis_no_move_uci --limit 3 --timeout 90
+python3 compare_candidates.py --baseline ./mantis_current_probe \
+  --candidate ./mantis_no_move_uci --depths 6 --timeout 60 \
+  --csv /tmp/mantis_no_move_uci_depth6_compare.csv
+```
+
+Summary: tactical regression passed; randomized perft passed; the short stats
+benchmark was normal; depth-6 comparison over 44 positions had `0/44` bestmove
+changes, `0` node changes, and `0 cp` score delta.

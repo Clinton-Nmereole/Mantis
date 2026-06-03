@@ -753,7 +753,7 @@ class Engine:
     def go(self, movetime: Optional[int] = None,
            wtime: Optional[int] = None, btime: Optional[int] = None,
            winc: int = 0, binc: int = 0,
-           depth: Optional[int] = None) -> Tuple[str, Optional[int]]:
+           depth: Optional[int] = None) -> Tuple[Optional[str], Optional[int]]:
         """
         Tell the engine to search and return its best move.
         Also returns the engine's score from the last info line if available.
@@ -765,7 +765,7 @@ class Engine:
             depth: Fixed depth search (overrides time control).
 
         Returns:
-            (bestmove_uci, score_cp_or_mate) where score may be None.
+            (bestmove_uci, score_cp_or_mate) where either value may be None.
         """
         if depth is not None:
             cmd = f"go depth {depth}"
@@ -779,6 +779,7 @@ class Engine:
         self._send(cmd)
 
         bestmove = None
+        saw_bestmove = False
         score = None
         depth = None
         nodes = None
@@ -826,13 +827,14 @@ class Engine:
             # Parse bestmove
             if line.startswith("bestmove"):
                 parts = line.split()
+                saw_bestmove = True
                 if len(parts) >= 2:
                     bestmove = parts[1]
-                    if bestmove == "(none)":
+                    if bestmove in ("(none)", "0000"):
                         bestmove = None
                 break
 
-        if bestmove is None:
+        if not saw_bestmove:
             raise TimeoutError("Engine did not return bestmove")
 
         self.last_search_info = {'depth': depth, 'nodes': nodes, 'time_ms': time_ms}

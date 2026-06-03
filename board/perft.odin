@@ -595,6 +595,11 @@ perft_test :: proc(fen: string, depth: int) {
 }
 
 print_move :: proc(move: moves.Move) {
+	if moves.is_empty_move(move) {
+		fmt.printf("0000")
+		return
+	}
+
 	files := "abcdefgh"
 	ranks := "12345678"
 
