@@ -2541,3 +2541,78 @@ Wins: 4, Losses: 4, Draws: 4, Win %: 50.00%
 Conclusion: keep the option-comparison harness improvement, but do not promote
 the stale tuned parameters.  Future local tuning should compare candidates with
 these option gates before touching `search/tuning.odin`.
+
+## Accepted: PGN-FEN Movetime Root Trace
+
+Fresh latest-vs-latest self-play at 80 ms generated a new metadata-rich PGN:
+
+```text
+python3 selfplay.py \
+  --engine-a ./mantis_goal_current \
+  --engine-b ./mantis_goal_current \
+  --games 20 \
+  --movetime 80 \
+  --max-moves 180 \
+  --concurrency 2 \
+  --openings 2moves_v1.epd \
+  --option OwnBook=false \
+  --pgn-out /tmp/mantis_goal_current_meta20_0603.pgn
+```
+
+The run scored `11/3/6` for engine A.  Strict first-collapse mining found no
+searchable targets, but worst-mode surfaced a useful round-17 low-depth miss:
+
+```text
+FEN: 6Q1/1k2q1p1/1p6/r4p1p/3R4/5P2/PP4P1/1KR5 w - - 1 39
+Played: c1d1, search d4 7792 nodes 29ms, eval +8.35 -> +6.26
+Stockfish d12: g8c8
+```
+
+Cold Mantis at fixed depth and movetime chooses `g8c8`, but exact warmed replay
+from the PGN start FEN reproduces the played move at 80 ms and recovers at
+250 ms:
+
+```text
+cold 80ms:                    g8c8, +8.35, d5
+cold 250ms:                   g8c8, +8.62, d7
+stateful-warm80ms-fen 80ms:   c1d1, +6.26, d4
+stateful-warm80ms-fen 250ms:  g8c8, +8.62, d7
+```
+
+Change: `timed_root_trace.py` now carries the PGN `FEN` header into all warmup
+and target UCI searches, and adds `--warm-movetime-ms` so root traces can warm
+the same way the self-play PGN was generated.
+
+Exact stateful root trace:
+
+```text
+python3 timed_root_trace.py \
+  --pgn /tmp/mantis_goal_current_meta20_0603.pgn \
+  --binary ./mantis_goal_current \
+  --target 17:73 \
+  --movetimes-ms 80 250 \
+  --warm-movetime-ms 80 \
+  --root-debug \
+  --multipv 6 \
+  --oracle-binary ./stockfish-debug/src/stockfish \
+  --oracle-depth 12 \
+  --oracle-multipv 6 \
+  --oracle-timeout 60 \
+  --timeout 90 \
+  --report /tmp/mantis_goal_current_candidate6_stateful_root_trace.md \
+  --csv /tmp/mantis_goal_current_candidate6_stateful_root_trace.csv
+```
+
+The 80 ms warmed normal trace selects `c1d1` at depth 4.  Warmed MultiPV also
+ranks `c1d1` above `g8c8` at depth 4, while the 250 ms trace reaches depth 7
+and restores `g8c8`.  This makes the fresh target a stateful depth-completion /
+low-depth tactical issue.  Next engine candidates should test root check
+ordering, movetime overhead, or bestmove stability against this position before
+promotion.
+
+Validation:
+
+```text
+python3 -m py_compile timed_root_trace.py
+python3 timed_root_trace.py ... --target 17:73 --movetimes-ms 80 250 --warm-movetime-ms 80
+```

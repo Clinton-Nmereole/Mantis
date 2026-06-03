@@ -63,6 +63,7 @@ class SearchSpec:
 @dataclass
 class TraceTarget:
     candidate: blunder_trace.BlunderCandidate
+    start_fen: str | None
     moves_before: list[str]
     warm_positions: list[list[str]]
 
@@ -150,6 +151,7 @@ def find_target(
                 break
             if game.headers.get("Round", "?") != round_name:
                 continue
+            start_fen = game.headers.get("FEN") or None
 
             mantis_color = blunder_trace.mantis_color_for_game(game, mantis_name)
             if mantis_color is None:
@@ -163,6 +165,7 @@ def find_target(
                 if current_ply == ply:
                     return TraceTarget(
                         candidate=target,
+                        start_fen=start_fen,
                         moves_before=moves_before.copy(),
                         warm_positions=warm_positions,
                     )
@@ -241,14 +244,19 @@ def warm_engine(
     engine: blunder_trace.UCIEngine,
     warm_positions: list[list[str]],
     warm_depth: int,
+    warm_movetime_ms: int,
     timeout: float,
+    start_fen: str | None,
 ) -> int:
     engine.send("ucinewgame")
     engine.send("isready")
     engine.read_until("readyok", timeout)
     warmed = 0
     for moves_before in warm_positions:
-        engine.search_depth(moves_before, warm_depth, timeout)
+        if warm_movetime_ms > 0:
+            engine.search_movetime(moves_before, warm_movetime_ms, timeout, start_fen)
+        else:
+            engine.search_depth(moves_before, warm_depth, timeout, start_fen)
         warmed += 1
     return warmed
 
@@ -258,18 +266,20 @@ def run_normal_trace(
     target: TraceTarget,
     spec: SearchSpec,
     warm_depth: int,
+    warm_movetime_ms: int,
     timeout: float,
     root_debug: bool,
 ) -> dict[str, Any]:
     engine = blunder_trace.UCIEngine(binary, timeout)
     try:
-        warmed = warm_engine(engine, target.warm_positions, warm_depth, timeout)
+        warmed = warm_engine(engine, target.warm_positions, warm_depth, warm_movetime_ms, timeout, target.start_fen)
         if root_debug:
             engine.set_option("RootDebugTrace", True)
         stats, wall_ms, _output = engine.search_go_output(
             target.moves_before,
             spec.go_command,
             timeout,
+            target.start_fen,
         )
         return {
             "trace_mode": "normal",
@@ -298,17 +308,19 @@ def run_multipv_trace(
     target: TraceTarget,
     spec: SearchSpec,
     warm_depth: int,
+    warm_movetime_ms: int,
     multipv: int,
     timeout: float,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     engine = blunder_trace.UCIEngine(binary, timeout)
     try:
-        warmed = warm_engine(engine, target.warm_positions, warm_depth, timeout)
+        warmed = warm_engine(engine, target.warm_positions, warm_depth, warm_movetime_ms, timeout, target.start_fen)
         engine.set_option("MultiPV", multipv)
         stats, wall_ms, output = engine.search_go_output(
             target.moves_before,
             spec.go_command,
             timeout,
+            target.start_fen,
         )
         summary = {
             "trace_mode": f"multipv{multipv}",
@@ -357,6 +369,7 @@ def write_reports(
     traces: list[TargetTrace],
     binary: str,
     warm_depth: int,
+    warm_movetime_ms: int,
     multipv: int,
     oracle_binary: str | None,
     oracle_depth: int,
@@ -367,7 +380,10 @@ def write_reports(
     out = io.StringIO()
     out.write("# Stateful Root Trace\n\n")
     out.write(f"Binary: `{binary}`\n\n")
-    out.write(f"Warm depth: `{warm_depth}`\n\n")
+    if warm_movetime_ms > 0:
+        out.write(f"Warm movetime: `{warm_movetime_ms}ms`\n\n")
+    else:
+        out.write(f"Warm depth: `{warm_depth}`\n\n")
     out.write(f"MultiPV: `{multipv}`\n\n")
     if oracle_binary:
         out.write(
@@ -386,6 +402,8 @@ def write_reports(
             f"({candidate.delta_cp:+d} cp)\n\n"
         )
         out.write(f"FEN: `{candidate.fen}`\n\n")
+        if target.start_fen:
+            out.write(f"PGN start FEN: `{target.start_fen}`\n\n")
 
         if trace.oracle_rows:
             out.write("### Oracle MultiPV\n\n")
@@ -573,6 +591,7 @@ def main() -> int:
     )
     parser.add_argument("--movestogo", type=int, default=0, help="Optional UCI movestogo for --clock")
     parser.add_argument("--warm-depth", type=int, default=8)
+    parser.add_argument("--warm-movetime-ms", type=int, default=0, help="Movetime used to warm stateful replay; overrides --warm-depth when positive")
     parser.add_argument("--multipv", type=int, default=8)
     parser.add_argument("--root-debug", action="store_true", help="Enable RootDebugTrace during normal searches")
     parser.add_argument("--oracle-binary", help="Optional external UCI engine for reference MultiPV")
@@ -595,6 +614,10 @@ def main() -> int:
         parser.error("--oracle-depth must be positive")
     if args.oracle_multipv <= 0:
         parser.error("--oracle-multipv must be positive")
+    if args.warm_depth <= 0:
+        parser.error("--warm-depth must be positive")
+    if args.warm_movetime_ms < 0:
+        parser.error("--warm-movetime-ms must be non-negative")
 
     target_specs = args.target if args.target else [(args.round_name, args.ply)]
     depths = args.depths or []
@@ -650,6 +673,7 @@ def main() -> int:
                     target=target,
                     spec=spec,
                     warm_depth=args.warm_depth,
+                    warm_movetime_ms=args.warm_movetime_ms,
                     timeout=args.timeout,
                     root_debug=args.root_debug,
                 )
@@ -660,6 +684,7 @@ def main() -> int:
                 target=target,
                 spec=spec,
                 warm_depth=args.warm_depth,
+                warm_movetime_ms=args.warm_movetime_ms,
                 multipv=args.multipv,
                 timeout=args.timeout,
             )
@@ -680,6 +705,7 @@ def main() -> int:
         traces=traces,
         binary=args.binary,
         warm_depth=args.warm_depth,
+        warm_movetime_ms=args.warm_movetime_ms,
         multipv=args.multipv,
         oracle_binary=args.oracle_binary,
         oracle_depth=args.oracle_depth,
