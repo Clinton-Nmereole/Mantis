@@ -3487,3 +3487,52 @@ Summary: SPSA smoke passed all 30 plus/minus UCI options through self-play with
 `0` illegal moves and `0` failed games.  SPSA resume loaded the prior row and
 continued at iteration 2.  Random-mode regression still completed through the
 shared UCI option path.
+
+## Accepted: Cutechess PGN Eval Parsing Guard
+
+External calibration smoke used the current `./mantis` build from `2c98c21`
+against the local Stockfish dev binary with UCI strength limiting:
+
+```text
+odin build . -out:mantis -o:speed -microarch:native
+cutechess-cli ... SF2700 UCI_Elo=2700 ... -each tc=1+0.01 -games 8
+  Mantis: 1W-6L-1D, score 18.8%, Elo diff -254.7
+cutechess-cli ... SF2400 UCI_Elo=2400 ... -each tc=1+0.01 -games 8
+  Mantis: 2W-4L-2D, score 37.5%, Elo diff -88.7 +/- 261.3
+cutechess-cli ... SF2200 UCI_Elo=2200 ... -each tc=1+0.01 -games 8
+  Mantis: 3W-3L-2D, score 50.0%, Elo diff 0.0 +/- 240.4
+```
+
+These tiny fast-time-control matches are not a rating claim, but they are
+enough to treat the earlier `2700-ish` estimate as unproven and probably
+optimistic until longer external gauntlets say otherwise.
+
+Tooling change: `blunder_trace.py` now parses cutechess eval comments such as
+`{+0.31/5 0.049s}` and mate scores like `{+M5/10 ...}`, preserving played
+depth and time metadata.  Because external PGNs alternate engine comments, the
+extractor now tracks whether the previous eval came from a Mantis-named engine
+and skips mixed-engine adjacent eval comparisons by default.  The old behavior
+is still available behind `--allow-mixed-engine-evals` for diagnostics.
+
+Validation:
+
+```text
+python3 -m py_compile blunder_trace.py
+python3 blunder_trace.py --pgn /tmp/mantis_vs_sf2400_smoke.pgn \
+  --mode worst --limit 8 --threshold-cp 150 \
+  --report /tmp/mantis_sf2400_blunders_guarded.md \
+  --csv /tmp/mantis_sf2400_blunders_guarded.csv
+python3 blunder_trace.py --pgn /tmp/mantis_vs_sf2400_smoke.pgn \
+  --mode worst --limit 2 --threshold-cp 150 --allow-mixed-engine-evals \
+  --report /tmp/mantis_sf2400_blunders_mixed_explicit.md \
+  --csv /tmp/mantis_sf2400_blunders_mixed_explicit.csv
+python3 blunder_trace.py --pgn /tmp/mantis_current_meta40_0603.pgn \
+  --mode worst --limit 4 --threshold-cp 150 \
+  --report /tmp/mantis_selfplay_guarded_blunders.md \
+  --csv /tmp/mantis_selfplay_guarded_blunders.csv
+```
+
+Summary: the guarded SF2400 extraction skipped all `403` Mantis moves with
+mixed-engine adjacent evals and produced `0` candidates.  The explicit mixed
+override reproduced the diagnostic candidates.  A Mantis-vs-Mantis self-play
+PGN still produced the expected same-engine candidates.

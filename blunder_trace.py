@@ -23,9 +23,11 @@ import stats_benchmark
 
 
 EVAL_RE = re.compile(r"\[%eval\s+([^\]]+)\]")
+CUTECHESS_EVAL_RE = re.compile(r"(?<!\S)(?P<score>[+-]?(?:\d+(?:\.\d+)?|M\d+|#\d+))/(?P<depth>\d+)")
 COMMENT_DEPTH_RE = re.compile(r"\[%depth\s+(\d+)\]")
 COMMENT_NODES_RE = re.compile(r"\bnodes\s+(\d+)")
 COMMENT_TIME_RE = re.compile(r"\btime\s+(\d+)ms\b")
+CUTECHESS_TIME_RE = re.compile(r"(?<!\S)(?P<seconds>\d+(?:\.\d+)?)s\b")
 MATE_SCORE = 100_000
 
 
@@ -219,13 +221,18 @@ class BlunderCandidate:
 
 
 def parse_eval_cp(comment: str) -> int | None:
-    match = EVAL_RE.search(comment or "")
-    if not match:
-        return None
-    raw = match.group(1).strip()
+    text = comment or ""
+    match = EVAL_RE.search(text)
+    if match:
+        raw = match.group(1).strip()
+    else:
+        match = CUTECHESS_EVAL_RE.search(text)
+        if not match:
+            return None
+        raw = match.group("score").strip()
     raw = raw.replace("\n", " ").split()[0]
-    if raw.startswith("#"):
-        sign = -1 if "-" in raw else 1
+    if raw.startswith("#") or "M" in raw:
+        sign = -1 if raw.startswith("-") else 1
         digits = "".join(ch for ch in raw if ch.isdigit())
         ply_distance = int(digits) if digits else 0
         return sign * (MATE_SCORE - min(ply_distance, 999))
@@ -241,6 +248,32 @@ def parse_comment_int(pattern: re.Pattern[str], comment: str) -> int | None:
         return None
     try:
         return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def parse_comment_depth(comment: str) -> int | None:
+    depth = parse_comment_int(COMMENT_DEPTH_RE, comment)
+    if depth is not None:
+        return depth
+    match = CUTECHESS_EVAL_RE.search(comment or "")
+    if not match:
+        return None
+    try:
+        return int(match.group("depth"))
+    except ValueError:
+        return None
+
+
+def parse_comment_time_ms(comment: str) -> int | None:
+    millis = parse_comment_int(COMMENT_TIME_RE, comment)
+    if millis is not None:
+        return millis
+    match = CUTECHESS_TIME_RE.search(comment or "")
+    if not match:
+        return None
+    try:
+        return int(round(float(match.group("seconds")) * 1000))
     except ValueError:
         return None
 
@@ -358,11 +391,16 @@ def mantis_color_for_game(game: chess.pgn.Game, needle: str) -> chess.Color | No
     return None
 
 
+def player_matches(game: chess.pgn.Game, color: chess.Color, needle: str) -> bool:
+    return needle.lower() in side_name(game, color).lower()
+
+
 def extract_candidates(
     pgn_path: Path,
     mantis_name: str,
     threshold_cp: int,
     max_before_abs_cp: int | None,
+    allow_mixed_engine_evals: bool,
 ) -> tuple[list[BlunderCandidate], dict[str, int]]:
     candidates: list[BlunderCandidate] = []
     stats = {
@@ -371,6 +409,7 @@ def extract_candidates(
         "mantis_moves": 0,
         "moves_with_eval_drop": 0,
         "moves_missing_eval": 0,
+        "moves_mixed_engine_eval": 0,
     }
 
     with pgn_path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -386,6 +425,7 @@ def extract_candidates(
 
             board = game.board()
             last_eval_cp: int | None = None
+            last_eval_from_mantis = False
             last_eval_ply = -1
 
             for ply, node in enumerate(game.mainline(), start=1):
@@ -395,13 +435,17 @@ def extract_candidates(
                 san = board.san(move)
                 fullmove = board.fullmove_number
                 after_eval_cp = parse_eval_cp(node.comment)
+                mover_matches_mantis = player_matches(game, mover_color, mantis_name)
 
                 if mover_color == mantis_color:
                     stats["mantis_moves"] += 1
+                    comparable_before_eval = last_eval_from_mantis or allow_mixed_engine_evals
                     if after_eval_cp is None or last_eval_cp is None or last_eval_ply != ply - 1:
                         stats["moves_missing_eval"] += 1
+                    elif not comparable_before_eval:
+                        stats["moves_mixed_engine_eval"] += 1
                     else:
-                        # PGN evals from Scid/Viridithas are white-perspective.
+                        # PGN eval comments are expected to be white-perspective.
                         side_sign = 1 if mantis_color == chess.WHITE else -1
                         before_mantis_cp = last_eval_cp * side_sign
                         after_mantis_cp = after_eval_cp * side_sign
@@ -434,15 +478,16 @@ def extract_candidates(
                                     eval_after_mantis_cp=after_mantis_cp,
                                     delta_cp=delta_cp,
                                     comment=node.comment.strip(),
-                                    played_depth=parse_comment_int(COMMENT_DEPTH_RE, node.comment),
+                                    played_depth=parse_comment_depth(node.comment),
                                     played_nodes=parse_comment_int(COMMENT_NODES_RE, node.comment),
-                                    played_time_ms=parse_comment_int(COMMENT_TIME_RE, node.comment),
+                                    played_time_ms=parse_comment_time_ms(node.comment),
                                 )
                             )
 
                 board.push(move)
                 if after_eval_cp is not None:
                     last_eval_cp = after_eval_cp
+                    last_eval_from_mantis = mover_matches_mantis
                     last_eval_ply = ply
 
     candidates.sort(key=lambda item: item.delta_cp)
@@ -988,7 +1033,9 @@ def render_markdown(
     out.write("## Summary\n\n")
     out.write(f"- Games parsed: {stats['games']}\n")
     out.write(f"- Games with Mantis: {stats['mantis_games']}\n")
-    out.write(f"- Mantis moves with adjacent evals: {stats['mantis_moves'] - stats['moves_missing_eval']}\n")
+    out.write(f"- Mantis moves with adjacent eval comments: {stats['mantis_moves'] - stats['moves_missing_eval']}\n")
+    if stats.get("moves_mixed_engine_eval", 0):
+        out.write(f"- Mantis moves skipped for mixed-engine evals: {stats['moves_mixed_engine_eval']}\n")
     out.write(f"- Mantis eval drops: {stats['moves_with_eval_drop']}\n")
     out.write(f"- Candidates at threshold: {pool_count}\n")
     out.write(f"- Candidates searched in this report: {len(selected)}\n\n")
@@ -1120,6 +1167,11 @@ def main() -> int:
     )
     parser.add_argument("--limit", type=int, default=16, help="Number of worst candidates to search/report")
     parser.add_argument(
+        "--allow-mixed-engine-evals",
+        action="store_true",
+        help="Allow adjacent eval-drop comparisons from different engines; useful only for diagnostics",
+    )
+    parser.add_argument(
         "--candidate-indexes",
         type=int,
         nargs="+",
@@ -1195,6 +1247,7 @@ def main() -> int:
         mantis_name=args.mantis_name,
         threshold_cp=args.threshold_cp,
         max_before_abs_cp=None if args.max_before_abs_cp == 0 else args.max_before_abs_cp,
+        allow_mixed_engine_evals=args.allow_mixed_engine_evals,
     )
     pool_count = len(candidates)
     candidates = select_candidates(
