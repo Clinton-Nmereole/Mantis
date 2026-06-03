@@ -77,6 +77,14 @@ class TargetTrace:
     oracle_rows: list[dict[str, Any]]
 
 
+def apply_engine_options(
+    engine: blunder_trace.UCIEngine,
+    engine_options: list[tuple[str, str]],
+) -> None:
+    for name, value in engine_options:
+        engine.set_option(name, value)
+
+
 def parse_target_arg(text: str) -> tuple[str, int]:
     if ":" not in text:
         raise argparse.ArgumentTypeError("target must be ROUND:PLY, for example 2:36")
@@ -267,11 +275,13 @@ def run_normal_trace(
     spec: SearchSpec,
     warm_depth: int,
     warm_movetime_ms: int,
+    engine_options: list[tuple[str, str]],
     timeout: float,
     root_debug: bool,
 ) -> dict[str, Any]:
     engine = blunder_trace.UCIEngine(binary, timeout)
     try:
+        apply_engine_options(engine, engine_options)
         warmed = warm_engine(engine, target.warm_positions, warm_depth, warm_movetime_ms, timeout, target.start_fen)
         if root_debug:
             engine.set_option("RootDebugTrace", True)
@@ -309,11 +319,13 @@ def run_multipv_trace(
     spec: SearchSpec,
     warm_depth: int,
     warm_movetime_ms: int,
+    engine_options: list[tuple[str, str]],
     multipv: int,
     timeout: float,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     engine = blunder_trace.UCIEngine(binary, timeout)
     try:
+        apply_engine_options(engine, engine_options)
         warmed = warm_engine(engine, target.warm_positions, warm_depth, warm_movetime_ms, timeout, target.start_fen)
         engine.set_option("MultiPV", multipv)
         stats, wall_ms, output = engine.search_go_output(
@@ -370,6 +382,7 @@ def write_reports(
     binary: str,
     warm_depth: int,
     warm_movetime_ms: int,
+    engine_options: list[tuple[str, str]],
     multipv: int,
     oracle_binary: str | None,
     oracle_depth: int,
@@ -384,6 +397,9 @@ def write_reports(
         out.write(f"Warm movetime: `{warm_movetime_ms}ms`\n\n")
     else:
         out.write(f"Warm depth: `{warm_depth}`\n\n")
+    if engine_options:
+        formatted_options = ", ".join(f"{name}={value}" for name, value in engine_options)
+        out.write(f"Engine options: `{formatted_options}`\n\n")
     out.write(f"MultiPV: `{multipv}`\n\n")
     if oracle_binary:
         out.write(
@@ -592,6 +608,7 @@ def main() -> int:
     parser.add_argument("--movestogo", type=int, default=0, help="Optional UCI movestogo for --clock")
     parser.add_argument("--warm-depth", type=int, default=8)
     parser.add_argument("--warm-movetime-ms", type=int, default=0, help="Movetime used to warm stateful replay; overrides --warm-depth when positive")
+    parser.add_argument("--option", action="append", default=[], help="UCI option Name=Value applied to the traced binary; repeatable")
     parser.add_argument("--multipv", type=int, default=8)
     parser.add_argument("--root-debug", action="store_true", help="Enable RootDebugTrace during normal searches")
     parser.add_argument("--oracle-binary", help="Optional external UCI engine for reference MultiPV")
@@ -618,6 +635,10 @@ def main() -> int:
         parser.error("--warm-depth must be positive")
     if args.warm_movetime_ms < 0:
         parser.error("--warm-movetime-ms must be non-negative")
+    try:
+        engine_options = stats_benchmark.parse_engine_options(args.option)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     target_specs = args.target if args.target else [(args.round_name, args.ply)]
     depths = args.depths or []
@@ -674,6 +695,7 @@ def main() -> int:
                     spec=spec,
                     warm_depth=args.warm_depth,
                     warm_movetime_ms=args.warm_movetime_ms,
+                    engine_options=engine_options,
                     timeout=args.timeout,
                     root_debug=args.root_debug,
                 )
@@ -685,6 +707,7 @@ def main() -> int:
                 spec=spec,
                 warm_depth=args.warm_depth,
                 warm_movetime_ms=args.warm_movetime_ms,
+                engine_options=engine_options,
                 multipv=args.multipv,
                 timeout=args.timeout,
             )
@@ -706,6 +729,7 @@ def main() -> int:
         binary=args.binary,
         warm_depth=args.warm_depth,
         warm_movetime_ms=args.warm_movetime_ms,
+        engine_options=engine_options,
         multipv=args.multipv,
         oracle_binary=args.oracle_binary,
         oracle_depth=args.oracle_depth,

@@ -2616,3 +2616,52 @@ Validation:
 python3 -m py_compile timed_root_trace.py
 python3 timed_root_trace.py ... --target 17:73 --movetimes-ms 80 250 --warm-movetime-ms 80
 ```
+
+## Accepted: Root Trace UCI Option Probes
+
+Change: `timed_root_trace.py` now accepts repeated `--option Name=Value`
+arguments and applies them to the traced binary before warmup and target
+searches.  This keeps root-target probes aligned with the other comparison
+harnesses and makes UCI tuning checks possible without one-off scripts.
+
+The first use was the round-17 warmed target above:
+
+```text
+python3 timed_root_trace.py \
+  --pgn /tmp/mantis_goal_current_meta20_0603.pgn \
+  --binary ./mantis_goal_current \
+  --target 17:73 \
+  --movetimes-ms 80 250 \
+  --warm-movetime-ms 80 \
+  --multipv 6 \
+  --option "Move Overhead=0" \
+  --timeout 90 \
+  --report /tmp/mantis_goal_current_candidate6_overhead0.md \
+  --csv /tmp/mantis_goal_current_candidate6_overhead0.csv
+```
+
+`Move Overhead=0` did not fix the 80 ms warmed miss:
+
+```text
+80ms:  c1d1, +6.26, d4
+250ms: g8c8, +8.62, d7
+```
+
+Rejected experiment: a temporary root quiet-check ordering bonus was tested
+against the same target.  Scores of `500` and `1000` rescued the target
+(`c1d1 -> d4d7`) and kept the queen-defense tactical gate passing, but `1500+`
+already broke that gate.  With a default-equivalent score of `1000`, broader
+checks were mixed:
+
+```text
+tactical_regression.py: passed
+correctness_test.py --random 20 --seed 0603: passed
+stats_benchmark.py --limit 3: unchanged nodes
+compare_candidates.py --depths 6 7: 1/88 bestmove change, Stockfish-approved
+compare_candidates.py --movetimes 80: 1/44 bestmove change, Stockfish-improved but not best
+selfplay.py 20 games at 80ms: 3 wins, 9 losses, 8 draws
+```
+
+Conclusion: do not promote root quiet-check ordering as a default.  The rescued
+round-17 target remains useful, but the candidate lost too much practical
+self-play strength.
