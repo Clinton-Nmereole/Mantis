@@ -6096,6 +6096,46 @@ search_position :: proc(
 				}
 			}
 
+			if depth_completed &&
+			   found_move &&
+			   use_time_management &&
+			   !search_limits.is_movetime &&
+			   has_non_pawn_material(b, b.side) &&
+			   has_non_pawn_material(b, 1 - b.side) &&
+			   current_depth >= 6 &&
+			   current_depth <= 8 &&
+			   have_completed_score &&
+			   previous_completed_pv_len >= current_depth - 1 &&
+			   !moves.is_empty_move(prev_completed_best_move) &&
+			   !same_move(current_best_move, prev_completed_best_move) {
+				guard_score := best_score + params.contempt
+				if previous_completed_score - guard_score >= params.aspiration_window * 8 {
+					guard_depth_elapsed := int(time.duration_milliseconds(time.since(depth_start)))
+					guard_best_move_changes := best_move_changes
+					if !moves.is_empty_move(prev_best_move) &&
+					   !same_move(current_best_move, prev_best_move) {
+						guard_best_move_changes += 1
+					}
+					guard_score_drop := largest_score_drop
+					guard_drop := previous_completed_score - guard_score
+					if guard_drop > guard_score_drop {
+						guard_score_drop = guard_drop
+					}
+					if !should_start_next_depth(
+						search_limits,
+						guard_depth_elapsed,
+						last_depth_ms,
+						guard_best_move_changes,
+						guard_score_drop,
+						aspiration_failures,
+					) {
+						depth_completed = false
+						found_move = false
+						best_move = prev_completed_best_move
+					}
+				}
+			}
+
 			if found_move {
 				// Apply contempt from the engine's perspective at the root
 				// (score is always from the side-to-move's perspective at root)

@@ -3836,3 +3836,70 @@ git diff --check
 ```
 
 All passed.
+
+## Accepted: Timed Shallow Fail-Low Stability Guard
+
+A fresh 16-game external smoke against Stockfish limited to Elo 2400 scored
+5 wins, 9 losses, and 2 draws for Mantis.  That is not a rating claim, but it
+gave a useful new loss-mining set.  The clearest actionable miss was:
+
+```text
+r1bqkr2/1p5p/1n2P1pn/1P6/5P2/p1Q1N3/P5PP/R3KB1R w KQq - 3 18
+```
+
+Under a normal `go wtime 3000 btime 3000 winc 20 binc 20` clock, the committed
+binary accepted a shallow fail-low depth and played `c3e5`.  Fixed-depth search
+showed the position was unstable rather than truly preferred: depth 6 still
+played `c3e5`, while depth 7 and deeper recovered `a1d1`, matching Stockfish's
+top MultiPV move at depth 8.
+
+Rejected broad parameter fixes:
+
+```text
+RazorMaxDepth=1: fixed the target but caused broad bestmove churn.
+RazorMargin=120: fixed the target but still changed several broad rows.
+AspirationWindow=70: fixed the target but regressed a fresh oracle target.
+```
+
+Rejected first guard: always keeping the previous completed move after this
+class of shallow fail-low also stopped searches that had enough budget to repair
+themselves naturally, including a 3+2 first-collapse row that changed
+`d3c2 -> c3f6`.
+
+Accepted change: for timed clock searches only, not explicit `movetime`, depths
+6 through 8 now treat a large fail-low bestmove change as incomplete only when
+the existing time manager says it would not start the next depth anyway.  The
+guard is further limited to positions where both sides still have non-pawn
+material.  That material gate avoids sparse endgame/promotion positions where
+falling back to the previous completed move can be strategically wrong; it
+specifically removed a broad-clock anomaly on:
+
+```text
+8/2P5/8/4k3/3N4/4K3/8/8 w - - 0 1
+```
+
+Validation:
+
+```text
+Fresh SF2400 worst-target clock set: 1/12 bestmove change, c3e5 -> a1d1,
+  oracle loss 86 -> 0, no regressions.
+44-position 3s+20ms clock smoke: 0/44 bestmove changes, 0 cp score delta,
+  avg depth 9.11 -> 9.14, nodes +1.69%.
+Viridithas first-collapse 3+2 set: 0/13 bestmove changes, 0 cp score delta,
+  no oracle regressions.
+Fixed depth 6/8 benchmark: 0/44 bestmove changes at both depths, identical
+  nodes and scores.
+Movetime 80/250 benchmark: 0/44 bestmove changes at both budgets; only normal
+  timing-depth jitter.
+```
+
+Final gates:
+
+```text
+python3 correctness_test.py --binary ./mantis_timed_fail_low_stability_trial
+python3 tactical_regression.py --binary ./mantis_timed_fail_low_stability_trial
+python3 stats_benchmark.py --binary ./mantis_timed_fail_low_stability_trial --timeout 90
+git diff --check
+```
+
+Correctness, tactical regression, and the stats benchmark passed.
