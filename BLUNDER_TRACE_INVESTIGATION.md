@@ -3375,3 +3375,31 @@ Conclusion: the root aspiration diagnosis is useful, but disabling TT cutoffs
 inside the beta retry is too invasive under time controls.  Future attempts
 should avoid changing completed-depth behavior first, and should include an
 explicit ply guard if any retry path can extend the tree near `MAX_PLY`.
+
+## Accepted: Max-Ply Search Guard
+
+The rejected fail-low retry experiment exposed a real robustness hole: a timed
+search reached `ply == 64` and crashed when `negamax()` wrote
+`static_eval_stack[ply]`, whose valid indexes are `0..<64`.
+
+Change: both `negamax()` and `quiescence()` now stop expanding when
+`ply >= MAX_PLY` and return a static evaluation.  Tablebase/TT results can
+still answer before this guard in the main search path; the guard protects the
+fixed ply-indexed search state and prevents qsearch from extending beyond the
+same bound.
+
+Verification:
+
+```text
+odin build . -out:mantis_ply_guard -o:speed
+python3 tactical_regression.py --binary ./mantis_ply_guard
+python3 correctness_test.py --binary ./mantis_ply_guard --random 20 --seed 0603
+python3 stats_benchmark.py --binary ./mantis_ply_guard --limit 3 --timeout 90
+python3 compare_candidates.py --baseline ./mantis_after_revert \
+  --candidate ./mantis_ply_guard --depths 6 --timeout 90 \
+  --csv /tmp/mantis_ply_guard_depth6_compare.csv
+```
+
+Summary: tactical regression passed; randomized perft passed; short stats
+benchmark was normal; depth-6 comparison over 44 positions had `0/44` bestmove
+changes, `0` node changes, and `0 cp` score delta.

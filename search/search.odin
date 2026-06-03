@@ -4087,6 +4087,11 @@ negamax :: proc(
 		}
 	}
 
+	if ply >= MAX_PLY {
+		stat_add(&search_stats.evals)
+		return eval.evaluate(b)
+	}
+
 	// Check if in check (used by multiple features)
 	king_sq := board.get_king_square(b, b.side)
 	in_check := board.is_square_attacked(b, king_sq, 1 - b.side)
@@ -4754,6 +4759,11 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 			stat_add(&search_stats.tb_hits)
 			return tb_score
 		}
+	}
+
+	if ply >= MAX_PLY {
+		stat_add(&search_stats.evals)
+		return eval.evaluate(b)
 	}
 
 	stat_add(&search_stats.evals)
