@@ -2888,3 +2888,100 @@ python3 selfplay.py --engine-a ./mantis_goal_probe \
 
 The result is reported from engine A's perspective.  Baseline scored
 `3W-12L-5D`, so the candidate scored `12W-3L-5D`.
+
+## Accepted: Fast Movetime Check-Evasion TT Clear
+
+Change: before starting the `go movetime` timer, clear TT when the root side is
+in check and the post-overhead hard budget is at most 250ms.  Clock-managed
+searches already clear TT before each move; this extends that protection to
+short exact-movetime check evasions without changing fixed-depth, infinite, or
+non-check movetime searches.
+
+The accepted `<=100ms` root-seed unseed made the fresh root ordering less stale,
+but the fresh 2026-06-03 meta run showed a warmed target where child TT entries
+from earlier positions still kept a mate-losing queen evasion alive:
+
+```text
+FEN: k7/8/p4P2/4PK2/8/2r4q/P3Q3/7r w - - 6 50
+Played: e2g4 (Qg4)
+Oracle best: f5f4; e2g4 is mate-losing
+```
+
+Focused target probe:
+
+```text
+python3 blunder_trace.py \
+  --pgn /tmp/mantis_current_meta40_0603.pgn \
+  --mode worst \
+  --limit 12 \
+  --candidate-indexes 4 12 \
+  --binary ./mantis_movetime_check_clear \
+  --no-depths \
+  --movetimes-ms 80 250 \
+  --stateful-replay \
+  --warm-movetime-ms 80 \
+  --stateful-target-fen \
+  --timeout 60 \
+  --oracle-binary ./stockfish-debug/src/stockfish \
+  --oracle-depth 12 \
+  --oracle-multipv 6 \
+  --oracle-timeout 60 \
+  --report /tmp/mantis_movetime_check_clear_candidate4_12_final.md \
+  --csv /tmp/mantis_movetime_check_clear_candidate4_12_final.csv
+```
+
+Result:
+
+```text
+Round 20 ply 95:
+  stateful 80ms:  f5g5, oracle rank 2, +0.09 cp loss
+  stateful 250ms: f5g5, oracle rank 2, +0.09 cp loss
+  baseline stateful had reproduced e2g4 at 80/250 in the same warmed setup.
+
+Round 8 ply 43:
+  80ms remains the known cold horizon miss e5c4.
+  250ms remains c1d2, oracle rank 1.
+```
+
+Guards:
+
+```text
+odin build . -out:mantis_movetime_check_clear -o:speed
+python3 tactical_regression.py --binary ./mantis_movetime_check_clear
+python3 correctness_test.py --binary ./mantis_movetime_check_clear --random 20 --seed 0603
+python3 stats_benchmark.py --binary ./mantis_movetime_check_clear --limit 3 --timeout 90
+python3 compare_candidates.py --baseline ./mantis_current_probe \
+  --candidate ./mantis_movetime_check_clear --movetimes 80 250 \
+  --timeout 60 --oracle-csv /tmp/mantis_current_meta40_0603_blunders.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv /tmp/mantis_movetime_check_clear_compare_movetime_final.csv
+python3 compare_candidates.py --baseline ./mantis_current_probe \
+  --candidate ./mantis_movetime_check_clear --movetimes 80 250 \
+  --keep-hash --timeout 60 \
+  --oracle-csv /tmp/mantis_current_meta40_0603_blunders.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv /tmp/mantis_movetime_check_clear_compare_movetime_keephash_final.csv
+```
+
+Summary:
+
+```text
+Tactical regression: passed, including h7g6 queen-defense guard.
+Perft correctness:   passed.
+Default compare:     80ms 0/44 bestmove changes; 250ms 0/44.
+Keep-hash compare:   80ms 0/44 bestmove changes; 250ms 0/44.
+```
+
+Self-play at 80ms:
+
+```text
+python3 selfplay.py --engine-a ./mantis_movetime_check_clear \
+  --engine-b ./mantis_current_probe --games 40 --movetime 80 \
+  --max-moves 180 --concurrency 2 --openings 2moves_v1.epd \
+  --option OwnBook=false \
+  --pgn-out /tmp/mantis_movetime_check_clear_vs_current_40x80.pgn
+```
+
+Candidate scored `18W-15L-7D` from engine A's perspective.  Two wins came from
+illegal `a1a1` moves by the baseline/current engine, so the match is supportive
+but noisy rather than decisive.

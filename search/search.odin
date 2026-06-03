@@ -18,6 +18,22 @@ import "core:time"
 // Search Constants
 MAX_PLY :: 64
 TIGHT_CHECK_EVASION_SEED_LIMIT_MS :: 100
+MOVETIME_CHECK_EVASION_TT_CLEAR_LIMIT_MS :: 250
+
+should_clear_movetime_check_evasion_tt :: proc(b: ^board.Board, limits: SearchLimits) -> bool {
+	if !limits.is_movetime || limits.is_infinite {
+		return false
+	}
+	if limits.hard_time > MOVETIME_CHECK_EVASION_TT_CLEAR_LIMIT_MS {
+		return false
+	}
+
+	king_sq := board.get_king_square(b, b.side)
+	if king_sq < 0 {
+		return false
+	}
+	return board.is_square_attacked(b, king_sq, 1 - b.side)
+}
 
 // LMR Table — precomputed logarithmic reductions
 lmr_table: [64][64]int

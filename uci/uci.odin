@@ -348,6 +348,23 @@ parse_position :: proc(command: string, b: ^board.Board) {
 	}
 }
 
+clear_fast_movetime_check_evasion_tt :: proc(b: ^board.Board, tc: search.TimeControl) {
+	if tc.movetime <= 0 {
+		return
+	}
+
+	movetime_hard := tc.movetime - move_overhead
+	if movetime_hard < 1 {
+		movetime_hard = 1
+	}
+	if search.should_clear_movetime_check_evasion_tt(
+		b,
+		search.SearchLimits{hard_time = movetime_hard, is_movetime = true},
+	) {
+		search.clear_tt()
+	}
+}
+
 // Parse 'go' command
 // go depth 6 wtime 10000 btime 10000 ...
 parse_go :: proc(command: string, b: ^board.Board) {
@@ -443,6 +460,7 @@ parse_go :: proc(command: string, b: ^board.Board) {
 
 	// If time control or movetime specified, use time management
 	if tc.wtime > 0 || tc.btime > 0 || tc.movetime > 0 {
+		clear_fast_movetime_check_evasion_tt(b, tc)
 		limits := search.calculate_time(tc, b.side, move_overhead)
 		search.search_limits = limits
 		search.use_time_management = true
@@ -802,6 +820,7 @@ ponder_search_thread :: proc(t: ^thread.Thread) {
 	    state.time_control.btime > 0 ||
 	    state.time_control.movetime > 0 ||
 	    state.time_control.infinite) {
+		clear_fast_movetime_check_evasion_tt(&state.board, state.time_control)
 		limits := search.calculate_time(state.time_control, state.board.side, move_overhead)
 		search.search_limits = limits
 		search.use_time_management = true
