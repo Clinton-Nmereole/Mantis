@@ -2,7 +2,6 @@ package search
 
 import "../board"
 import "../moves"
-import "core:sync"
 import "core:thread"
 
 // Thread Pool for parallel search
@@ -68,7 +67,7 @@ search_worker :: proc(t: ^thread.Thread) {
 	}
 
 	// Search the position (suppress bestmove output for workers)
-	search_position(&st, &data.board, adjusted_depth, data.multi_pv, output_bestmove = false)
+	search_position(&st, &data.board, adjusted_depth, data.multi_pv, output_bestmove = false, reset_shared_state = false)
 
 	// Clean up worker data
 	free(data)
@@ -84,8 +83,9 @@ parallel_search :: proc(b: ^board.Board, depth: int, multi_pv: int) {
 		return
 	}
 
-	// Reset global node counter before search
-	sync.atomic_store(&total_nodes, u64(0))
+	// Reset shared counters once. Helper searches must not clear them while
+	// the main thread is searching.
+	reset_shared_search_state()
 
 	// Clear previous threads
 	for t in global_thread_pool.threads {
@@ -116,7 +116,7 @@ parallel_search :: proc(b: ^board.Board, depth: int, multi_pv: int) {
 	st: SearchThread
 	init_search_thread(&st, 0)
 	defer free(st.continuation_history)
-	search_position(&st, b, depth, multi_pv)
+	search_position(&st, b, depth, multi_pv, reset_shared_state = false)
 
 	// Wait for all helper threads to complete
 	for t in global_thread_pool.threads {

@@ -126,6 +126,16 @@ last_completed_best_move: moves.Move
 last_completed_best_score: int
 last_completed_depth: int
 
+reset_shared_search_state :: proc(reset_last_completed: bool = true) {
+	if reset_last_completed {
+		last_completed_best_move = moves.Move{}
+		last_completed_best_score = 0
+		last_completed_depth = 0
+	}
+	sync.atomic_store(&total_nodes, 0)
+	reset_search_stats()
+}
+
 SearchDebugOptions :: struct {
 	disable_tt_cutoffs: bool,
 	disable_lmr:        bool,
@@ -5223,16 +5233,13 @@ search_position :: proc(
 	depth: int,
 	multi_pv_count: int = 1,
 	output_bestmove: bool = true,
+	reset_shared_state: bool = true,
 ) {
 	// fmt.println("DEBUG: Entering search_position")
 	st.nodes = 0
-	if st.thread_id == 0 {
-		last_completed_best_move = moves.Move{}
-		last_completed_best_score = 0
-		last_completed_depth = 0
+	if reset_shared_state {
+		reset_shared_search_state(st.thread_id == 0)
 	}
-	sync.atomic_store(&total_nodes, 0)
-	reset_search_stats()
 	clear_killers(st) // Clear killer moves for new search
 	clear_history(st) // Clear history table for new search
 	clear_capture_history(st)

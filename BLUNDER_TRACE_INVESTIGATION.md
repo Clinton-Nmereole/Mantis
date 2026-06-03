@@ -1606,3 +1606,66 @@ Conclusion: broad root child-window invariant changes are too risky against the
 accepted short-PV tactical behavior. Future work on the `c8c2` root mismatch
 should preserve the queen-defense `h7g6` result as a first-class guardrail.
 Keep `./mantis_syzygy_qfrontier` as the latest accepted practice-game binary.
+
+## Accepted: Lazy SMP Shared-State Reset
+
+Change: `search_position` now has a narrow `reset_shared_state` switch, and
+`parallel_search` resets shared counters/stats exactly once before spawning
+helper threads. Lazy SMP helpers call the same search entry without clearing
+`total_nodes`, `search_stats`, or the root completed-depth cache while the main
+thread is searching. This repairs the UCI `Threads > 1` path without changing
+the default single-thread search tree.
+
+Validation:
+
+```text
+odin build . -out:mantis_thread_reset_fix -o:speed
+python3 compare_candidates.py \
+  --baseline ./mantis_syzygy_qfrontier \
+  --candidate ./mantis_thread_reset_fix \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 \
+  --timeout 90 \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv games/thread_reset_fix_compare_first_collapse.csv
+python3 compare_candidates.py \
+  --baseline ./mantis_syzygy_qfrontier \
+  --candidate ./mantis_thread_reset_fix \
+  --depth 8 \
+  --timeout 60 \
+  --csv games/thread_reset_fix_depth8_compare.csv
+python3 tactical_regression.py --binary ./mantis_thread_reset_fix
+python3 correctness_test.py --binary ./mantis_thread_reset_fix
+python3 stats_benchmark.py --binary ./mantis_thread_reset_fix --timeout 90
+python3 stats_benchmark.py --binary ./mantis_thread_reset_fix --own-book --limit 3 --timeout 30
+```
+
+First-collapse clock compare:
+
+```text
+positions:        13
+bestmove_changes: 0
+avg_depth:        14.69 -> 14.77
+nodes:            15471647 -> 16422810 (+6.15%)
+time_ms:          77643 -> 82764 (+6.60%)
+abs_score_delta:  6 cp
+max_score_delta:  6 cp
+oracle regressions: none
+```
+
+The only depth change was an oracle-approved `h2h3` row completing one extra
+ply. Fixed-depth depth-8 comparison stayed exact across all 44 benchmark FENs:
+
+```text
+positions:        44
+bestmove_changes: 0
+nodes:            1559564 -> 1559564 (+0.00%)
+abs_score_delta:  0 cp
+max_score_delta:  0 cp
+```
+
+Tactical regression, perft correctness, raw stats benchmark, own-book smoke,
+and a `Threads=2` UCI SearchStats smoke passed. The raw-search benchmark
+remains at `473960` nodes. The latest accepted practice-game binary from this
+pass is `./mantis_thread_reset_fix`.
