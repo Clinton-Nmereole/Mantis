@@ -23,6 +23,9 @@ import stats_benchmark
 
 
 EVAL_RE = re.compile(r"\[%eval\s+([^\]]+)\]")
+COMMENT_DEPTH_RE = re.compile(r"\[%depth\s+(\d+)\]")
+COMMENT_NODES_RE = re.compile(r"\bnodes\s+(\d+)")
+COMMENT_TIME_RE = re.compile(r"\btime\s+(\d+)ms\b")
 MATE_SCORE = 100_000
 
 
@@ -200,6 +203,9 @@ class BlunderCandidate:
     eval_after_mantis_cp: int
     delta_cp: int
     comment: str
+    played_depth: int | None = None
+    played_nodes: int | None = None
+    played_time_ms: int | None = None
     engine_rows: list[dict[str, Any]] = field(default_factory=list)
     oracle_rows: list[dict[str, Any]] = field(default_factory=list)
 
@@ -221,6 +227,16 @@ def parse_eval_cp(comment: str) -> int | None:
         return None
 
 
+def parse_comment_int(pattern: re.Pattern[str], comment: str) -> int | None:
+    match = pattern.search(comment or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
 def cp_label(value: int | None) -> str:
     if value is None:
         return "?"
@@ -228,6 +244,17 @@ def cp_label(value: int | None) -> str:
         sign = "+" if value > 0 else "-"
         return f"{sign}mate"
     return f"{value / 100.0:+.2f}"
+
+
+def search_meta_label(candidate: BlunderCandidate) -> str:
+    parts: list[str] = []
+    if candidate.played_depth is not None:
+        parts.append(f"d{candidate.played_depth}")
+    if candidate.played_nodes is not None:
+        parts.append(f"{candidate.played_nodes}n")
+    if candidate.played_time_ms is not None:
+        parts.append(f"{candidate.played_time_ms}ms")
+    return " ".join(parts)
 
 
 DEPTH_RE = re.compile(r"\bdepth (?P<depth>\d+)\b")
@@ -399,6 +426,9 @@ def extract_candidates(
                                     eval_after_mantis_cp=after_mantis_cp,
                                     delta_cp=delta_cp,
                                     comment=node.comment.strip(),
+                                    played_depth=parse_comment_int(COMMENT_DEPTH_RE, node.comment),
+                                    played_nodes=parse_comment_int(COMMENT_NODES_RE, node.comment),
+                                    played_time_ms=parse_comment_int(COMMENT_TIME_RE, node.comment),
                                 )
                             )
 
@@ -781,6 +811,9 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
         "eval_after",
         "eval_before_mantis",
         "eval_after_mantis",
+        "played_depth",
+        "played_nodes",
+        "played_time_ms",
         "classification",
         "oracle_bestmove",
         "oracle_best_score_cp",
@@ -822,6 +855,9 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                             "eval_after": candidate.eval_after_cp,
                             "eval_before_mantis": candidate.eval_before_mantis_cp,
                             "eval_after_mantis": candidate.eval_after_mantis_cp,
+                            "played_depth": candidate.played_depth or "",
+                            "played_nodes": candidate.played_nodes or "",
+                            "played_time_ms": candidate.played_time_ms or "",
                             "classification": classify(candidate),
                             "oracle_bestmove": oracle.get("bestmove", ""),
                             "oracle_best_score_cp": oracle.get("best_score_cp", ""),
@@ -857,6 +893,9 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                         "eval_after": candidate.eval_after_cp,
                         "eval_before_mantis": candidate.eval_before_mantis_cp,
                         "eval_after_mantis": candidate.eval_after_mantis_cp,
+                        "played_depth": candidate.played_depth or "",
+                        "played_nodes": candidate.played_nodes or "",
+                        "played_time_ms": candidate.played_time_ms or "",
                         "classification": classify(candidate),
                         "oracle_bestmove": oracle.get("bestmove", ""),
                         "oracle_best_score_cp": oracle.get("best_score_cp", ""),
@@ -942,15 +981,16 @@ def render_markdown(
     out.write(f"## {section_title}\n\n")
     has_oracle = any(candidate.oracle_rows for candidate in selected)
     if has_oracle:
-        out.write("| # | Round | Ply | Side | Move | Mantis Before | Mantis After | Drop | Classification | Oracle Best | Mantis Best | Mantis Rank | Mantis Loss | Played Rank | Played Loss |\n")
-        out.write("| ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: |\n")
+        out.write("| # | Round | Ply | Side | Move | Played Search | Mantis Before | Mantis After | Drop | Classification | Oracle Best | Mantis Best | Mantis Rank | Mantis Loss | Played Rank | Played Loss |\n")
+        out.write("| ---: | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: |\n")
     else:
-        out.write("| # | Round | Ply | Side | Move | Mantis Before | Mantis After | Drop | Classification |\n")
-        out.write("| ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | --- |\n")
+        out.write("| # | Round | Ply | Side | Move | Played Search | Mantis Before | Mantis After | Drop | Classification |\n")
+        out.write("| ---: | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | --- |\n")
     for candidate in selected:
         base = (
             f"| {candidate.index} | {candidate.round_name} | {candidate.ply} | "
             f"{candidate.mantis_color} | `{candidate.uci}` `{candidate.san}` | "
+            f"{search_meta_label(candidate)} | "
             f"{cp_label(candidate.eval_before_mantis_cp)} | {cp_label(candidate.eval_after_mantis_cp)} | "
             f"{candidate.delta_cp:+d} | {classify(candidate)}"
         )
@@ -974,6 +1014,9 @@ def render_markdown(
     for candidate in selected:
         out.write(f"## Candidate {candidate.index}: Round {candidate.round_name}, Ply {candidate.ply}\n\n")
         out.write(f"Played: `{candidate.uci}` (`{candidate.san}`), Mantis as {candidate.mantis_color}\n\n")
+        played_search = search_meta_label(candidate)
+        if played_search:
+            out.write(f"Played search: `{played_search}`\n\n")
         out.write(
             f"Mantis eval: {cp_label(candidate.eval_before_mantis_cp)} -> "
             f"{cp_label(candidate.eval_after_mantis_cp)} ({candidate.delta_cp:+d} cp)\n\n"

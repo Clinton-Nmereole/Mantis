@@ -2378,3 +2378,74 @@ python3 blunder_trace.py \
 Next: run a larger metadata-rich self-play batch under concurrency and rank only
 targets where the PGN move was made at a plausible depth/time, then promote
 stable Stockfish-confirmed targets into engine changes.
+
+## Accepted: Blunder Reports Read PGN Search Metadata
+
+An eight-game metadata-rich self-play batch produced two threshold worst-drop
+targets and no strict first-collapse targets:
+
+```text
+python3 selfplay.py \
+  --engine-a ./mantis_timed_capture_verify \
+  --engine-b ./mantis_timed_capture_verify \
+  --games 8 \
+  --movetime 80 \
+  --max-moves 180 \
+  --concurrency 2 \
+  --openings 2moves_v1.epd \
+  --option OwnBook=false \
+  --pgn-out /tmp/mantis_latest_selfplay_meta8_0603.pgn
+```
+
+`blunder_trace.py` now parses `[%depth ...]`, `nodes ...`, and `time ...ms`
+from PGN comments into `played_depth`, `played_nodes`, and `played_time_ms`.
+Markdown reports include a `Played Search` column.
+
+Validation:
+
+```text
+python3 -m py_compile blunder_trace.py
+python3 blunder_trace.py \
+  --pgn /tmp/mantis_latest_selfplay_meta8_0603.pgn \
+  --mode worst \
+  --limit 2 \
+  --report /tmp/mantis_latest_selfplay_meta8_metadata_report.md \
+  --csv /tmp/mantis_latest_selfplay_meta8_metadata_report.csv
+```
+
+Result:
+
+```text
+Round 2 ply 89: h6e3, d8 15087 nodes 52ms, eval -7.65 -> -13.34
+Round 8 ply 31: h2h3, d6 7907 nodes 35ms, eval -4.63 -> -6.38
+```
+
+Stockfish depth-12 filtering on these positions:
+
+```text
+Round 2 h6e3: played loss 333 cp, but position was already -7.65.
+Round 8 h2h3: played move outside Stockfish MultiPV 8; cold d8 b1c3 is only
+  7 cp behind Stockfish's top move.
+```
+
+Focused replay for the round-8 target:
+
+```text
+cold 80ms:                 h2h3, d6, -6.38
+cold 250ms:                h2h3, d10, -6.74
+stateful-warm80ms 80ms:    h2h3, d6, -6.38
+stateful-warm80ms 250ms:   h2h3, d10, -6.74
+3+2-style clock:           f4d6, d15, -7.98
+```
+
+Root parity at depth 10 shows the underlying class:
+
+```text
+h2h3 full=-2614
+g3f3 full=-2432, pvs=-2614, PVS_MISS
+a4a5 full=-2344, pvs=-2432, PVS_MISS
+```
+
+This is a reproducible fast-movetime root-PVS miss, but the current clock path
+already searches past it and avoids `h2h3`. Treat it as a future movetime/root
+verification target, not yet an accepted engine patch.
