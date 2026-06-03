@@ -16,6 +16,7 @@ from pathlib import Path
 STAT_RE = re.compile(r"([a-zA-Z_]+)=([0-9]+)")
 RATIO_RE = re.compile(r"([a-zA-Z_]+)=([0-9]+)/([0-9]+)")
 FEN_RE = re.compile(r'"([^"]+)"')
+MATE_SCORE = 100_000
 WHITE = "w"
 BLACK = "b"
 WHITE_PIECES = set("PNBRQK")
@@ -255,14 +256,22 @@ def parse_stats(output: str) -> dict[str, int | str]:
     for line in output.splitlines():
         if line.startswith("info depth "):
             depth_match = re.search(r"info depth ([0-9]+)", line)
-            score_match = re.search(r"score cp (-?[0-9]+)", line)
+            score_match = re.search(r"score (cp|mate) (-?[0-9]+)", line)
             nodes_match = re.search(r"nodes ([0-9]+)", line)
             time_match = re.search(r"time ([0-9]+)", line)
             nps_match = re.search(r"nps ([0-9]+)", line)
             if depth_match:
                 stats["depth"] = int(depth_match.group(1))
             if score_match:
-                stats["score_cp"] = int(score_match.group(1))
+                score_kind = score_match.group(1)
+                score_raw = int(score_match.group(2))
+                stats["score_kind"] = score_kind
+                stats["score_raw"] = score_raw
+                stats["score_cp"] = (
+                    score_raw
+                    if score_kind == "cp"
+                    else (MATE_SCORE if score_raw > 0 else -MATE_SCORE)
+                )
             if nodes_match:
                 stats["nodes"] = int(nodes_match.group(1))
             if time_match:

@@ -213,6 +213,12 @@ class BlunderCandidate:
     eval_after_mantis_cp: int
     delta_cp: int
     comment: str
+    eval_source: str = "pgn"
+    eval_search: str = ""
+    eval_before_nodes: int | None = None
+    eval_after_nodes: int | None = None
+    eval_before_time_ms: int | None = None
+    eval_after_time_ms: int | None = None
     played_depth: int | None = None
     played_nodes: int | None = None
     played_time_ms: int | None = None
@@ -489,6 +495,179 @@ def extract_candidates(
                     last_eval_cp = after_eval_cp
                     last_eval_from_mantis = mover_matches_mantis
                     last_eval_ply = ply
+
+    candidates.sort(key=lambda item: item.delta_cp)
+    for index, item in enumerate(candidates, start=1):
+        item.index = index
+    return candidates, stats
+
+
+def terminal_mantis_score(chess_board: chess.Board, mantis_color: chess.Color) -> int | None:
+    outcome = chess_board.outcome(claim_draw=False)
+    if outcome is None:
+        return None
+    if outcome.winner is None:
+        return 0
+    return MATE_SCORE if outcome.winner == mantis_color else -MATE_SCORE
+
+
+def rescore_search_label(depth: int, movetime_ms: int) -> str:
+    if movetime_ms > 0:
+        return f"{movetime_ms}ms"
+    return f"d{depth}"
+
+
+def rescore_fen(
+    engine: UCIEngine,
+    fen: str,
+    depth: int,
+    movetime_ms: int,
+    timeout: float,
+    clear_hash: bool,
+) -> tuple[int | None, dict[str, int | str], float]:
+    if clear_hash:
+        engine.new_game()
+    if movetime_ms > 0:
+        stats, wall_ms = engine.search_movetime_fen(fen, movetime_ms, timeout)
+    else:
+        stats, wall_ms = engine.search_depth_fen(fen, depth, timeout)
+    score = stats.get("score_cp")
+    return score if isinstance(score, int) else None, stats, wall_ms
+
+
+def extract_rescored_candidates(
+    pgn_path: Path,
+    mantis_name: str,
+    threshold_cp: int,
+    max_before_abs_cp: int | None,
+    binary: str,
+    depth: int,
+    movetime_ms: int,
+    engine_options: list[tuple[str, str]],
+    timeout: float,
+    clear_hash: bool,
+) -> tuple[list[BlunderCandidate], dict[str, int]]:
+    candidates: list[BlunderCandidate] = []
+    stats = {
+        "games": 0,
+        "mantis_games": 0,
+        "mantis_moves": 0,
+        "moves_with_eval_drop": 0,
+        "moves_missing_eval": 0,
+        "moves_mixed_engine_eval": 0,
+        "moves_rescored": 0,
+    }
+    search_label = rescore_search_label(depth, movetime_ms)
+    engine = UCIEngine(binary, timeout)
+    try:
+        engine.set_option("OwnBook", "false")
+        apply_engine_options(engine, engine_options)
+        with pgn_path.open("r", encoding="utf-8", errors="replace") as handle:
+            while True:
+                game = chess.pgn.read_game(handle)
+                if game is None:
+                    break
+                stats["games"] += 1
+                mantis_color = mantis_color_for_game(game, mantis_name)
+                if mantis_color is None:
+                    continue
+                stats["mantis_games"] += 1
+
+                board = game.board()
+                for ply, node in enumerate(game.mainline(), start=1):
+                    move = node.move
+                    mover_color = board.turn
+                    before_fen = board.fen()
+                    san = board.san(move)
+                    fullmove = board.fullmove_number
+                    board.push(move)
+                    after_fen = board.fen()
+
+                    if mover_color != mantis_color:
+                        continue
+
+                    stats["mantis_moves"] += 1
+                    print(
+                        f"[rescore {stats['mantis_moves']:>4}] "
+                        f"game={stats['games']} round={game.headers.get('Round', '?')} "
+                        f"ply={ply} move={move.uci()} search={search_label}",
+                        flush=True,
+                    )
+
+                    try:
+                        before_cp, before_stats, _before_wall = rescore_fen(
+                            engine=engine,
+                            fen=before_fen,
+                            depth=depth,
+                            movetime_ms=movetime_ms,
+                            timeout=timeout,
+                            clear_hash=clear_hash,
+                        )
+                        terminal_after = terminal_mantis_score(board, mantis_color)
+                        if terminal_after is None:
+                            after_cp_raw, after_stats, _after_wall = rescore_fen(
+                                engine=engine,
+                                fen=after_fen,
+                                depth=depth,
+                                movetime_ms=movetime_ms,
+                                timeout=timeout,
+                                clear_hash=clear_hash,
+                            )
+                            after_cp = -after_cp_raw if after_cp_raw is not None else None
+                        else:
+                            after_stats = {}
+                            after_cp = terminal_after
+                    except subprocess.TimeoutExpired:
+                        stats["moves_missing_eval"] += 1
+                        continue
+
+                    if before_cp is None or after_cp is None:
+                        stats["moves_missing_eval"] += 1
+                        continue
+
+                    stats["moves_rescored"] += 1
+                    before_mantis_cp = before_cp
+                    after_mantis_cp = after_cp
+                    delta_cp = after_mantis_cp - before_mantis_cp
+                    if delta_cp < 0:
+                        stats["moves_with_eval_drop"] += 1
+                    if (
+                        delta_cp <= -threshold_cp
+                        and (
+                            max_before_abs_cp is None
+                            or abs(before_mantis_cp) <= max_before_abs_cp
+                        )
+                    ):
+                        side_sign = 1 if mantis_color == chess.WHITE else -1
+                        candidates.append(
+                            BlunderCandidate(
+                                index=len(candidates) + 1,
+                                game_index=stats["games"],
+                                round_name=game.headers.get("Round", "?"),
+                                result=game.headers.get("Result", "?"),
+                                mantis_color="white" if mantis_color == chess.WHITE else "black",
+                                mover=side_name(game, mover_color),
+                                ply=ply,
+                                fullmove=fullmove,
+                                san=san,
+                                uci=move.uci(),
+                                fen=before_fen,
+                                eval_before_cp=before_mantis_cp * side_sign,
+                                eval_after_cp=after_mantis_cp * side_sign,
+                                eval_before_mantis_cp=before_mantis_cp,
+                                eval_after_mantis_cp=after_mantis_cp,
+                                delta_cp=delta_cp,
+                                comment=node.comment.strip(),
+                                eval_source="rescored",
+                                eval_search=search_label,
+                                eval_before_nodes=before_stats.get("nodes") if isinstance(before_stats.get("nodes"), int) else None,
+                                eval_after_nodes=after_stats.get("nodes") if isinstance(after_stats.get("nodes"), int) else None,
+                                eval_before_time_ms=before_stats.get("time_ms") if isinstance(before_stats.get("time_ms"), int) else None,
+                                eval_after_time_ms=after_stats.get("time_ms") if isinstance(after_stats.get("time_ms"), int) else None,
+                            )
+                        )
+    finally:
+        engine.close()
 
     candidates.sort(key=lambda item: item.delta_cp)
     for index, item in enumerate(candidates, start=1):
@@ -868,6 +1047,12 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
         "eval_after",
         "eval_before_mantis",
         "eval_after_mantis",
+        "eval_source",
+        "eval_search",
+        "eval_before_nodes",
+        "eval_after_nodes",
+        "eval_before_time_ms",
+        "eval_after_time_ms",
         "played_depth",
         "played_nodes",
         "played_time_ms",
@@ -912,6 +1097,12 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                             "eval_after": candidate.eval_after_cp,
                             "eval_before_mantis": candidate.eval_before_mantis_cp,
                             "eval_after_mantis": candidate.eval_after_mantis_cp,
+                            "eval_source": candidate.eval_source,
+                            "eval_search": candidate.eval_search,
+                            "eval_before_nodes": candidate.eval_before_nodes or "",
+                            "eval_after_nodes": candidate.eval_after_nodes or "",
+                            "eval_before_time_ms": candidate.eval_before_time_ms or "",
+                            "eval_after_time_ms": candidate.eval_after_time_ms or "",
                             "played_depth": candidate.played_depth or "",
                             "played_nodes": candidate.played_nodes or "",
                             "played_time_ms": candidate.played_time_ms or "",
@@ -950,6 +1141,12 @@ def write_csv(candidates: list[BlunderCandidate], path: Path) -> None:
                         "eval_after": candidate.eval_after_cp,
                         "eval_before_mantis": candidate.eval_before_mantis_cp,
                         "eval_after_mantis": candidate.eval_after_mantis_cp,
+                        "eval_source": candidate.eval_source,
+                        "eval_search": candidate.eval_search,
+                        "eval_before_nodes": candidate.eval_before_nodes or "",
+                        "eval_after_nodes": candidate.eval_after_nodes or "",
+                        "eval_before_time_ms": candidate.eval_before_time_ms or "",
+                        "eval_after_time_ms": candidate.eval_after_time_ms or "",
                         "played_depth": candidate.played_depth or "",
                         "played_nodes": candidate.played_nodes or "",
                         "played_time_ms": candidate.played_time_ms or "",
@@ -976,6 +1173,10 @@ def render_markdown(
     movetimes_ms: list[int],
     clock_ms: dict[str, int] | None,
     engine_options: list[tuple[str, str]],
+    rescore_binary: str | None,
+    rescore_depth: int,
+    rescore_movetime_ms: int,
+    keep_rescore_hash: bool,
     oracle_binary: str | None,
     oracle_depth: int,
     oracle_multipv: int,
@@ -1017,6 +1218,14 @@ def render_markdown(
         if engine_options:
             formatted_options = ", ".join(f"{name}={value}" for name, value in engine_options)
             out.write(f"Engine options: `{formatted_options}`\n\n")
+    if rescore_binary:
+        out.write(
+            f"Eval source: rescored by `{rescore_binary}` at "
+            f"`{rescore_search_label(rescore_depth, rescore_movetime_ms)}`"
+        )
+        out.write(", hash `kept between positions`\n\n" if keep_rescore_hash else ", hash `cleared between positions`\n\n")
+    else:
+        out.write("Eval source: `PGN adjacent comments`\n\n")
     if stateful_replay:
         if warm_movetime_ms > 0:
             out.write(f"Stateful replay: `enabled`, warm movetime `{warm_movetime_ms}ms`\n\n")
@@ -1033,9 +1242,13 @@ def render_markdown(
     out.write("## Summary\n\n")
     out.write(f"- Games parsed: {stats['games']}\n")
     out.write(f"- Games with Mantis: {stats['mantis_games']}\n")
-    out.write(f"- Mantis moves with adjacent eval comments: {stats['mantis_moves'] - stats['moves_missing_eval']}\n")
-    if stats.get("moves_mixed_engine_eval", 0):
-        out.write(f"- Mantis moves skipped for mixed-engine evals: {stats['moves_mixed_engine_eval']}\n")
+    if rescore_binary:
+        out.write(f"- Mantis moves rescored: {stats.get('moves_rescored', 0)}\n")
+        out.write(f"- Mantis moves missing rescored evals: {stats['moves_missing_eval']}\n")
+    else:
+        out.write(f"- Mantis moves with adjacent eval comments: {stats['mantis_moves'] - stats['moves_missing_eval']}\n")
+        if stats.get("moves_mixed_engine_eval", 0):
+            out.write(f"- Mantis moves skipped for mixed-engine evals: {stats['moves_mixed_engine_eval']}\n")
     out.write(f"- Mantis eval drops: {stats['moves_with_eval_drop']}\n")
     out.write(f"- Candidates at threshold: {pool_count}\n")
     out.write(f"- Candidates searched in this report: {len(selected)}\n\n")
@@ -1044,16 +1257,17 @@ def render_markdown(
     out.write(f"## {section_title}\n\n")
     has_oracle = any(candidate.oracle_rows for candidate in selected)
     if has_oracle:
-        out.write("| # | Round | Ply | Side | Move | Played Search | Mantis Before | Mantis After | Drop | Classification | Oracle Best | Mantis Best | Mantis Rank | Mantis Loss | Played Rank | Played Loss |\n")
+        out.write("| # | Round | Ply | Side | Move | Search | Mantis Before | Mantis After | Drop | Classification | Oracle Best | Mantis Best | Mantis Rank | Mantis Loss | Played Rank | Played Loss |\n")
         out.write("| ---: | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: |\n")
     else:
-        out.write("| # | Round | Ply | Side | Move | Played Search | Mantis Before | Mantis After | Drop | Classification |\n")
+        out.write("| # | Round | Ply | Side | Move | Search | Mantis Before | Mantis After | Drop | Classification |\n")
         out.write("| ---: | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | --- |\n")
     for candidate in selected:
+        search_label = search_meta_label(candidate) or candidate.eval_search
         base = (
             f"| {candidate.index} | {candidate.round_name} | {candidate.ply} | "
             f"{candidate.mantis_color} | `{candidate.uci}` `{candidate.san}` | "
-            f"{search_meta_label(candidate)} | "
+            f"{search_label} | "
             f"{cp_label(candidate.eval_before_mantis_cp)} | {cp_label(candidate.eval_after_mantis_cp)} | "
             f"{candidate.delta_cp:+d} | {classify(candidate)}"
         )
@@ -1077,6 +1291,8 @@ def render_markdown(
     for candidate in selected:
         out.write(f"## Candidate {candidate.index}: Round {candidate.round_name}, Ply {candidate.ply}\n\n")
         out.write(f"Played: `{candidate.uci}` (`{candidate.san}`), Mantis as {candidate.mantis_color}\n\n")
+        if candidate.eval_source != "pgn":
+            out.write(f"Eval source: `{candidate.eval_source}` at `{candidate.eval_search}`\n\n")
         played_search = search_meta_label(candidate)
         if played_search:
             out.write(f"Played search: `{played_search}`\n\n")
@@ -1179,6 +1395,23 @@ def main() -> int:
     )
     parser.add_argument("--binary", help="Optional Mantis binary for fixed-depth re-search")
     parser.add_argument("--option", action="append", default=[], help="UCI option Name=Value applied to the traced binary; repeatable")
+    parser.add_argument(
+        "--rescore-binary",
+        help="Use this UCI engine to score before/after each Mantis move instead of PGN eval comments",
+    )
+    parser.add_argument("--rescore-depth", type=int, default=6, help="Fixed depth for --rescore-binary extraction")
+    parser.add_argument(
+        "--rescore-movetime-ms",
+        type=int,
+        default=0,
+        help="Movetime budget for --rescore-binary extraction; overrides --rescore-depth when positive",
+    )
+    parser.add_argument("--rescore-timeout", type=float, default=30.0, help="Timeout per rescored position")
+    parser.add_argument(
+        "--keep-rescore-hash",
+        action="store_true",
+        help="Do not clear the rescoring engine hash between before/after positions",
+    )
     parser.add_argument("--depths", type=int, nargs="+", default=[8, 10], help="Depths for fixed-depth re-search")
     parser.add_argument("--no-depths", action="store_true", help="Do not run fixed-depth target searches")
     parser.add_argument("--movetimes-ms", type=int, nargs="*", default=[], help="Movetime budgets for timed target searches")
@@ -1233,6 +1466,12 @@ def main() -> int:
         parser.error("--warm-depth must be positive")
     if args.warm_movetime_ms < 0:
         parser.error("--warm-movetime-ms must be non-negative")
+    if args.rescore_depth <= 0:
+        parser.error("--rescore-depth must be positive")
+    if args.rescore_movetime_ms < 0:
+        parser.error("--rescore-movetime-ms must be non-negative")
+    if args.rescore_timeout <= 0:
+        parser.error("--rescore-timeout must be positive")
     try:
         engine_options = stats_benchmark.parse_engine_options(args.option)
     except ValueError as exc:
@@ -1242,13 +1481,27 @@ def main() -> int:
     if not pgn_path.exists():
         raise SystemExit(f"PGN not found: {pgn_path}")
 
-    candidates, stats = extract_candidates(
-        pgn_path=pgn_path,
-        mantis_name=args.mantis_name,
-        threshold_cp=args.threshold_cp,
-        max_before_abs_cp=None if args.max_before_abs_cp == 0 else args.max_before_abs_cp,
-        allow_mixed_engine_evals=args.allow_mixed_engine_evals,
-    )
+    if args.rescore_binary:
+        candidates, stats = extract_rescored_candidates(
+            pgn_path=pgn_path,
+            mantis_name=args.mantis_name,
+            threshold_cp=args.threshold_cp,
+            max_before_abs_cp=None if args.max_before_abs_cp == 0 else args.max_before_abs_cp,
+            binary=args.rescore_binary,
+            depth=args.rescore_depth,
+            movetime_ms=args.rescore_movetime_ms,
+            engine_options=engine_options,
+            timeout=args.rescore_timeout,
+            clear_hash=not args.keep_rescore_hash,
+        )
+    else:
+        candidates, stats = extract_candidates(
+            pgn_path=pgn_path,
+            mantis_name=args.mantis_name,
+            threshold_cp=args.threshold_cp,
+            max_before_abs_cp=None if args.max_before_abs_cp == 0 else args.max_before_abs_cp,
+            allow_mixed_engine_evals=args.allow_mixed_engine_evals,
+        )
     pool_count = len(candidates)
     candidates = select_candidates(
         candidates=candidates,
@@ -1321,6 +1574,10 @@ def main() -> int:
         movetimes_ms=movetimes_ms,
         clock_ms=clock_ms,
         engine_options=engine_options,
+        rescore_binary=args.rescore_binary,
+        rescore_depth=args.rescore_depth,
+        rescore_movetime_ms=args.rescore_movetime_ms,
+        keep_rescore_hash=args.keep_rescore_hash,
         oracle_binary=args.oracle_binary,
         oracle_depth=args.oracle_depth,
         oracle_multipv=args.oracle_multipv,

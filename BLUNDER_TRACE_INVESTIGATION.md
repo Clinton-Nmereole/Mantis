@@ -3536,3 +3536,62 @@ Summary: the guarded SF2400 extraction skipped all `403` Mantis moves with
 mixed-engine adjacent evals and produced `0` candidates.  The explicit mixed
 override reproduced the diagnostic candidates.  A Mantis-vs-Mantis self-play
 PGN still produced the expected same-engine candidates.
+
+## Accepted: Source-Rescored Blunder Extraction
+
+The external Stockfish-limited smoke PGNs exposed a measurement problem: PGN
+comments are not a reliable source of Mantis-perspective before/after evals
+when different engines annotate alternating moves, and some future gauntlets may
+not contain usable comments at all.
+
+Tooling change: `blunder_trace.py` now supports `--rescore-binary`. In this
+mode the tool ignores adjacent PGN eval comments and searches the position
+before and after every Mantis move with the requested UCI engine. Scores are
+converted into Mantis perspective by using the before-position side-to-move
+score directly and negating the after-position score, since the opponent is then
+to move. Terminal positions are handled directly from python-chess outcomes.
+
+The rescoring path:
+
+- disables `OwnBook` for the rescoring engine before applying explicit options;
+- clears hash between rescored positions by default, with
+  `--keep-rescore-hash` available for diagnostics;
+- supports fixed-depth and movetime rescoring through `--rescore-depth` and
+  `--rescore-movetime-ms`;
+- writes `eval_source`, `eval_search`, and before/after node/time metadata to
+  CSV reports.
+
+The shared `stats_benchmark.parse_stats()` parser now also preserves UCI mate
+scores as large centipawn equivalents so rescored reports do not silently drop
+mate-only searches.
+
+Smoke command:
+
+```sh
+python3 blunder_trace.py \
+  --pgn /tmp/mantis_vs_sf2400_smoke.pgn \
+  --rescore-binary ./mantis \
+  --rescore-depth 2 \
+  --rescore-timeout 10 \
+  --threshold-cp 150 \
+  --mode worst \
+  --limit 3 \
+  --report /tmp/mantis_sf2400_rescore_smoke.md \
+  --csv /tmp/mantis_sf2400_rescore_smoke.csv
+```
+
+Result:
+
+```text
+Games parsed: 8
+Games with Mantis: 8
+Mantis moves rescored: 407
+Mantis moves missing rescored evals: 0
+Mantis eval drops: 306
+Candidates at threshold: 21
+Candidates searched in this report: 3
+```
+
+This shallow depth-2 run is only a plumbing validation, not a tactical oracle.
+The important outcome is that future external gauntlets can now be mined for
+Mantis move-loss candidates without trusting mixed-engine PGN comments.
