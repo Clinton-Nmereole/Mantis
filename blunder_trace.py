@@ -101,8 +101,19 @@ class UCIEngine:
             if marker in line:
                 return "".join(output)
 
-    def search_go_output(self, moves_so_far: list[str], go_command: str, timeout: float) -> tuple[dict[str, int | str], float, str]:
-        if moves_so_far:
+    def search_go_output(
+        self,
+        moves_so_far: list[str],
+        go_command: str,
+        timeout: float,
+        start_fen: str | None = None,
+    ) -> tuple[dict[str, int | str], float, str]:
+        if start_fen:
+            command = "position fen " + start_fen
+            if moves_so_far:
+                command += " moves " + " ".join(moves_so_far)
+            self.send(command)
+        elif moves_so_far:
             self.send("position startpos moves " + " ".join(moves_so_far))
         else:
             self.send("position startpos")
@@ -120,26 +131,50 @@ class UCIEngine:
         wall_ms = (time.perf_counter() - start) * 1000.0
         return stats_benchmark.parse_stats(output), wall_ms, output
 
-    def search_go(self, moves_so_far: list[str], go_command: str, timeout: float) -> tuple[dict[str, int | str], float]:
-        stats, wall_ms, _output = self.search_go_output(moves_so_far, go_command, timeout)
+    def search_go(
+        self,
+        moves_so_far: list[str],
+        go_command: str,
+        timeout: float,
+        start_fen: str | None = None,
+    ) -> tuple[dict[str, int | str], float]:
+        stats, wall_ms, _output = self.search_go_output(moves_so_far, go_command, timeout, start_fen)
         return stats, wall_ms
 
-    def search_depth(self, moves_so_far: list[str], depth: int, timeout: float) -> tuple[dict[str, int | str], float]:
-        return self.search_go(moves_so_far, f"go depth {depth}", timeout)
+    def search_depth(
+        self,
+        moves_so_far: list[str],
+        depth: int,
+        timeout: float,
+        start_fen: str | None = None,
+    ) -> tuple[dict[str, int | str], float]:
+        return self.search_go(moves_so_far, f"go depth {depth}", timeout, start_fen)
 
     def search_depth_fen(self, fen: str, depth: int, timeout: float) -> tuple[dict[str, int | str], float]:
         stats, wall_ms, _output = self.search_go_output_fen(fen, f"go depth {depth}", timeout)
         return stats, wall_ms
 
-    def search_movetime(self, moves_so_far: list[str], movetime_ms: int, timeout: float) -> tuple[dict[str, int | str], float]:
-        return self.search_go(moves_so_far, f"go movetime {movetime_ms}", timeout)
+    def search_movetime(
+        self,
+        moves_so_far: list[str],
+        movetime_ms: int,
+        timeout: float,
+        start_fen: str | None = None,
+    ) -> tuple[dict[str, int | str], float]:
+        return self.search_go(moves_so_far, f"go movetime {movetime_ms}", timeout, start_fen)
 
     def search_movetime_fen(self, fen: str, movetime_ms: int, timeout: float) -> tuple[dict[str, int | str], float]:
         stats, wall_ms, _output = self.search_go_output_fen(fen, f"go movetime {movetime_ms}", timeout)
         return stats, wall_ms
 
-    def search_clock(self, moves_so_far: list[str], clock_ms: dict[str, int], timeout: float) -> tuple[dict[str, int | str], float]:
-        return self.search_go(moves_so_far, stats_benchmark.clock_go_command(clock_ms), timeout)
+    def search_clock(
+        self,
+        moves_so_far: list[str],
+        clock_ms: dict[str, int],
+        timeout: float,
+        start_fen: str | None = None,
+    ) -> tuple[dict[str, int | str], float]:
+        return self.search_go(moves_so_far, stats_benchmark.clock_go_command(clock_ms), timeout, start_fen)
 
     def search_clock_fen(self, fen: str, clock_ms: dict[str, int], timeout: float) -> tuple[dict[str, int | str], float]:
         stats, wall_ms, _output = self.search_go_output_fen(fen, stats_benchmark.clock_go_command(clock_ms), timeout)
@@ -541,6 +576,7 @@ def run_stateful_replay(
     movetimes_ms: list[int],
     clock_ms: dict[str, int] | None,
     warm_depth: int,
+    warm_movetime_ms: int,
     clear_hash_before_target: bool,
     target_from_fen: bool,
     timeout: float,
@@ -561,7 +597,7 @@ def run_stateful_replay(
     specs.extend(("movetime", None, movetime_ms, None) for movetime_ms in movetimes_ms)
     if clock_ms is not None:
         specs.append(("clock", None, None, clock_ms))
-    contexts: dict[tuple[int, int], tuple[list[str], list[list[str]]]] = {}
+    contexts: dict[tuple[int, int], tuple[str | None, list[str], list[list[str]]]] = {}
 
     with pgn_path.open("r", encoding="utf-8", errors="replace") as handle:
         game_index = 0
@@ -577,6 +613,7 @@ def run_stateful_replay(
             if mantis_color is None:
                 continue
 
+            start_fen = game.headers.get("FEN", "").strip() or None
             board = game.board()
             moves_so_far: list[str] = []
             warm_positions: list[list[str]] = []
@@ -590,7 +627,11 @@ def run_stateful_replay(
                 target = targets.get((game_index, ply))
 
                 if mover_color == mantis_color and target is not None:
-                    contexts[(game_index, ply)] = (moves_so_far.copy(), [position.copy() for position in warm_positions])
+                    contexts[(game_index, ply)] = (
+                        start_fen,
+                        moves_so_far.copy(),
+                        [position.copy() for position in warm_positions],
+                    )
                 if mover_color == mantis_color:
                     warm_positions.append(moves_so_far.copy())
 
@@ -603,7 +644,7 @@ def run_stateful_replay(
         context = contexts.get((candidate.game_index, candidate.ply))
         if context is None:
             continue
-        moves_so_far, warm_positions = context
+        start_fen, moves_so_far, warm_positions = context
         for _spec_type, depth, movetime_ms, clock_limit in specs:
             done += 1
             if depth is not None:
@@ -625,7 +666,10 @@ def run_stateful_replay(
                 warmed = 0
                 try:
                     for warm_moves in warm_positions:
-                        engine.search_depth(warm_moves, warm_depth, timeout)
+                        if warm_movetime_ms > 0:
+                            engine.search_movetime(warm_moves, warm_movetime_ms, timeout, start_fen)
+                        else:
+                            engine.search_depth(warm_moves, warm_depth, timeout, start_fen)
                         warmed += 1
                     if clear_hash_before_target:
                         engine.new_game()
@@ -633,26 +677,34 @@ def run_stateful_replay(
                         if target_from_fen:
                             stats, wall_ms = engine.search_depth_fen(candidate.fen, depth, timeout)
                         else:
-                            stats, wall_ms = engine.search_depth(moves_so_far, depth, timeout)
+                            stats, wall_ms = engine.search_depth(moves_so_far, depth, timeout, start_fen)
                     else:
                         if movetime_ms is not None:
                             if target_from_fen:
                                 stats, wall_ms = engine.search_movetime_fen(candidate.fen, movetime_ms, timeout)
                             else:
-                                stats, wall_ms = engine.search_movetime(moves_so_far, movetime_ms, timeout)
+                                stats, wall_ms = engine.search_movetime(moves_so_far, movetime_ms, timeout, start_fen)
                         else:
                             assert clock_limit is not None
                             if target_from_fen:
                                 stats, wall_ms = engine.search_clock_fen(candidate.fen, clock_limit, timeout)
                             else:
-                                stats, wall_ms = engine.search_clock(moves_so_far, clock_limit, timeout)
-                    mode_suffix = f"{'-clearhash' if clear_hash_before_target else ''}{'-fen' if target_from_fen else ''}"
+                                stats, wall_ms = engine.search_clock(moves_so_far, clock_limit, timeout, start_fen)
+                    mode_suffix = (
+                        f"{'-clearhash' if clear_hash_before_target else ''}"
+                        f"{'-fen' if target_from_fen else ''}"
+                        f"{'-pgnfen' if start_fen and not target_from_fen else ''}"
+                    )
                     row = {
                         "depth": depth if depth is not None else stats.get("depth", ""),
                         "movetime_ms": movetime_ms if movetime_ms is not None else "",
                         "clock": stats_benchmark.clock_label(clock_limit) if clock_limit is not None else "",
                         "search_limit": search_label,
-                        "search_mode": f"stateful-warm{warm_depth}{mode_suffix}",
+                        "search_mode": (
+                            f"stateful-warm{warm_movetime_ms}ms{mode_suffix}"
+                            if warm_movetime_ms > 0
+                            else f"stateful-warm{warm_depth}{mode_suffix}"
+                        ),
                         "bestmove": stats.get("bestmove", "?"),
                         "score_cp": stats.get("score_cp", ""),
                         "nodes": stats.get("nodes", ""),
@@ -665,13 +717,21 @@ def run_stateful_replay(
                         "warm_positions": warmed,
                     }
                 except subprocess.TimeoutExpired:
-                    mode_suffix = f"{'-clearhash' if clear_hash_before_target else ''}{'-fen' if target_from_fen else ''}"
+                    mode_suffix = (
+                        f"{'-clearhash' if clear_hash_before_target else ''}"
+                        f"{'-fen' if target_from_fen else ''}"
+                        f"{'-pgnfen' if start_fen and not target_from_fen else ''}"
+                    )
                     row = {
                         "depth": depth if depth is not None else "",
                         "movetime_ms": movetime_ms if movetime_ms is not None else "",
                         "clock": stats_benchmark.clock_label(clock_limit) if clock_limit is not None else "",
                         "search_limit": search_label,
-                        "search_mode": f"stateful-warm{warm_depth}{mode_suffix}",
+                        "search_mode": (
+                            f"stateful-warm{warm_movetime_ms}ms{mode_suffix}"
+                            if warm_movetime_ms > 0
+                            else f"stateful-warm{warm_depth}{mode_suffix}"
+                        ),
                         "bestmove": "timeout",
                         "score_cp": "",
                         "nodes": "",
@@ -830,6 +890,7 @@ def render_markdown(
     collapse_after_cp: int,
     stateful_replay: bool,
     warm_depth: int,
+    warm_movetime_ms: int,
     clear_hash_before_target: bool,
     target_from_fen: bool,
     limit: int,
@@ -857,7 +918,10 @@ def render_markdown(
         out.write(f"Movetimes: `{movetime_label}`\n\n")
         out.write(f"Clock: `{clock_label}`\n\n")
     if stateful_replay:
-        out.write(f"Stateful replay: `enabled`, warm depth `{warm_depth}`\n\n")
+        if warm_movetime_ms > 0:
+            out.write(f"Stateful replay: `enabled`, warm movetime `{warm_movetime_ms}ms`\n\n")
+        else:
+            out.write(f"Stateful replay: `enabled`, warm depth `{warm_depth}`\n\n")
         if clear_hash_before_target:
             out.write("Stateful target hash: `cleared after warmup`\n\n")
         if target_from_fen:
@@ -1017,6 +1081,12 @@ def main() -> int:
     parser.add_argument("--stateful-replay", action="store_true", help="Replay prior Mantis searches in one engine process before target positions")
     parser.add_argument("--warm-depth", type=int, default=8, help="Depth used to warm stateful replay before target positions")
     parser.add_argument(
+        "--warm-movetime-ms",
+        type=int,
+        default=0,
+        help="Movetime used to warm stateful replay before target positions; overrides --warm-depth when positive",
+    )
+    parser.add_argument(
         "--clear-hash-before-target",
         action="store_true",
         help="In stateful replay, clear TT after warming prior searches and before the target search",
@@ -1047,6 +1117,10 @@ def main() -> int:
         parser.error("--oracle-depth must be positive")
     if args.oracle_multipv <= 0:
         parser.error("--oracle-multipv must be positive")
+    if args.warm_depth <= 0:
+        parser.error("--warm-depth must be positive")
+    if args.warm_movetime_ms < 0:
+        parser.error("--warm-movetime-ms must be non-negative")
 
     pgn_path = Path(args.pgn)
     if not pgn_path.exists():
@@ -1103,6 +1177,7 @@ def main() -> int:
             movetimes_ms=movetimes_ms,
             clock_ms=clock_ms,
             warm_depth=args.warm_depth,
+            warm_movetime_ms=args.warm_movetime_ms,
             clear_hash_before_target=args.clear_hash_before_target,
             target_from_fen=args.stateful_target_fen,
             timeout=args.timeout,
@@ -1137,6 +1212,7 @@ def main() -> int:
         collapse_after_cp=args.collapse_after_cp,
         stateful_replay=args.stateful_replay,
         warm_depth=args.warm_depth,
+        warm_movetime_ms=args.warm_movetime_ms,
         clear_hash_before_target=args.clear_hash_before_target,
         target_from_fen=args.stateful_target_fen,
         limit=args.limit,

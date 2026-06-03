@@ -2251,3 +2251,81 @@ but the final per-game summary and PGN remained ordered by round.
 Next: run a longer latest-binary self-play batch with `--pgn-out`, then use
 `blunder_trace.py --oracle-binary stockfish-debug/src/stockfish` on any fresh
 first-collapse candidates.
+
+## Accepted: FEN-Start Stateful Replay
+
+Fresh latest-vs-latest self-play with the new PGN exporter produced two
+worst-drop candidates from four 80ms games seeded by `2moves_v1.epd`. Neither
+passed the strict first-collapse filter, but worst-mode surfaced one serious
+endgame target:
+
+```text
+Round 2, ply 143
+FEN:    8/8/1KP5/8/3N4/4q2k/7p/8 w - - 9 74
+Played: b6b7
+Cold d8 best: c6c7
+Oracle best: b6a5
+Oracle played loss: mate
+Oracle cold d8 loss: 158 cp
+```
+
+The first stateful replay attempt returned the impossible move `d7d5`, which
+exposed a harness bug: PGNs generated from an opening FEN were replayed from
+`startpos` in the warmed path. Cold searches used each candidate FEN and were
+unaffected.
+
+Change:
+
+- `blunder_trace.py` stateful replay now carries the PGN `FEN` header into UCI
+  `position fen ... moves ...` commands for warmup and target searches.
+- stateful rows label this path with `-pgnfen`.
+- add `--warm-movetime-ms` so warmed replay can use the same timed budget that
+  generated a self-play PGN, instead of only fixed-depth warmup.
+
+Validation:
+
+```text
+python3 -m py_compile blunder_trace.py
+python3 blunder_trace.py \
+  --pgn /tmp/mantis_latest_selfplay_0603.pgn \
+  --mode worst \
+  --limit 4 \
+  --candidate-indexes 2 \
+  --binary ./mantis_timed_capture_verify \
+  --no-depths \
+  --movetimes-ms 80 250 \
+  --stateful-replay \
+  --warm-depth 8 \
+  --timeout 60 \
+  --report /tmp/mantis_latest_selfplay_0603_stateful_candidate2_fixed.md \
+  --csv /tmp/mantis_latest_selfplay_0603_stateful_candidate2_fixed.csv
+python3 blunder_trace.py \
+  --pgn /tmp/mantis_latest_selfplay_0603.pgn \
+  --mode worst \
+  --limit 4 \
+  --candidate-indexes 2 \
+  --binary ./mantis_timed_capture_verify \
+  --no-depths \
+  --movetimes-ms 80 250 \
+  --stateful-replay \
+  --warm-movetime-ms 80 \
+  --timeout 60 \
+  --report /tmp/mantis_latest_selfplay_0603_stateful_candidate2_warm80.md \
+  --csv /tmp/mantis_latest_selfplay_0603_stateful_candidate2_warm80.csv
+```
+
+Corrected result:
+
+```text
+stateful-warm8-pgnfen:
+  80ms  -> b6a6
+  250ms -> b6a6
+
+stateful-warm80ms-pgnfen:
+  80ms  -> b6c5
+  250ms -> b6a6
+```
+
+The original `b6b7` was not deterministic under replay, but the 80ms timed warm
+path still shifts away from the cold `b6a6` choice. This is a useful fresh
+timing-sensitive endgame target, not yet an accepted engine behavior change.
