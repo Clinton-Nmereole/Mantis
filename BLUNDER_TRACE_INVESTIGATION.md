@@ -1466,3 +1466,86 @@ oracle regressions: none
 Tactical regression, perft correctness, raw stats benchmark, and the three-move
 own-book smoke test passed. The raw-search benchmark remains at `473960` nodes.
 The latest practice-game binary from this pass is `./mantis_syzygy_qfrontier`.
+
+## Rejected: Narrow `c8c2` Root Flip Verification
+
+Target:
+
+```text
+FEN: 2r1kb1r/pp1b1ppp/1q2p3/3pP3/3n4/3BB3/PPN2PPP/R2Q1RK1 b k - 1 13
+Current clock move: c8c2
+Oracle move:        f8c5
+Oracle loss:        36 cp
+```
+
+Fresh diagnostics with `./mantis_syzygy_qfrontier` showed a root-search
+inconsistency rather than a simple static-eval miss:
+
+```text
+python3 timed_root_trace.py \
+  --pgn games/MantisVsViridthas0601.pgn \
+  --binary ./mantis_syzygy_qfrontier \
+  --target 4:26 \
+  --depths 15 \
+  --warm-depth 8 \
+  --multipv 8 \
+  --timeout 120 \
+  --report games/syzygy_qfrontier_c8c2_depth15_trace.md \
+  --csv games/syzygy_qfrontier_c8c2_depth15_trace.csv
+```
+
+Result:
+
+```text
+normal d15:  c8c2, score -1.45, nodes 1314643
+MultiPV d15: f8c5 rank 1 at -2.15; c8c2 rank 2 at -2.46
+```
+
+The normal root-debug trace shows depth 15 can enter fail-low or fail-high
+aspiration recovery with a clipped root seed and then flatten alternatives
+against the recovery window. A first prototype verified only the initial
+fail-high best against the re-search best from a pre-research TT snapshot:
+
+```text
+./mantis_failhigh_pair_verify
+```
+
+It repaired fixed-depth d15:
+
+```text
+c8c2 -> f8c5
+nodes 1314643 -> 2496287
+time  7874ms -> 14501ms
+```
+
+But the reproduced clock target rejected it:
+
+```text
+c8c2 -> c8c2
+depth 15 -> 13
+oracle_loss 36 -> 36
+```
+
+Restricting the fail-high pair verification to depth 15+ was inert on the
+clock target:
+
+```text
+./mantis_failhigh_pair_verify_d15
+c8c2 -> c8c2
+depth 15 -> 15
+oracle_loss 36 -> 36
+```
+
+A matching late fail-low suspect verification was also rejected:
+
+```text
+./mantis_faillow_suspect_verify_d15
+c8c2 -> c8c2
+depth 15 -> 14
+oracle_loss 36 -> 36
+```
+
+Conclusion: the `c8c2` mismatch is still a useful root-search target, but
+two-move fail-high verification and late fail-low suspect verification are not
+safe practical fixes. Keep `./mantis_syzygy_qfrontier` as the latest accepted
+practice-game binary.
