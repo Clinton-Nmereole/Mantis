@@ -54,6 +54,7 @@ import math
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, List, Tuple
 
 # ---------------------------------------------------------------------------
@@ -833,10 +834,11 @@ class GameResult:
     """Stores the result of a single self-play game."""
     result: str           # '1-0', '0-1', or '1/2-1/2'
     moves: List[str]      # List of UCI moves played
-    scores: List[int]     # Engine evaluation after each move (engine A perspective)
+    scores: List[Optional[int]]  # White-perspective eval after each ply
     reason: str           # Why the game ended
     white_engine: str     # Name of engine playing white
     black_engine: str     # Name of engine playing black
+    start_fen: Optional[str] = None
 
 
 def play_game(engine_a_path: str, engine_b_path: str,
@@ -876,7 +878,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
     try:
         board = MinimalBoard(opening_fen if opening_fen else "startpos")
         moves = []
-        scores = []
+        scores: List[Optional[int]] = []
         eval_history = []  # Track evals for adjudication
         clock_mode = (
             time_control.get('wtime') is not None and
@@ -894,6 +896,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
             for mv in opening_moves:
                 board.apply_uci_move(mv)
                 moves.append(mv)
+                scores.append(None)
 
         for move_number in range(max_moves):
             # Check if game is already over
@@ -975,16 +978,17 @@ def play_game(engine_a_path: str, engine_b_path: str,
                     white_engine=engine_a_path, black_engine=engine_b_path,
                 )
 
+            white_score = score
+            if white_score is not None and not is_white_turn:
+                white_score = -white_score
+
             moves.append(bestmove)
+            scores.append(white_score)
 
             # Track score from White's perspective
-            if score is not None:
-                if not is_white_turn:
-                    score = -score  # Flip to White's perspective
-                scores.append(score)
-
+            if white_score is not None:
                 # Adjudication: if eval is consistently extreme, end early
-                eval_history.append(score)
+                eval_history.append(white_score)
                 if len(eval_history) >= adjudicate_moves:
                     recent = eval_history[-adjudicate_moves:]
                     if all(e >= adjudicate_eval for e in recent):
@@ -1002,7 +1006,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
 
             if verbose:
                 side_str = "W" if is_white_turn else "B"
-                eval_str = f" cp {score}" if score is not None else ""
+                eval_str = f" cp {white_score}" if white_score is not None else ""
                 clock_str = ""
                 if clock_mode:
                     clock_str = f" clock W:{white_clock}ms B:{black_clock}ms"
@@ -1176,7 +1180,7 @@ def run_tournament(engine_a: str, engine_b: str,
     Returns:
         Dict with 'wins', 'losses', 'draws', 'win_pct', 'results', and 'sprt_status'.
     """
-    results = []
+    results: List[Tuple[int, GameResult]] = []
     stats = {'wins': 0, 'losses': 0, 'draws': 0}
     should_stop = False
     sprt_lock = threading.Lock()
@@ -1215,11 +1219,12 @@ def run_tournament(engine_a: str, engine_b: str,
             engine_b_options=black_options,
             verbose=verbose,
         )
+        result.start_fen = None if not opening_fen or opening_fen == "startpos" else opening_fen
         return game_idx, result
 
     def process_result(game_idx: int, result: GameResult):
         nonlocal should_stop
-        results.append(result)
+        results.append((game_idx, result))
         _update_stats(result, engine_a, stats, game_idx)
         total_done = stats['wins'] + stats['losses'] + stats['draws']
         win_pct = (stats['wins'] + 0.5 * stats['draws']) / total_done * 100 if total_done > 0 else 0
@@ -1265,7 +1270,7 @@ def run_tournament(engine_a: str, engine_b: str,
 
     total = stats['wins'] + stats['losses'] + stats['draws']
     stats['win_pct'] = (stats['wins'] + 0.5 * stats['draws']) / total * 100 if total > 0 else 0
-    stats['results'] = results
+    stats['results'] = [result for _, result in sorted(results, key=lambda item: item[0])]
     if sprt:
         status, _ = sprt.status()
         stats['sprt_status'] = status
@@ -1289,6 +1294,72 @@ def _update_stats(result: GameResult, engine_a: str, stats: dict, game_idx: int)
             stats['wins'] += 1
     else:
         stats['draws'] += 1
+
+
+def engine_display_name(path: str) -> str:
+    name = Path(path).name
+    return name if name else path
+
+
+def pgn_eval_comment(score_cp: Optional[int]) -> str:
+    if score_cp is None:
+        return ""
+    if score_cp >= 90_000:
+        return "[%eval #1]"
+    if score_cp <= -90_000:
+        return "[%eval #-1]"
+    return f"[%eval {score_cp / 100.0:+.2f}]"
+
+
+def write_pgn(results: List[GameResult], pgn_path: str) -> None:
+    try:
+        import chess
+        import chess.pgn
+    except ImportError as exc:
+        raise RuntimeError("PGN output requires python-chess") from exc
+
+    path = Path(pgn_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    date = time.strftime("%Y.%m.%d")
+
+    with path.open("w", encoding="utf-8") as handle:
+        for index, result in enumerate(results, start=1):
+            game = chess.pgn.Game()
+            game.headers["Event"] = "Mantis self-play"
+            game.headers["Site"] = "local"
+            game.headers["Date"] = date
+            game.headers["Round"] = str(index)
+            game.headers["White"] = engine_display_name(result.white_engine)
+            game.headers["Black"] = engine_display_name(result.black_engine)
+            game.headers["Result"] = result.result
+            game.headers["Termination"] = result.reason
+
+            if result.start_fen:
+                game.headers["SetUp"] = "1"
+                game.headers["FEN"] = result.start_fen
+                board = chess.Board(result.start_fen)
+            else:
+                board = chess.Board()
+
+            node = game
+            for ply, uci in enumerate(result.moves):
+                try:
+                    move = chess.Move.from_uci(uci)
+                except ValueError:
+                    node.comment = f"{node.comment} invalid move {uci}".strip()
+                    break
+                if move not in board.legal_moves:
+                    node.comment = f"{node.comment} illegal move {uci}".strip()
+                    break
+
+                node = node.add_variation(move)
+                if ply < len(result.scores):
+                    comment = pgn_eval_comment(result.scores[ply])
+                    if comment:
+                        node.comment = comment
+                board.push(move)
+
+            print(game, file=handle, end="\n\n")
 
 
 # ---------------------------------------------------------------------------
@@ -1407,6 +1478,8 @@ Examples:
                         help="Fixed depth search")
     parser.add_argument("--openings", default=None,
                         help="File with opening FENs (one per line)")
+    parser.add_argument("--pgn-out", default=None,
+                        help="Optional PGN output path with eval comments")
     parser.add_argument("--max-moves", type=int, default=400,
                         help="Max plies before forced draw (default: 400)")
     parser.add_argument("--adjudicate-eval", type=int, default=800,
@@ -1558,6 +1631,10 @@ Examples:
     if 'sprt_status' in stats:
         print(f"SPRT:   {stats['sprt_status']} (LLR={stats['sprt_llr']:.3f})")
     print()
+
+    if args.pgn_out:
+        write_pgn(stats['results'], args.pgn_out)
+        print(f"Wrote PGN: {args.pgn_out}")
 
     # Per-game summary
     if not args.verbose and len(stats['results']) <= 20:

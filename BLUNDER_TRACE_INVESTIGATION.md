@@ -2199,3 +2199,55 @@ Next: gather fresh practice-game evidence with the latest binary. Without the
 Viridithas executable available locally, use either a new supplied opponent
 binary or mine current self-play/Stockfish-assessed games for a fresh
 first-collapse/oracle set before making another behavior change.
+
+## Accepted: Self-Play PGN Export
+
+Change: add `--pgn-out` to `selfplay.py` so local practice games can feed
+directly into `blunder_trace.py`. The exporter writes standard PGN with
+White-perspective `[%eval ...]` comments after each searched ply. Opening-book
+moves without an engine score keep score alignment with empty comments.
+
+The self-play result list is now sorted by game index before final summaries
+and PGN export. This matters under concurrency, where games can finish out of
+order while color assignment still depends on the original game number.
+
+Validation:
+
+```text
+python3 -m py_compile selfplay.py
+python3 selfplay.py \
+  --engine-a ./mantis_timed_capture_verify \
+  --engine-b ./mantis_timed_capture_verify \
+  --games 2 \
+  --depth 1 \
+  --max-moves 6 \
+  --concurrency 1 \
+  --option OwnBook=false \
+  --pgn-out /tmp/mantis_selfplay_smoke.pgn
+python3 blunder_trace.py \
+  --pgn /tmp/mantis_selfplay_smoke.pgn \
+  --mode first-collapse \
+  --limit 2 \
+  --binary ./mantis_timed_capture_verify \
+  --depths 1 \
+  --timeout 20 \
+  --report /tmp/mantis_selfplay_smoke_blunders.md \
+  --csv /tmp/mantis_selfplay_smoke_blunders.csv
+python3 selfplay.py \
+  --engine-a ./mantis_timed_capture_verify \
+  --engine-b ./mantis_timed_capture_verify \
+  --games 2 \
+  --depth 1 \
+  --max-moves 4 \
+  --concurrency 2 \
+  --option OwnBook=false \
+  --pgn-out /tmp/mantis_selfplay_concurrent_smoke.pgn
+```
+
+The extractor parsed both generated games and found no artificial collapse in
+the tiny depth-1 smoke. In the concurrent smoke, game 2 finished before game 1,
+but the final per-game summary and PGN remained ordered by round.
+
+Next: run a longer latest-binary self-play batch with `--pgn-out`, then use
+`blunder_trace.py --oracle-binary stockfish-debug/src/stockfish` on any fresh
+first-collapse candidates.
