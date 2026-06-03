@@ -516,13 +516,21 @@ order_qcaptures_from_capture_generator :: proc(
 	b: ^board.Board,
 	move_list: ^moves.MoveList,
 	q_see_scores: ^[256]int,
+	include_quiet_promotions: bool = false,
 ) -> int {
-	board.generate_capture_moves(b, move_list)
+	if include_quiet_promotions {
+		board.generate_quiescence_moves(b, move_list)
+	} else {
+		board.generate_capture_moves(b, move_list)
+	}
 
 	scores: [256]int
 	has_duplicate_scores := false
 	for i in 0 ..< move_list.count {
-		see_score := see_capture(b, move_list.moves[i])
+		see_score := SEE_SCORE_UNKNOWN
+		if move_list.moves[i].capture {
+			see_score = see_capture(b, move_list.moves[i])
+		}
 		q_see_scores[i] = see_score
 		scores[i] = score_move(st, move_list.moves[i], b, moves.Move{}, 0, moves.Move{}, see_score)
 
@@ -533,9 +541,24 @@ order_qcaptures_from_capture_generator :: proc(
 		}
 	}
 
-	if has_duplicate_scores {
+	if include_quiet_promotions && has_duplicate_scores {
 		// The full exchange sort is not stable: high-scoring quiets can
 		// indirectly reorder equal-scored captures, so ties need fallback.
+		// Quiet promotions are already high-scoring tactical qsearch moves;
+		// keep the compact ordering when they are present.
+		has_quiet_promotion := false
+		for i in 0 ..< move_list.count {
+			if !move_list.moves[i].capture && move_list.moves[i].promoted != -1 {
+				has_quiet_promotion = true
+				break
+			}
+		}
+		if has_quiet_promotion {
+			has_duplicate_scores = false
+		}
+	}
+
+	if has_duplicate_scores {
 		capture_list := move_list^
 		capture_scores := scores
 		capture_see_scores := q_see_scores^
@@ -4768,7 +4791,7 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 		stat_add(&search_stats.moves_generated, u64(move_list.count))
 		sort_moves(st, &move_list, b, see_scores = &q_see_scores)
 	} else {
-		generated := order_qcaptures_from_capture_generator(st, b, &move_list, &q_see_scores)
+		generated := order_qcaptures_from_capture_generator(st, b, &move_list, &q_see_scores, true)
 		stat_add(&search_stats.movegen_calls)
 		stat_add(&search_stats.moves_generated, u64(generated))
 	}
@@ -4776,10 +4799,10 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 	legal_moves := 0
 
 	for i in 0 ..< move_list.count {
-		// In quiescence, only search captures unless we are in check.
+		// In quiescence, search captures and promotions unless we are in check.
 		// When in check, we must search all legal moves (including non-captures)
 		// because the king must escape check.
-		if !in_check && !move_list.moves[i].capture {
+		if !in_check && !move_list.moves[i].capture && move_list.moves[i].promoted == -1 {
 			continue
 		}
 

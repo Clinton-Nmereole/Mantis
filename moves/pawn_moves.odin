@@ -516,6 +516,40 @@ append_pawn_capture_move :: proc(move_list: ^MoveList, source, target: int, prom
 	}
 }
 
+append_pawn_quiet_promotion_moves :: proc(move_list: ^MoveList, source, target: int) {
+	append_move(move_list, Move{source, target, constants.PAWN, constants.QUEEN, false, false, false, false})
+	append_move(move_list, Move{source, target, constants.PAWN, constants.ROOK, false, false, false, false})
+	append_move(move_list, Move{source, target, constants.PAWN, constants.BISHOP, false, false, false, false})
+	append_move(move_list, Move{source, target, constants.PAWN, constants.KNIGHT, false, false, false, false})
+}
+
+get_pawn_quiet_promotions :: proc(
+	side: int,
+	pawns: u64,
+	occupancy: u64,
+	move_list: ^MoveList,
+) {
+	empty := ~occupancy
+	bitboard: u64
+	source, target: int
+
+	if side == constants.WHITE {
+		bitboard = ((pawns << 8) & empty) & constants.RANK_8
+		for bitboard != 0 {
+			target = utils.pop_lsb(&bitboard)
+			source = target - 8
+			append_pawn_quiet_promotion_moves(move_list, source, target)
+		}
+	} else {
+		bitboard = ((pawns >> 8) & empty) & constants.RANK_1
+		for bitboard != 0 {
+			target = utils.pop_lsb(&bitboard)
+			source = target + 8
+			append_pawn_quiet_promotion_moves(move_list, source, target)
+		}
+	}
+}
+
 get_pawn_captures :: proc(
 	side: int,
 	pawns: u64,

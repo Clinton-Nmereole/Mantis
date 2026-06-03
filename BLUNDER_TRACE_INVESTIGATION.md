@@ -3204,3 +3204,83 @@ python3 compare_candidates.py --baseline ./mantis_current_probe \
 Summary: tactical regression passed; randomized perft passed; the short stats
 benchmark was normal; depth-6 comparison over 44 positions had `0/44` bestmove
 changes, `0` node changes, and `0 cp` score delta.
+
+## Accepted: Quiet Promotions In Quiescence
+
+Change: quiescence now searches non-capturing pawn promotions as tactical moves
+alongside captures.  The compact quiescence move generator still avoids full
+quiet move generation; it appends only quiet promotions after the existing
+capture generator.  Capture-only qsearch parity diagnostics keep using the
+capture generator path.
+
+Motivation: a promotion on an empty square is tactically forcing but was
+invisible at quiet qsearch frontiers.  The candidate-6 queen endgame remains a
+deeper evaluation/search problem, but the patch closes this general horizon
+hole and improves the cold 80ms result for that target:
+
+```text
+FEN: 8/p4R1p/1p4pk/7q/7Q/7P/P2rp1P1/7K w - - 3 44
+
+Before:
+  cold 80ms:  h4e7, oracle rank 5, +5.94 cp loss
+After:
+  cold 80ms:  h4f4, oracle rank 1, +0.00 cp loss
+
+Stateful 80/250 and cold 250 still choose h4e7, so this is not accepted as a
+full fix for candidate 6.
+```
+
+Gates:
+
+```text
+odin build . -out:mantis_qsearch_quiet_promos -o:speed
+python3 tactical_regression.py --binary ./mantis_qsearch_quiet_promos
+python3 correctness_test.py --binary ./mantis_qsearch_quiet_promos \
+  --random 20 --seed 0603
+python3 stats_benchmark.py --binary ./mantis_qsearch_quiet_promos \
+  --limit 3 --timeout 90
+python3 compare_candidates.py --baseline ./mantis_current_next \
+  --candidate ./mantis_qsearch_quiet_promos --depths 6 --timeout 60 \
+  --csv /tmp/mantis_qsearch_quiet_promos_depth6_compare.csv
+python3 compare_candidates.py --baseline ./mantis_current_next \
+  --candidate ./mantis_qsearch_quiet_promos --movetimes 80 250 \
+  --timeout 60 --oracle-csv /tmp/mantis_current_meta40_0603_blunders.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv /tmp/mantis_qsearch_quiet_promos_movetime_compare.csv
+python3 compare_candidates.py --baseline ./mantis_current_next \
+  --candidate ./mantis_qsearch_quiet_promos --movetimes 80 250 \
+  --keep-hash --timeout 60 \
+  --oracle-csv /tmp/mantis_current_meta40_0603_blunders.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv /tmp/mantis_qsearch_quiet_promos_movetime_keephash_compare.csv
+python3 blunder_trace.py --pgn /tmp/mantis_current_meta40_0603.pgn \
+  --mode worst --limit 12 \
+  --binary ./mantis_qsearch_quiet_promos --no-depths \
+  --movetimes-ms 80 250 --stateful-replay --warm-movetime-ms 80 \
+  --stateful-target-fen --timeout 60 \
+  --oracle-binary ./stockfish-debug/src/stockfish --oracle-depth 12 \
+  --oracle-multipv 6 --oracle-timeout 60 \
+  --report /tmp/mantis_qsearch_quiet_promos_top12.md \
+  --csv /tmp/mantis_qsearch_quiet_promos_top12.csv
+./mantis_qsearch_quiet_promos validate-qcaptures 3 \
+  '8/p4R1p/1p4pk/7q/7Q/7P/P2rp1P1/7K w - - 3 44'
+python3 selfplay.py --engine-a ./mantis_qsearch_quiet_promos \
+  --engine-b ./mantis_current_next --games 30 --movetime 80 \
+  --concurrency 4 \
+  --pgn-out /tmp/mantis_qsearch_quiet_promos_vs_current_30x80.pgn
+```
+
+Summary:
+
+```text
+Build: passed.
+Tactical regression: passed.
+Randomized perft: passed.
+Stats benchmark: normal.
+Depth-6 compare: 0/44 bestmove changes, +0.06% nodes, 0 cp score delta.
+Movetime compare: no known oracle regressions; unknown flips only.
+Keep-hash movetime compare: 0/44 flips at 80ms; 1/44 unknown flip at 250ms.
+Top-12 replay: candidate 12 remains fixed; candidate 6 cold 80ms fixed only.
+QCapture parity: OK, 9311 positions at depth 3 on candidate-6 FEN.
+Self-play 30x80ms: candidate scored 19W-9L-2D with no illegal/invalid PGN markers.
+```

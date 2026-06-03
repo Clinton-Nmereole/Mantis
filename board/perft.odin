@@ -399,6 +399,16 @@ generate_capture_moves :: proc(board: ^Board, move_list: ^moves.MoveList) {
 	moves.get_queen_captures(queens, occupancy, enemy_pieces, move_list)
 }
 
+generate_quiescence_moves :: proc(board: ^Board, move_list: ^moves.MoveList) {
+	generate_capture_moves(board, move_list)
+
+	side := board.side
+	occupancy := board.occupancies[constants.BOTH]
+	pawns :=
+		(side == constants.WHITE) ? board.bitboards[constants.PAWN] : board.bitboards[constants.PAWN + 6]
+	moves.get_pawn_quiet_promotions(side, pawns, occupancy, move_list)
+}
+
 // Perft Function
 perft :: proc(b: ^Board, depth: int) -> u64 {
 	if depth == 0 {return 1}
