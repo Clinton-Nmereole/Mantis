@@ -3316,3 +3316,62 @@ Depth 6 compare: 6/44 bestmove changes, +5.23% nodes, +7.72% time,
 
 Conclusion: searching quiet checks at shallow qsearch ply adds broad churn and
 cost without solving the target.  Keep quiet promotions only.
+
+## Rejected: Fail-Low Beta Retry Without TT Cutoffs
+
+Target: latest smoke candidate 1, where cold 250ms kept the depth-6 root seed
+`c8b7` even though depth 8 and the oracle prefer `d7c5`/`f7f5`.
+
+```text
+FEN:
+r1b2rk1/3nbp1p/p2p2p1/1p1Pp3/1q2P3/3BB1NP/2Q2PP1/R3R1K1 b - - 1 25
+
+Baseline:
+  cold d7:    c8b7
+  cold d8:    f7f5
+  cold 250ms: c8b7
+
+Pipeline diagnosis at depth 7:
+  root seed c8b7 failed low exactly at alpha.
+  fail-low research returned the old beta bound for c8b7.
+  isolated full scores preferred d7c5.
+```
+
+Experiments:
+
+```text
+1. Change the fail-low beta retry guard from strict > alpha to the equality
+   case as well.
+2. Run that retry with TT cutoffs disabled so beta-bound TT entries from the
+   fail-low pass cannot re-mask later root moves.
+3. Scope the retry to depth >= 7 after the broad version changed depth-6
+   decisions.
+```
+
+The depth-gated version fixed the target:
+
+```text
+candidate cold d7:    d7c5, oracle rank 1
+candidate cold d8:    d7c5, oracle rank 1
+candidate cold 250ms: d7c5, oracle rank 1
+```
+
+Rejected because the broader gates were not safe enough:
+
+```text
+Broad equality/no-TT retry:
+  depth 6 compare: 4/44 bestmove changes, +9.51% nodes, 156 cp abs delta.
+  depth 7 compare: 3/44 bestmove changes, +6.40% nodes, 193 cp abs delta.
+
+Depth-gated retry:
+  depth 6 compare: 0/44 bestmove changes, 0 node changes, 0 cp delta.
+  depth 7 compare: 0/44 bestmove changes, +2.36% nodes, 30 cp abs delta.
+  movetime 80ms compare: 1/44 bestmove change with -359 cp score delta.
+  movetime 250ms compare: lost depth on multiple rows and crashed at
+  search/search.odin static_eval_stack[ply] with ply == 64.
+```
+
+Conclusion: the root aspiration diagnosis is useful, but disabling TT cutoffs
+inside the beta retry is too invasive under time controls.  Future attempts
+should avoid changing completed-depth behavior first, and should include an
+explicit ply guard if any retry path can extend the tree near `MAX_PLY`.
