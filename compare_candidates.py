@@ -281,6 +281,140 @@ def print_limit_summary(mode: str, limit_value: Any, rows: list[dict[str, Any]])
             )
 
 
+def oracle_loss(row: dict[str, Any], key: str) -> int | None:
+    return parse_optional_int(row.get(key))
+
+
+def grouped_by_limit(rows: list[dict[str, Any]]) -> list[tuple[tuple[str, str], list[dict[str, Any]]]]:
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    order: list[tuple[str, str]] = []
+    for row in rows:
+        key = (str(row.get("mode", "")), str(row.get("limit", "")))
+        if key not in groups:
+            order.append(key)
+            groups[key] = []
+        groups[key].append(row)
+    return [(key, groups[key]) for key in order]
+
+
+def oracle_row_text(row: dict[str, Any], *, loss_key: str = "cand_oracle_loss_cp") -> str:
+    index = int_stat(row, "index")
+    rank = row.get("cand_oracle_rank", "")
+    loss = row.get(loss_key, "")
+    return (
+        f"  {index:2d}: loss={loss} rank={rank} "
+        f"{row.get('base_best', '?')}->{row.get('cand_best', '?')} "
+        f"fen={row.get('fen', '')}"
+    )
+
+
+def print_oracle_summary(rows: list[dict[str, Any]], row_limit: int = 5) -> None:
+    print("\n=== Oracle Summary ===", flush=True)
+    if not rows:
+        print("positions:        0", flush=True)
+        return
+
+    for (mode, limit_value), limit_rows in grouped_by_limit(rows):
+        label = f"{mode} {limit_value}".strip()
+        known_rows = [
+            row for row in limit_rows
+            if oracle_loss(row, "base_oracle_loss_cp") is not None
+            and oracle_loss(row, "cand_oracle_loss_cp") is not None
+        ]
+        unknown_changed = [
+            row for row in limit_rows
+            if int_stat(row, "bestmove_changed") != 0 and row not in known_rows
+        ]
+
+        print(f"\n--- {label} ---", flush=True)
+        print(f"positions:        {len(limit_rows)}", flush=True)
+        print(f"known_oracle:     {len(known_rows)}", flush=True)
+        if not known_rows:
+            if unknown_changed:
+                print(f"unknown_changed:  {len(unknown_changed)}", flush=True)
+            continue
+
+        improved = [
+            row for row in known_rows
+            if oracle_loss(row, "cand_oracle_loss_cp") < oracle_loss(row, "base_oracle_loss_cp")
+        ]
+        regressed = [
+            row for row in known_rows
+            if oracle_loss(row, "cand_oracle_loss_cp") > oracle_loss(row, "base_oracle_loss_cp")
+        ]
+        unchanged = len(known_rows) - len(improved) - len(regressed)
+        remaining = [
+            row for row in known_rows
+            if oracle_loss(row, "cand_oracle_loss_cp") > 0
+        ]
+        fixed = [
+            row for row in known_rows
+            if oracle_loss(row, "base_oracle_loss_cp") > 0
+            and oracle_loss(row, "cand_oracle_loss_cp") == 0
+        ]
+        base_total = sum(oracle_loss(row, "base_oracle_loss_cp") or 0 for row in known_rows)
+        cand_total = sum(oracle_loss(row, "cand_oracle_loss_cp") or 0 for row in known_rows)
+
+        print(f"improved:         {len(improved)}", flush=True)
+        print(f"fixed:            {len(fixed)}", flush=True)
+        print(f"regressed:        {len(regressed)}", flush=True)
+        print(f"unchanged:        {unchanged}", flush=True)
+        print(f"remaining_loss:   {len(remaining)}", flush=True)
+        print(f"loss_cp_total:    {base_total} -> {cand_total} ({cand_total - base_total:+d})", flush=True)
+        if unknown_changed:
+            print(f"unknown_changed:  {len(unknown_changed)}", flush=True)
+
+        if row_limit <= 0:
+            continue
+
+        if improved:
+            print("top_improvements:", flush=True)
+            for row in sorted(
+                improved,
+                key=lambda item: (
+                    (oracle_loss(item, "base_oracle_loss_cp") or 0)
+                    - (oracle_loss(item, "cand_oracle_loss_cp") or 0)
+                ),
+                reverse=True,
+            )[:row_limit]:
+                base_loss = oracle_loss(row, "base_oracle_loss_cp") or 0
+                cand_loss = oracle_loss(row, "cand_oracle_loss_cp") or 0
+                print(f"{oracle_row_text(row)} delta={cand_loss - base_loss:+d}", flush=True)
+
+        if regressed:
+            print("top_regressions:", flush=True)
+            for row in sorted(
+                regressed,
+                key=lambda item: (
+                    (oracle_loss(item, "cand_oracle_loss_cp") or 0)
+                    - (oracle_loss(item, "base_oracle_loss_cp") or 0)
+                ),
+                reverse=True,
+            )[:row_limit]:
+                base_loss = oracle_loss(row, "base_oracle_loss_cp") or 0
+                cand_loss = oracle_loss(row, "cand_oracle_loss_cp") or 0
+                print(f"{oracle_row_text(row)} delta={cand_loss - base_loss:+d}", flush=True)
+
+        if remaining:
+            print("remaining_targets:", flush=True)
+            for row in sorted(
+                remaining,
+                key=lambda item: oracle_loss(item, "cand_oracle_loss_cp") or 0,
+                reverse=True,
+            )[:row_limit]:
+                print(oracle_row_text(row), flush=True)
+
+        if unknown_changed:
+            print("unknown_changed_moves:", flush=True)
+            for row in unknown_changed[:row_limit]:
+                print(
+                    f"  {int_stat(row, 'index'):2d}: "
+                    f"{row.get('base_best', '?')}->{row.get('cand_best', '?')} "
+                    f"fen={row.get('fen', '')}",
+                    flush=True,
+                )
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     keys: list[str] = []
     for row in rows:
@@ -336,6 +470,12 @@ def main() -> int:
         type=int,
         help="Exit nonzero if known candidate oracle loss exceeds known baseline loss by more than this many centipawns",
     )
+    parser.add_argument(
+        "--oracle-summary-limit",
+        type=int,
+        default=5,
+        help="Rows per oracle summary section when --oracle-csv is used; 0 suppresses row details",
+    )
     args = parser.parse_args()
     if args.depths and any(depth <= 0 for depth in args.depths):
         parser.error("--depths values must be positive")
@@ -355,6 +495,8 @@ def main() -> int:
         parser.error("--fail-on-depth-loss must be positive")
     if args.fail_on_oracle_loss_regression is not None and args.fail_on_oracle_loss_regression < 0:
         parser.error("--fail-on-oracle-loss-regression must be non-negative")
+    if args.oracle_summary_limit < 0:
+        parser.error("--oracle-summary-limit must be non-negative")
 
     try:
         fens = load_fens(args)
@@ -426,6 +568,9 @@ def main() -> int:
     if args.csv:
         write_csv(args.csv, all_rows)
         print(f"\nWrote CSV: {args.csv}", flush=True)
+
+    if args.oracle_csv:
+        print_oracle_summary(all_rows, args.oracle_summary_limit)
 
     if args.fail_on_score_delta is not None:
         score_violations = [

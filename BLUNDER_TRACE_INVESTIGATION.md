@@ -2118,3 +2118,84 @@ Next: re-run or gather fresh practice games against Viridithas using the latest
 binary, then extract a new first-collapse/oracle set. The old `c8c2` target is
 now fixed under reproduced 3+2 clock conditions; the remaining known oracle
 mismatch is `d7e7` vs `g1f1` at about 21 cp.
+
+## Accepted: Oracle Target Reporting
+
+Follow-up diagnostic on the remaining endgame row:
+
+```text
+FEN: 8/3R1p2/6p1/1P2k3/1r1p2p1/6P1/5P2/6K1 w - - 7 52
+Mantis clock move: d7e7
+Oracle move:       g1f1
+Oracle loss:       21 cp
+```
+
+Root parity and pipeline traces both prefer `d7e7` over `g1f1` in Mantis's own
+full-window tree. This is not the same PVS/root recovery class as `c8c2`:
+
+```text
+trace-root-parity depth 16:
+  g1f1 full=-941
+  d7e7 full=-770
+
+trace-root-pipeline depth 16:
+  normal final_best=d7e7 final_score=-770
+  g1f1 verify=-941
+  d7e7 verify=-770
+```
+
+So the old first-collapse oracle suite is now mostly exhausted as a search-bug
+source. To make that visible, `compare_candidates.py --oracle-csv` now prints an
+oracle summary after CSV output, and `oracle_target_report.py` can summarize an
+existing compare CSV without rerunning engines.
+
+Command used:
+
+```sh
+python3 oracle_target_report.py \
+  games/timed_capture_verify_compare_first_collapse.csv \
+  --limit 8
+```
+
+Result:
+
+```text
+positions:      13
+known_oracle:   13
+improved:       1
+fixed:          1
+regressed:      0
+remaining_loss: 1
+loss_cp_total:  57 -> 21 (-36)
+
+top_improvements:
+  1: c8c2 -> f8c5, oracle loss 36 -> 0
+
+remaining_targets:
+  12: d7e7 -> d7e7, oracle loss 21
+```
+
+Validation:
+
+```text
+python3 -m py_compile compare_candidates.py oracle_target_report.py
+python3 compare_candidates.py \
+  --baseline ./mantis_timed_capture_verify \
+  --candidate ./mantis_timed_capture_verify \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --depths 1 \
+  --limit 2 \
+  --timeout 20 \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --oracle-summary-limit 2 \
+  --csv /tmp/mantis_compare_smoke.csv
+python3 oracle_target_report.py \
+  games/timed_capture_verify_depth8_compare.csv \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --limit 3
+```
+
+Next: gather fresh practice-game evidence with the latest binary. Without the
+Viridithas executable available locally, use either a new supplied opponent
+binary or mine current self-play/Stockfish-assessed games for a fresh
+first-collapse/oracle set before making another behavior change.
