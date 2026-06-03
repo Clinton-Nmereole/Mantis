@@ -2449,3 +2449,42 @@ a4a5 full=-2344, pvs=-2432, PVS_MISS
 This is a reproducible fast-movetime root-PVS miss, but the current clock path
 already searches past it and avoids `h2h3`. Treat it as a future movetime/root
 verification target, not yet an accepted engine patch.
+
+## Accepted: Snapshot Root-PVS Miss Diagnostics
+
+The round-8 `h2h3` target was rechecked with exact root-child snapshots.  A
+temporary root-child prune guard that skipped futility/LMP at `ply == 1` did
+not change the 80 ms or 250 ms move, and the exact snapshot variants showed the
+miss was not explained by TT cutoffs, LMR, futility, LMP, NMP, RFP, razoring, or
+probcut:
+
+```text
+g3f3 snapshot_full=-2432, snapshot_baseline=-2614, snapshot_no_all_prune_reduce=-2614
+a4a5 snapshot_full=-2344, snapshot_baseline=-2432, snapshot_no_all_prune_reduce=-2432
+```
+
+Adding an IIR debug toggle split the target:
+
+```text
+g3f3 snapshot_no_iir=-2432
+a4a5 snapshot_no_iir=-2993
+```
+
+So `a4a5` was largely PV-IIR optimism, while `g3f3` remained a full/null-window
+disagreement.  Replacing the existing PV Internal Iterative Reduction with true
+Internal Iterative Deepening was rejected: it did not fix the played `h2h3`
+move at 80 ms or 250 ms and failed the `Viridithas 2026-06-01: keep queen
+defense` tactical regression (`g8h8` instead of `h7g6`).
+
+Accepted change: `trace-root-child` and targeted `trace-root-parity` misses now
+include IIR-aware snapshot variants, making this class diagnosable without
+temporary source edits.
+
+Validation:
+
+```text
+odin build . -out:mantis_trace_iir_diag -o:speed
+python3 tactical_regression.py --binary ./mantis_trace_iir_diag
+python3 correctness_test.py --binary ./mantis_trace_iir_diag --random 20 --seed 0603
+python3 stats_benchmark.py --binary ./mantis_trace_iir_diag --limit 3 --timeout 90
+```

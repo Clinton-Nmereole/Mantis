@@ -145,6 +145,7 @@ SearchDebugOptions :: struct {
 	disable_rfp:        bool,
 	disable_razor:      bool,
 	disable_probcut:    bool,
+	disable_iir:        bool,
 }
 
 search_debug_options: SearchDebugOptions
@@ -1216,6 +1217,44 @@ trace_root_parity_scores :: proc(fen: string, depth: int, target_moves: []string
 		root_debug_print_pv(move, &full.pv)
 		fmt.println()
 		os.flush(os.stdout)
+
+		if is_target && note == "PVS_MISS" {
+			state: board.StateInfo
+			board.make_move_fast(&b, move, &state)
+			nnue.update_accumulators(&state, &b, move)
+			print_probe_variant("snapshot_full", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{}, true)
+			print_probe_variant("snapshot_baseline", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{})
+			print_probe_variant("snapshot_no_tt", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_tt_cutoffs = true})
+			print_probe_variant("snapshot_no_lmr", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_lmr = true})
+			print_probe_variant("snapshot_no_futility", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_futility = true})
+			print_probe_variant("snapshot_no_lmp", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_lmp = true})
+			print_probe_variant("snapshot_no_nmp", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_nmp = true})
+			print_probe_variant("snapshot_no_rfp", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_rfp = true})
+			print_probe_variant("snapshot_no_razor", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_razor = true})
+			print_probe_variant("snapshot_no_probcut", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_probcut = true})
+			print_probe_variant("snapshot_no_iir", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_iir = true}, true)
+			print_probe_variant(
+				"snapshot_no_all_prune_reduce",
+				&st,
+				&b,
+				tt_snapshot,
+				depth,
+				alpha_before,
+				SearchDebugOptions {
+					disable_tt_cutoffs = true,
+					disable_lmr        = true,
+					disable_futility   = true,
+					disable_lmp        = true,
+					disable_nmp        = true,
+					disable_rfp        = true,
+					disable_razor      = true,
+					disable_probcut    = true,
+					disable_iir        = true,
+				},
+			)
+			board.unmake_move(&b, &state)
+			restore_tt(tt_snapshot)
+		}
 
 		if full.score > best_score {
 			best_score = full.score
@@ -3584,6 +3623,7 @@ trace_root_child_diagnostics :: proc(fen: string, depth: int, target_move_text: 
 			print_probe_variant("no_rfp", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_rfp = true})
 			print_probe_variant("no_razor", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_razor = true})
 			print_probe_variant("no_probcut", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_probcut = true})
+			print_probe_variant("no_iir", &st, &b, tt_snapshot, depth, alpha_before, SearchDebugOptions{disable_iir = true}, true)
 			print_probe_variant(
 				"no_early_pruning",
 				&st,
@@ -3628,6 +3668,7 @@ trace_root_child_diagnostics :: proc(fen: string, depth: int, target_move_text: 
 					disable_rfp        = true,
 					disable_razor      = true,
 					disable_probcut    = true,
+					disable_iir        = true,
 				},
 			)
 			restore_tt(tt_snapshot)
@@ -4183,9 +4224,10 @@ negamax :: proc(
 	stat_add(&search_stats.moves_generated, u64(move_list.count))
 
 	// Internal Iterative Reduction (IIR)
-	// If we have no hash move and this is a PV node, reduce depth
-	// We don't know what's good here, so search shallower first
-	if moves.is_empty_move(tt_move) && is_pv && effective_depth >= params.iir_min_depth {
+	// If we have no hash move and this is a PV node, reduce depth.
+	// We do not know what is good here, so search shallower first.
+	if !search_debug_options.disable_iir &&
+	   moves.is_empty_move(tt_move) && is_pv && effective_depth >= params.iir_min_depth {
 		effective_depth -= 1
 	}
 
