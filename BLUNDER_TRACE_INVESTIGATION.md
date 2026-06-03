@@ -3442,3 +3442,48 @@ Summary: depth-6 comparison over 44 positions had `0/44` bestmove changes,
 options through `selfplay.py` against `2moves_v1.epd` with `0` illegal moves
 and `0` failed games; a stale-resume smoke skipped the incompatible old row
 and ran a fresh expanded candidate.
+
+## Accepted: Paired SPSA Tuning Mode
+
+Change: `nevergrad_tuner.py` now includes a dependency-free `--optimizer spsa`
+mode.  SPSA keeps the 30 UCI-exposed search parameters on a normalized
+`0..1` scale, creates plus/minus perturbation pairs around the current center,
+and evaluates the pair directly through `selfplay.py --option-a` and
+`--option-b`.  This gives the tuner a standard chess-engine optimization path
+without rewriting source files, rebuilding each candidate, or requiring
+Nevergrad to be installed.
+
+The tuner now also:
+
+- Stores current search defaults explicitly for SPSA startup.
+- Keeps optimizer-specific resume filtering, so random/Nevergrad/SPSA progress
+  rows are not mixed.
+- Uses `tuning_progress_spsa.json` as the default SPSA progress file.
+- Prints the selected progress file in the run banner.
+
+Verification:
+
+```text
+python3 -m py_compile nevergrad_tuner.py
+python3 nevergrad_tuner.py --help
+python3 nevergrad_tuner.py --engine ./mantis_uci_tune_surface \
+  --baseline ./mantis_uci_tune_surface --optimizer spsa --budget 1 \
+  --games 2 --movetime 20 --concurrency 1 --max-moves 20 \
+  --output /tmp/mantis_spsa_smoke_best_after_progress.json \
+  --resume /tmp/mantis_spsa_smoke_progress_after_progress.json --seed 11
+python3 nevergrad_tuner.py --engine ./mantis_uci_tune_surface \
+  --baseline ./mantis_uci_tune_surface --optimizer spsa --budget 2 \
+  --games 2 --movetime 20 --concurrency 1 --max-moves 20 \
+  --output /tmp/mantis_spsa_smoke_best_resume.json \
+  --resume /tmp/mantis_spsa_smoke_progress.json --seed 7
+python3 nevergrad_tuner.py --engine ./mantis_uci_tune_surface \
+  --baseline ./mantis_uci_tune_surface --optimizer random --budget 1 \
+  --games 2 --movetime 20 --concurrency 1 --max-moves 20 \
+  --output /tmp/mantis_random_regression_best.json \
+  --resume /tmp/mantis_random_regression_progress.json --seed 13
+```
+
+Summary: SPSA smoke passed all 30 plus/minus UCI options through self-play with
+`0` illegal moves and `0` failed games.  SPSA resume loaded the prior row and
+continued at iteration 2.  Random-mode regression still completed through the
+shared UCI option path.

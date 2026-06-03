@@ -2,8 +2,8 @@
 """
 nevergrad_tuner.py — Parameter Tuner for Mantis
 
-Uses Facebook's Nevergrad library, or a dependency-free random-search
-fallback, for derivative-free optimization of chess engine parameters.
+Uses Facebook's Nevergrad library, dependency-free random search, or paired
+SPSA for derivative-free optimization of chess engine parameters.
 
 Requirements:
     # Random-search fallback needs no extra packages.
@@ -12,6 +12,9 @@ Requirements:
     # Nevergrad mode:
     source venv/bin/activate
     python3 nevergrad_tuner.py --optimizer nevergrad --budget 50
+
+    # Dependency-free paired SPSA mode:
+    python3 nevergrad_tuner.py --optimizer spsa --budget 50
 
 Workflow:
     1. Define parameter ranges for UCI tuning options
@@ -30,6 +33,10 @@ Recommended usage:
     # Serious tuning overnight with Nevergrad installed
     python3 nevergrad_tuner.py --engine ./mantis \
         --optimizer nevergrad --budget 80 --games 15 --movetime 200
+
+    # Paired SPSA tuning through UCI options
+    python3 nevergrad_tuner.py --engine ./mantis \
+        --optimizer spsa --budget 80 --games 20 --movetime 200
 
     # Verify the best result afterward
     python3 selfplay.py --verify --engine-a ./mantis --engine-b ./mantis \
@@ -56,6 +63,7 @@ SELFPLAY_SCRIPT = "./selfplay.py"
 DEFAULT_ENGINE = "./mantis"
 BASELINE_ENGINE = "./mantis_baseline"
 RESULT_FILE = "tuning_progress_uci.json"
+SPSA_RESULT_FILE = "tuning_progress_spsa.json"
 BEST_PARAMS_FILE = "best_params_uci.json"
 DEFAULT_OPENINGS = "2moves_v1.epd"
 
@@ -94,6 +102,39 @@ PARAM_RANGES: Dict[str, Tuple[int, int]] = {
     "contempt":           (-100, 100),
 }
 
+PARAM_DEFAULTS: Dict[str, int] = {
+    "aspiration_window":   35,
+    "nmp_min_depth":       3,
+    "nmp_reduction_base":  2,
+    "nmp_reduction_div":   6,
+    "rfp_margin":          25,
+    "rfp_depth":           8,
+    "probcut_depth":       5,
+    "probcut_margin":      40,
+    "probcut_reduce":      4,
+    "iir_min_depth":       4,
+    "se_depth":            8,
+    "se_margin":           2,
+    "se_reduced_div":      2,
+    "lmr_min_depth":       3,
+    "lmr_improving_adj":   -1,
+    "lmr_history_good_adj": -1,
+    "lmr_history_bad_adj":  1,
+    "lmr_history_good_thresh": 2000,
+    "lmr_history_bad_thresh":  -2000,
+    "futility_margin":     65,
+    "futility_max_depth":  3,
+    "lmp_base":            2,
+    "lmp_div":             2,
+    "lmp_max_depth":       8,
+    "razor_margin":        80,
+    "razor_max_depth":     3,
+    "delta_pruning_margin": 250,
+    "see_prune_threshold":  -50,
+    "continuation_score_div": 12,
+    "contempt":            12,
+}
+
 PARAM_UCI_OPTIONS: Dict[str, str] = {
     "aspiration_window":   "AspirationWindow",
     "nmp_min_depth":       "NmpMinDepth",
@@ -127,6 +168,8 @@ PARAM_UCI_OPTIONS: Dict[str, str] = {
     "contempt":           "Contempt",
 }
 
+PARAM_NAMES = tuple(PARAM_RANGES.keys())
+
 # ---------------------------------------------------------------------------
 # FILE I/O
 # ---------------------------------------------------------------------------
@@ -157,13 +200,18 @@ def apply_params(content: str, params: Dict[str, int]) -> str:
     return content
 
 
-def params_to_uci_option_args(params: Dict[str, int]) -> List[str]:
-    """Convert snake_case tuning params into selfplay.py --option-a args."""
+def params_to_side_uci_option_args(params: Dict[str, int], side: str) -> List[str]:
+    """Convert snake_case tuning params into selfplay.py --option-{side} args."""
     args: List[str] = []
     for param, value in params.items():
         option_name = PARAM_UCI_OPTIONS[param]
-        args += ["--option-a", f"{option_name}={value}"]
+        args += [f"--option-{side}", f"{option_name}={value}"]
     return args
+
+
+def params_to_uci_option_args(params: Dict[str, int]) -> List[str]:
+    """Convert snake_case tuning params into selfplay.py --option-a args."""
+    return params_to_side_uci_option_args(params, "a")
 
 
 def random_candidate(rng: random.Random) -> Dict[str, int]:
@@ -171,6 +219,41 @@ def random_candidate(rng: random.Random) -> Dict[str, int]:
         name: rng.randint(lo, hi)
         for name, (lo, hi) in PARAM_RANGES.items()
     }
+
+
+def clamp_unit(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def clamp_param(name: str, value: int) -> int:
+    lo, hi = PARAM_RANGES[name]
+    return max(lo, min(hi, value))
+
+
+def param_to_unit(name: str, value: int) -> float:
+    lo, hi = PARAM_RANGES[name]
+    if hi == lo:
+        return 0.0
+    return clamp_unit((value - lo) / (hi - lo))
+
+
+def unit_to_param(name: str, value: float) -> int:
+    lo, hi = PARAM_RANGES[name]
+    return clamp_param(name, int(round(lo + clamp_unit(value) * (hi - lo))))
+
+
+def params_to_unit(params: Dict[str, int]) -> Dict[str, float]:
+    return {name: param_to_unit(name, params[name]) for name in PARAM_NAMES}
+
+
+def unit_to_params(theta: Dict[str, float]) -> Dict[str, int]:
+    return {name: unit_to_param(name, theta[name]) for name in PARAM_NAMES}
+
+
+def default_resume_file(optimizer_name: str) -> str:
+    if optimizer_name == "spsa":
+        return SPSA_RESULT_FILE
+    return RESULT_FILE
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +344,77 @@ def evaluate_params(params: Dict[str, int],
         return None
 
 
+def evaluate_param_pair(plus_params: Dict[str, int],
+                        minus_params: Dict[str, int],
+                        engine: str = DEFAULT_ENGINE,
+                        baseline: str = DEFAULT_ENGINE,
+                        games: int = 10,
+                        movetime: Optional[int] = 100,
+                        depth: Optional[int] = None,
+                        max_moves: Optional[int] = None,
+                        concurrency: int = 4,
+                        openings: Optional[str] = DEFAULT_OPENINGS) -> Optional[float]:
+    """
+    Run a paired SPSA match and return plus score as win percentage.
+    Engine A receives plus_params; engine B receives minus_params.
+    """
+    if not os.path.exists(engine):
+        print(f"[ERROR] Engine not found: {engine}")
+        return None
+
+    if not os.path.exists(baseline):
+        print(f"[ERROR] Baseline not found: {baseline}")
+        return None
+
+    cmd = [
+        sys.executable, SELFPLAY_SCRIPT,
+        "--engine-a", engine,
+        "--engine-b", baseline,
+        "--games", str(games),
+        "--concurrency", str(concurrency),
+    ]
+    if depth is not None:
+        cmd += ["--depth", str(depth)]
+    else:
+        cmd += ["--movetime", str(movetime or 100)]
+    if max_moves is not None:
+        cmd += ["--max-moves", str(max_moves)]
+    if openings and os.path.exists(openings):
+        cmd += ["--openings", openings]
+    cmd += params_to_side_uci_option_args(plus_params, "a")
+    cmd += params_to_side_uci_option_args(minus_params, "b")
+
+    print(f"[SPSA EVAL] {' '.join(cmd)}")
+    start = time.time()
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    elapsed = time.time() - start
+
+    if result.returncode != 0:
+        print(f"[SPSA EVAL FAILED] rc={result.returncode}")
+        return None
+
+    m = re.search(r"Win %:\s+([\d.]+)%", result.stdout)
+    if m:
+        win_pct = float(m.group(1))
+        illegal_count = result.stdout.count("(illegal move")
+        failed_count = result.stdout.count("failed:")
+        total_games = games
+        problem_rate = (illegal_count + failed_count) / total_games * 100 if total_games > 0 else 0
+        print(f"[SPSA OK] Plus Win %: {win_pct:.2f}  Illegal:{illegal_count} Failed:{failed_count}  ({elapsed:.1f}s)")
+        if problem_rate > 10:
+            print(f"[SPSA WARNING] Problem rate {problem_rate:.1f}% > 10%, treating as neutral")
+            return 50.0
+        return win_pct
+
+    print("[SPSA EVAL PARSE ERROR]")
+    return None
+
+
 def params_match_current_surface(params: object) -> bool:
     """Return True when saved params match the active tuning surface."""
     if not isinstance(params, dict):
@@ -282,17 +436,28 @@ def entry_matches_current_surface(entry: dict) -> bool:
     return params_match_current_surface(params) and params_match_current_surface(best_params)
 
 
-def load_history(resume_file: Optional[str]) -> List[dict]:
+def load_history(resume_file: Optional[str], optimizer: Optional[str] = None) -> List[dict]:
     if resume_file and os.path.exists(resume_file):
         with open(resume_file) as f:
             history = json.load(f)
         if not isinstance(history, list):
             print("[RESUME] Ignoring progress file with unexpected format")
             return []
-        filtered = [entry for entry in history if isinstance(entry, dict) and entry_matches_current_surface(entry)]
-        skipped = len(history) - len(filtered)
-        if skipped > 0:
-            print(f"[RESUME] Skipped {skipped} incompatible previous evaluations")
+        filtered = []
+        incompatible = 0
+        other_optimizer = 0
+        for entry in history:
+            if not isinstance(entry, dict) or not entry_matches_current_surface(entry):
+                incompatible += 1
+                continue
+            if optimizer is not None and entry.get("optimizer") != optimizer:
+                other_optimizer += 1
+                continue
+            filtered.append(entry)
+        if incompatible > 0:
+            print(f"[RESUME] Skipped {incompatible} incompatible previous evaluations")
+        if other_optimizer > 0:
+            print(f"[RESUME] Skipped {other_optimizer} evaluations from another optimizer")
         print(f"[RESUME] Loaded {len(filtered)} previous evaluations")
         return filtered
     return []
@@ -302,10 +467,10 @@ def best_from_history(history: List[dict]) -> Tuple[Dict[str, int], float]:
     best_score = -1.0
     best_params: Dict[str, int] = {}
     for entry in history:
-        score = float(entry.get("score", 0.0))
+        score = float(entry.get("best_score", entry.get("score", 0.0)))
         if score > best_score:
             best_score = score
-            best_params = dict(entry.get("params", {}))
+            best_params = dict(entry.get("best_params", entry.get("params", {})))
     return best_params, best_score
 
 
@@ -384,7 +549,7 @@ def run_nevergrad(budget: int,
     optimizer = ng.optimizers.NGOpt(parametrization=instrum, budget=budget)
 
     # Load progress if resuming
-    history = load_history(resume_file)
+    history = load_history(resume_file, optimizer="nevergrad")
     for entry in history:
         # Re-inject into optimizer.
         vals = [float(entry["params"][k]) for k in PARAM_RANGES.keys()]
@@ -466,7 +631,7 @@ def run_random_search(budget: int,
                       seed: int = 1) -> Tuple[Dict[str, int], float]:
     """Run dependency-free random search over the same parameter ranges."""
     rng = random.Random(seed)
-    history = load_history(resume_file)
+    history = load_history(resume_file, optimizer="random")
     best_params, best_score = best_from_history(history)
 
     for _ in range(len(history)):
@@ -517,6 +682,148 @@ def run_random_search(budget: int,
     return best_params, best_score
 
 
+def make_spsa_pair(theta: Dict[str, float],
+                   signs: Dict[str, int],
+                   ck: float) -> Tuple[Dict[str, int], Dict[str, int]]:
+    plus: Dict[str, int] = {}
+    minus: Dict[str, int] = {}
+    for name in PARAM_NAMES:
+        sign = signs[name]
+        plus_value = unit_to_param(name, theta[name] + sign * ck)
+        minus_value = unit_to_param(name, theta[name] - sign * ck)
+        if plus_value == minus_value:
+            lo, hi = PARAM_RANGES[name]
+            if sign > 0:
+                if plus_value < hi:
+                    plus_value += 1
+                elif minus_value > lo:
+                    minus_value -= 1
+            else:
+                if plus_value > lo:
+                    plus_value -= 1
+                elif minus_value < hi:
+                    minus_value += 1
+        plus[name] = clamp_param(name, plus_value)
+        minus[name] = clamp_param(name, minus_value)
+    return plus, minus
+
+
+def theta_from_history(history: List[dict]) -> Dict[str, float]:
+    if history:
+        last = history[-1]
+        theta = last.get("theta")
+        if isinstance(theta, dict) and set(theta.keys()) == set(PARAM_NAMES):
+            return {name: clamp_unit(float(theta[name])) for name in PARAM_NAMES}
+        params = last.get("params")
+        if params_match_current_surface(params):
+            return params_to_unit(params)
+    return params_to_unit(PARAM_DEFAULTS)
+
+
+def run_spsa(budget: int,
+             engine: str,
+             baseline: str,
+             games_per_eval: int = 10,
+             movetime: Optional[int] = 100,
+             depth: Optional[int] = None,
+             max_moves: Optional[int] = None,
+             concurrency: int = 4,
+             openings: Optional[str] = DEFAULT_OPENINGS,
+             resume_file: Optional[str] = None,
+             seed: int = 1,
+             a: float = 0.08,
+             c: float = 0.10,
+             alpha: float = 0.602,
+             gamma: float = 0.101,
+             stability: Optional[float] = None) -> Tuple[Dict[str, int], float]:
+    """Run dependency-free paired SPSA over normalized UCI parameters."""
+    if a <= 0.0:
+        raise ValueError("SPSA learning-rate scale must be positive")
+    if c <= 0.0:
+        raise ValueError("SPSA perturbation scale must be positive")
+    if alpha <= 0.0 or gamma <= 0.0:
+        raise ValueError("SPSA decay exponents must be positive")
+
+    rng = random.Random(seed)
+    history = load_history(resume_file, optimizer="spsa")
+    theta = theta_from_history(history)
+    best_params, best_score = best_from_history(history)
+    if not best_params:
+        best_params = unit_to_params(theta)
+        best_score = 50.0
+
+    # Keep resumed runs deterministic by consuming the signs already used.
+    for _ in range(len(history)):
+        for _name in PARAM_NAMES:
+            rng.choice((-1, 1))
+
+    A = stability if stability is not None else max(1.0, budget * 0.10)
+
+    for iteration in range(len(history), budget):
+        k = iteration + 1
+        ak = a / ((k + A) ** alpha)
+        ck = c / (k ** gamma)
+        signs = {name: rng.choice((-1, 1)) for name in PARAM_NAMES}
+        plus_params, minus_params = make_spsa_pair(theta, signs, ck)
+
+        print(f"\n{'='*60}")
+        print(f"SPSA ITERATION {iteration + 1} / {budget}")
+        print(f"{'='*60}")
+        print(f"  ak={ak:.6f} ck={ck:.6f}")
+        print(f"  Center: {unit_to_params(theta)}")
+        print(f"  Plus:   {plus_params}")
+        print(f"  Minus:  {minus_params}")
+
+        score = evaluate_param_pair(
+            plus_params,
+            minus_params,
+            engine=engine,
+            baseline=baseline,
+            games=games_per_eval,
+            movetime=movetime,
+            depth=depth,
+            max_moves=max_moves,
+            concurrency=concurrency,
+            openings=openings,
+        )
+        if score is None:
+            score = 50.0
+
+        if score > best_score:
+            best_score = score
+            best_params = dict(plus_params)
+            print(f"  *** NEW BEST PAIR SIDE: plus {score:.2f}% ***")
+        if 100.0 - score > best_score:
+            best_score = 100.0 - score
+            best_params = dict(minus_params)
+            print(f"  *** NEW BEST PAIR SIDE: minus {100.0 - score:.2f}% ***")
+
+        score_delta = (score - 50.0) / 50.0
+        denom = max(1.0e-9, 2.0 * ck)
+        for name in PARAM_NAMES:
+            theta[name] = clamp_unit(theta[name] + ak * score_delta * signs[name] / denom)
+
+        current_params = unit_to_params(theta)
+        history.append({
+            "iteration": iteration + 1,
+            "params": current_params,
+            "score": score,
+            "score_delta": score_delta,
+            "best_score": best_score,
+            "best_params": dict(best_params),
+            "plus_params": plus_params,
+            "minus_params": minus_params,
+            "theta": theta.copy(),
+            "optimizer": "spsa",
+            "ak": ak,
+            "ck": ck,
+        })
+        save_history(resume_file, history)
+        print(f"  Updated center: {current_params}")
+
+    return unit_to_params(theta), best_score
+
+
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
@@ -535,12 +842,16 @@ Examples:
   python3 nevergrad_tuner.py --engine ./mantis \\
       --optimizer nevergrad --budget 80 --games 15 --movetime 200
 
+  # Dependency-free paired SPSA tuning
+  python3 nevergrad_tuner.py --engine ./mantis \\
+      --optimizer spsa --budget 80 --games 20 --movetime 200
+
   # Resume interrupted run
   python3 nevergrad_tuner.py --engine ./mantis --budget 50 --resume tuning_progress_uci.json
         """,
     )
 
-    parser.add_argument("--optimizer", choices=["auto", "nevergrad", "random"], default="auto",
+    parser.add_argument("--optimizer", choices=["auto", "nevergrad", "random", "spsa"], default="auto",
                         help="Optimizer to use; auto falls back to random if nevergrad is missing")
     parser.add_argument("--engine", default=DEFAULT_ENGINE,
                         help=f"Candidate engine binary (default: {DEFAULT_ENGINE})")
@@ -566,6 +877,16 @@ Examples:
                         help="Legacy mode: edit search/tuning.odin and rebuild each candidate")
     parser.add_argument("--seed", type=int, default=1,
                         help="Random-search seed (default: 1)")
+    parser.add_argument("--spsa-a", type=float, default=0.08,
+                        help="SPSA normalized learning-rate scale (default: 0.08)")
+    parser.add_argument("--spsa-c", type=float, default=0.10,
+                        help="SPSA normalized perturbation scale (default: 0.10)")
+    parser.add_argument("--spsa-alpha", type=float, default=0.602,
+                        help="SPSA learning-rate decay exponent (default: 0.602)")
+    parser.add_argument("--spsa-gamma", type=float, default=0.101,
+                        help="SPSA perturbation decay exponent (default: 0.101)")
+    parser.add_argument("--spsa-stability", type=float, default=None,
+                        help="SPSA stability constant A; default is 10%% of budget")
     parser.add_argument("--resume", default=None,
                         help="Resume from progress JSON file")
     parser.add_argument("--output", default=BEST_PARAMS_FILE,
@@ -587,6 +908,18 @@ Examples:
         parser.error("--movetime must be at least 1")
     if args.max_moves is not None and args.max_moves < 1:
         parser.error("--max-moves must be at least 1")
+    if args.optimizer == "spsa" and args.source_edit:
+        parser.error("--optimizer spsa requires UCI option mode; omit --source-edit")
+    if args.spsa_a <= 0.0:
+        parser.error("--spsa-a must be positive")
+    if args.spsa_c <= 0.0:
+        parser.error("--spsa-c must be positive")
+    if args.spsa_alpha <= 0.0:
+        parser.error("--spsa-alpha must be positive")
+    if args.spsa_gamma <= 0.0:
+        parser.error("--spsa-gamma must be positive")
+    if args.spsa_stability is not None and args.spsa_stability < 0.0:
+        parser.error("--spsa-stability must be non-negative")
 
     use_uci_options = not args.source_edit
     baseline = args.baseline or (BASELINE_ENGINE if args.source_edit else args.engine)
@@ -630,11 +963,38 @@ Examples:
     print(f"Concurrency: {args.concurrency}")
     if openings:
         print(f"Openings: {openings}")
+    if optimizer_name == "spsa":
+        stability_display = args.spsa_stability if args.spsa_stability is not None else max(1.0, args.budget * 0.10)
+        print(
+            f"SPSA schedule: a={args.spsa_a} c={args.spsa_c} "
+            f"alpha={args.spsa_alpha} gamma={args.spsa_gamma} A={stability_display}"
+        )
+    resume_file = args.resume or default_resume_file(optimizer_name)
+    print(f"Progress file: {resume_file}")
     print(f"Parameters: {list(PARAM_RANGES.keys())}")
     print()
 
     try:
-        if optimizer_name == "nevergrad":
+        if optimizer_name == "spsa":
+            best_params, best_score = run_spsa(
+                budget=args.budget,
+                engine=engine,
+                baseline=baseline,
+                games_per_eval=args.games,
+                movetime=movetime,
+                depth=args.depth,
+                max_moves=args.max_moves,
+                concurrency=args.concurrency,
+                openings=openings,
+                resume_file=resume_file,
+                seed=args.seed,
+                a=args.spsa_a,
+                c=args.spsa_c,
+                alpha=args.spsa_alpha,
+                gamma=args.spsa_gamma,
+                stability=args.spsa_stability,
+            )
+        elif optimizer_name == "nevergrad":
             best_params, best_score = run_nevergrad(
                 budget=args.budget,
                 engine=engine,
@@ -646,7 +1006,7 @@ Examples:
                 max_moves=args.max_moves,
                 concurrency=args.concurrency,
                 openings=openings,
-                resume_file=args.resume or RESULT_FILE,
+                resume_file=resume_file,
                 use_uci_options=use_uci_options,
             )
         else:
@@ -661,7 +1021,7 @@ Examples:
                 max_moves=args.max_moves,
                 concurrency=args.concurrency,
                 openings=openings,
-                resume_file=args.resume or RESULT_FILE,
+                resume_file=resume_file,
                 use_uci_options=use_uci_options,
                 seed=args.seed,
             )
@@ -678,8 +1038,12 @@ Examples:
     print("=" * 60)
     print("TUNING COMPLETE")
     print("=" * 60)
-    print(f"Best score: {best_score:.2f}%")
-    print(f"Best parameters:")
+    if optimizer_name == "spsa":
+        print(f"Best pair-side score seen: {best_score:.2f}%")
+        print("Final center parameters:")
+    else:
+        print(f"Best score: {best_score:.2f}%")
+        print("Best parameters:")
     for k, v in best_params.items():
         print(f"  {k:25s} = {v}")
     print()

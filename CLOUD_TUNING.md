@@ -60,15 +60,15 @@ cd Mantis
 # Build engine once; candidate params are passed through UCI options
 ./build_safe.sh
 
-# Setup Python environment (Nevergrad optional; tuner falls back to random search)
+# Setup Python environment.  SPSA mode needs no third-party optimizer package.
 python3 -m venv venv
 source venv/bin/activate
-pip install nevergrad
+# Optional: pip install nevergrad
 
 # Start tuning with 100 evals (takes ~8 hours on 8 cores)
 python3 nevergrad_tuner.py \
   --engine ./mantis \
-  --optimizer auto \
+  --optimizer spsa \
   --budget 100 \
   --games 20 \
   --movetime 200 \
@@ -219,6 +219,7 @@ python3 nevergrad_tuner.py --engine ./mantis --budget 30 --games 10 --movetime 1
 # Run 100 evaluations with more games per eval
 python3 nevergrad_tuner.py \
   --engine ./mantis \
+  --optimizer spsa \
   --budget 100 \
   --games 20 \
   --movetime 200 \

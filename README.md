@@ -148,6 +148,13 @@ self-play tuning without recompiling:
 | SeePruneThreshold | -50 | -300 to 0 |
 | ContinuationScoreDiv | 12 | 1-64 |
 
+For dependency-free paired SPSA tuning, build a current engine binary and run:
+
+```bash
+python3 nevergrad_tuner.py --engine ./mantis --optimizer spsa \
+  --budget 80 --games 20 --movetime 200 --concurrency 4
+```
+
 ## Testing
 
 ### Fixed Depth Search
