@@ -3215,19 +3215,21 @@ capture generator path.
 
 Motivation: a promotion on an empty square is tactically forcing but was
 invisible at quiet qsearch frontiers.  The candidate-6 queen endgame remains a
-deeper evaluation/search problem, but the patch closes this general horizon
-hole and improves the cold 80ms result for that target:
+deeper evaluation/search problem; this patch closes the general horizon hole
+without being accepted as a candidate-6 fix.
 
 ```text
 FEN: 8/p4R1p/1p4pk/7q/7Q/7P/P2rp1P1/7K w - - 3 44
+```
 
-Before:
-  cold 80ms:  h4e7, oracle rank 5, +5.94 cp loss
-After:
-  cold 80ms:  h4f4, oracle rank 1, +0.00 cp loss
+The top-12 replay initially showed a cold 80ms `h4f4` result, but repeated
+direct and blunder-trace probes on the accepted binary returned `h4e7`.
+Stateful 80/250 and cold 250 also choose `h4e7`, so this target is still open:
 
-Stateful 80/250 and cold 250 still choose h4e7, so this is not accepted as a
-full fix for candidate 6.
+```text
+Repeated direct cold 80ms after the commit: 5/5 h4e7, depth 6, 15492 nodes.
+Blunder trace cold repeat: h4e7, +2.88, rank 5.
+Stateful clear-hash after warm-up: h4e7.
 ```
 
 Gates:
@@ -3280,7 +3282,37 @@ Stats benchmark: normal.
 Depth-6 compare: 0/44 bestmove changes, +0.06% nodes, 0 cp score delta.
 Movetime compare: no known oracle regressions; unknown flips only.
 Keep-hash movetime compare: 0/44 flips at 80ms; 1/44 unknown flip at 250ms.
-Top-12 replay: candidate 12 remains fixed; candidate 6 cold 80ms fixed only.
+Top-12 replay: candidate 12 remains fixed; candidate 6 still open after repeats.
 QCapture parity: OK, 9311 positions at depth 3 on candidate-6 FEN.
 Self-play 30x80ms: candidate scored 19W-9L-2D with no illegal/invalid PGN markers.
 ```
+
+## Rejected: Quiet Checks In Quiescence
+
+Trial: generate all quiet moves for shallow non-check qsearch nodes, search only
+quiet non-promotion moves that give check after make, and disable delta pruning
+while that quiet-check window is active.
+
+Result: rejected.  It did not fix candidate 6 and it disturbed fixed-depth
+behavior enough to be a poor trade.
+
+```text
+Candidate 6 FEN:
+8/p4R1p/1p4pk/7q/7Q/7P/P2rp1P1/7K w - - 3 44
+
+Quiet-check qsearch:
+  cold 80ms:      h4e7, +2.48, rank 5, +5.94 loss
+  cold 250ms:     h4e7, +2.48, rank 5, +5.94 loss
+  stateful 80ms:  h4e7, +5.24, rank 5
+  stateful 250ms: h4e7, +2.00, rank 5
+```
+
+Fixed-depth comparison against the accepted quiet-promotion binary:
+
+```text
+Depth 6 compare: 6/44 bestmove changes, +5.23% nodes, +7.72% time,
+180 cp total absolute score delta, 37 cp max score delta.
+```
+
+Conclusion: searching quiet checks at shallow qsearch ply adds broad churn and
+cost without solving the target.  Keep quiet promotions only.
