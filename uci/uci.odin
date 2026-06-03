@@ -136,7 +136,15 @@ uci_loop :: proc() {
 			fmt.println("option name SyzygyPath type string default <empty>")
 			fmt.println("option name SyzygyProbeLimit type spin default 7 min 0 max 7")
 			fmt.println("option name Threads type spin default 1 min 1 max 512")
-			fmt.println("option name Contempt type spin default 24 min -100 max 100")
+			fmt.println("option name Contempt type spin default 12 min -100 max 100")
+			fmt.println("option name NmpReductionBase type spin default 2 min 0 max 4")
+			fmt.println("option name NmpReductionDiv type spin default 6 min 3 max 10")
+			fmt.println("option name RfpMargin type spin default 25 min 10 max 150")
+			fmt.println("option name RfpDepth type spin default 8 min 5 max 10")
+			fmt.println("option name LmrMinDepth type spin default 3 min 2 max 5")
+			fmt.println("option name FutilityMargin type spin default 65 min 30 max 400")
+			fmt.println("option name LmpBase type spin default 2 min 1 max 4")
+			fmt.println("option name LmpDiv type spin default 2 min 1 max 4")
 			fmt.println("option name SearchStats type check default false")
 			fmt.println("option name RootDebugTrace type check default false")
 			fmt.println("option name StagedMovePicker type check default false")
@@ -592,6 +600,13 @@ run_benchmark :: proc(command: string) {
 
 // Parse 'setoption' command
 // setoption name EvalFile value <path>
+set_spin_option :: proc(value: string, min_value, max_value: int, target: ^int) {
+	val, ok := strconv.parse_int(value)
+	if ok && val >= min_value && val <= max_value {
+		target^ = val
+	}
+}
+
 parse_setoption :: proc(command: string) {
 	parts := strings.split(command, " ")
 	defer delete(parts)
@@ -693,10 +708,23 @@ parse_setoption :: proc(command: string) {
 				search.use_staged_move_picker = false
 			}
 		} else if name == "Contempt" {
-			val, ok := strconv.parse_int(parts[4])
-			if ok && val >= -100 && val <= 100 {
-				search.params.contempt = val
-			}
+			set_spin_option(parts[4], -100, 100, &search.params.contempt)
+		} else if name == "NmpReductionBase" {
+			set_spin_option(parts[4], 0, 4, &search.params.nmp_reduction_base)
+		} else if name == "NmpReductionDiv" {
+			set_spin_option(parts[4], 3, 10, &search.params.nmp_reduction_div)
+		} else if name == "RfpMargin" {
+			set_spin_option(parts[4], 10, 150, &search.params.rfp_margin)
+		} else if name == "RfpDepth" {
+			set_spin_option(parts[4], 5, 10, &search.params.rfp_depth)
+		} else if name == "LmrMinDepth" {
+			set_spin_option(parts[4], 2, 5, &search.params.lmr_min_depth)
+		} else if name == "FutilityMargin" {
+			set_spin_option(parts[4], 30, 400, &search.params.futility_margin)
+		} else if name == "LmpBase" {
+			set_spin_option(parts[4], 1, 4, &search.params.lmp_base)
+		} else if name == "LmpDiv" {
+			set_spin_option(parts[4], 1, 4, &search.params.lmp_div)
 		} else if name == "SyzygyPath" {
 			// Reconstruct path (may contain spaces)
 			path_parts := parts[4:]

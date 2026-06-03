@@ -34,6 +34,10 @@ Usage:
     # Compare two engine binaries
     python3 selfplay.py --games 20 --engine-a ./mantis_new --engine-b ./mantis_old
 
+    # Compare one UCI-tuned candidate against default parameters
+    python3 selfplay.py --engine-a ./mantis --engine-b ./mantis \
+        --option-a RfpMargin=35 --option-a FutilityMargin=80
+
 Output:
     Prints W-L-D statistics and win percentage after all games complete.
 """
@@ -650,9 +654,11 @@ class Engine:
     output without blocking on select/pipe buffering issues.
     """
 
-    def __init__(self, path: str, name: str = "Engine"):
+    def __init__(self, path: str, name: str = "Engine",
+                 options: Optional[List[Tuple[str, str]]] = None):
         self.path = path
         self.name = name
+        self.options = options or []
         self.process = None
         self._output_queue = []
         self._queue_lock = threading.Lock()
@@ -675,6 +681,8 @@ class Engine:
 
         self._send("uci")
         self._wait_for("uciok", timeout=10.0)
+        for option_name, option_value in self.options:
+            self._send(f"setoption name {option_name} value {option_value}")
         self._send("isready")
         self._wait_for("readyok", timeout=10.0)
 
@@ -836,6 +844,8 @@ def play_game(engine_a_path: str, engine_b_path: str,
               adjudicate_eval: int = 800, adjudicate_moves: int = 5,
               opening_moves: Optional[List[str]] = None,
               opening_fen: Optional[str] = None,
+              engine_a_options: Optional[List[Tuple[str, str]]] = None,
+              engine_b_options: Optional[List[Tuple[str, str]]] = None,
               verbose: bool = False) -> GameResult:
     """
     Play a single game between two engine instances.
@@ -849,14 +859,16 @@ def play_game(engine_a_path: str, engine_b_path: str,
         adjudicate_moves: Number of consecutive moves eval must exceed threshold.
         opening_moves: List of UCI moves to start from (overrides opening_fen).
         opening_fen: FEN string for custom starting position.
+        engine_a_options: UCI options for the engine passed as engine_a_path.
+        engine_b_options: UCI options for the engine passed as engine_b_path.
         verbose: Print move-by-move output.
 
     Returns:
         GameResult with result, moves, scores, and termination reason.
     """
     # Initialize both engines
-    white = Engine(engine_a_path, "White")
-    black = Engine(engine_b_path, "Black")
+    white = Engine(engine_a_path, "White", engine_a_options)
+    black = Engine(engine_b_path, "Black", engine_b_options)
     white.start()
     black.start()
 
@@ -1073,10 +1085,27 @@ class SPRT:
 # TOURNAMENT / BATCH RUNNER
 # ---------------------------------------------------------------------------
 
+def parse_engine_options(raw_options: Optional[List[str]]) -> List[Tuple[str, str]]:
+    """Parse repeated Name=Value CLI options into UCI setoption pairs."""
+    parsed = []
+    for raw in raw_options or []:
+        if "=" not in raw:
+            raise ValueError(f"engine option must be Name=Value: {raw}")
+        name, value = raw.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name or not value:
+            raise ValueError(f"engine option must be Name=Value: {raw}")
+        parsed.append((name, value))
+    return parsed
+
+
 def run_tournament(engine_a: str, engine_b: str,
                    games: int, time_control: dict,
                    concurrency: int = 1,
                    openings: Optional[List[str]] = None,
+                   engine_a_options: Optional[List[Tuple[str, str]]] = None,
+                   engine_b_options: Optional[List[Tuple[str, str]]] = None,
                    verbose: bool = False,
                    sprt: Optional[SPRT] = None) -> dict:
     """
@@ -1089,6 +1118,8 @@ def run_tournament(engine_a: str, engine_b: str,
         time_control: Passed directly to play_game().
         concurrency: Number of games to run in parallel.
         openings: List of opening FENs or move sequences.
+        engine_a_options: UCI options applied whenever engine A is launched.
+        engine_b_options: UCI options applied whenever engine B is launched.
         verbose: Print per-game results.
         sprt: Optional SPRT object for early stopping.
 
@@ -1104,8 +1135,10 @@ def run_tournament(engine_a: str, engine_b: str,
         # Swap colors: even indices → A=White, odd → A=Black
         if game_idx % 2 == 0:
             white_path, black_path = engine_a, engine_b
+            white_options, black_options = engine_a_options, engine_b_options
         else:
             white_path, black_path = engine_b, engine_a
+            white_options, black_options = engine_b_options, engine_a_options
 
         # Pick an opening if provided
         opening = None
@@ -1125,6 +1158,8 @@ def run_tournament(engine_a: str, engine_b: str,
             time_control=time_control,
             opening_moves=opening_moves,
             opening_fen=opening_fen,
+            engine_a_options=white_options,
+            engine_b_options=black_options,
             verbose=verbose,
         )
         return game_idx, result
@@ -1295,6 +1330,12 @@ Examples:
                         help="Path to engine A (default: ./mantis)")
     parser.add_argument("--engine-b", default="./mantis",
                         help="Path to engine B (default: ./mantis)")
+    parser.add_argument("--option", action="append", default=[],
+                        help="UCI option Name=Value applied to both engines; repeatable")
+    parser.add_argument("--option-a", action="append", default=[],
+                        help="UCI option Name=Value applied only to engine A; repeatable")
+    parser.add_argument("--option-b", action="append", default=[],
+                        help="UCI option Name=Value applied only to engine B; repeatable")
     parser.add_argument("--games", type=int, default=10,
                         help="Number of games to play (default: 10)")
     parser.add_argument("--concurrency", type=int, default=1,
@@ -1343,6 +1384,13 @@ Examples:
                         help="SPRT false negative rate (default: 0.05)")
 
     args = parser.parse_args()
+
+    try:
+        common_options = parse_engine_options(args.option)
+        engine_a_options = common_options + parse_engine_options(args.option_a)
+        engine_b_options = common_options + parse_engine_options(args.option_b)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Initialize time control
     tc = {}
@@ -1422,6 +1470,10 @@ Examples:
     print("=" * 60)
     print(f"Engine A (White on even games): {args.engine_a}")
     print(f"Engine B (White on odd games):  {args.engine_b}")
+    if engine_a_options:
+        print(f"Engine A options: {engine_a_options}")
+    if engine_b_options:
+        print(f"Engine B options: {engine_b_options}")
     print(f"Games: {args.games} (max)")
     print(f"Time control: {tc}")
     print(f"Concurrency: {args.concurrency}")
@@ -1432,6 +1484,8 @@ Examples:
         games=args.games, time_control=tc,
         concurrency=args.concurrency,
         openings=openings,
+        engine_a_options=engine_a_options,
+        engine_b_options=engine_b_options,
         verbose=args.verbose,
         sprt=sprt_obj,
     )

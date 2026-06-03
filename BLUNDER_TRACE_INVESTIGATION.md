@@ -1800,3 +1800,50 @@ max_score_delta:  0 cp
 Tactical regression, perft correctness, raw stats benchmark, and own-book smoke
 passed. The raw-search benchmark remains at `473960` nodes. The latest accepted
 practice-game binary from this pass is `./mantis_uci_infinite_stop`.
+
+## Accepted: UCI Search Tuning Options
+
+Change: expose a focused SPSA/cutechess tuning surface for the eight
+high-leverage search parameters already targeted by the local Nevergrad tuner:
+`NmpReductionBase`, `NmpReductionDiv`, `RfpMargin`, `RfpDepth`,
+`LmrMinDepth`, `FutilityMargin`, `LmpBase`, and `LmpDiv`. The UCI-advertised
+`Contempt` default now matches the actual search default of `12`. The self-play
+harness can pass repeated `--option`, `--option-a`, and `--option-b`
+`Name=Value` assignments so tuned candidates can play default baselines without
+source edits or rebuilds per parameter value.
+
+Validation:
+
+```text
+odin build . -out:mantis_uci_tune_options -o:speed
+python3 -m py_compile selfplay.py
+python3 compare_candidates.py \
+  --baseline ./mantis_uci_infinite_stop \
+  --candidate ./mantis_uci_tune_options \
+  --depth 8 \
+  --timeout 60 \
+  --csv games/uci_tune_options_depth8_compare.csv
+python3 tactical_regression.py --binary ./mantis_uci_tune_options
+python3 correctness_test.py --binary ./mantis_uci_tune_options
+python3 stats_benchmark.py --binary ./mantis_uci_tune_options --timeout 90
+python3 stats_benchmark.py --binary ./mantis_uci_tune_options --own-book --limit 3 --timeout 30
+```
+
+Targeted option smokes confirmed that UCI advertises the new options, that
+`FutilityMargin=400` changes a depth-6 startpos node count (`8077 -> 8095`),
+and that `selfplay.py` applies separate A/B options while preserving color
+swaps.
+
+Fixed-depth depth-8 comparison stayed exact across all 44 benchmark FENs:
+
+```text
+positions:        44
+bestmove_changes: 0
+nodes:            1559564 -> 1559564 (+0.00%)
+abs_score_delta:  0 cp
+max_score_delta:  0 cp
+```
+
+Tactical regression, perft correctness, raw stats benchmark, and own-book smoke
+passed. The raw-search benchmark remains at `473960` nodes. The latest accepted
+practice-game binary from this pass is `./mantis_uci_tune_options`.

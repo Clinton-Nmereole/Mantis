@@ -98,10 +98,34 @@ go wtime 60000 btime 60000 winc 1000 binc 1000
 |--------|------|---------|-------|-------------|
 | Hash | spin | 64 | 1-1024 | Transposition table size (MB) |
 | EvalFile | string | nn-c0ae49f08b40.nnue | - | NNUE network file path |
+| OwnBook | check | true | - | Enable internal opening book |
+| BookFile | string | 2moves_v1.epd | - | Opening book EPD file |
 | Move Overhead | spin | 10 | 0-5000 | Network latency compensation (ms) |
 | MultiPV | spin | 1 | 1-500 | Number of principal variations |
 | Ponder | check | false | - | Enable pondering (background thinking) |
+| SyzygyPath | string | empty | - | Syzygy tablebase directory |
+| SyzygyProbeLimit | spin | 7 | 0-7 | Maximum tablebase pieces to probe |
 | Threads | spin | 1 | 1-512 | Number of search threads |
+| Contempt | spin | 12 | -100-100 | Root eval bias against draws |
+| SearchStats | check | false | - | Print detailed search counters |
+| RootDebugTrace | check | false | - | Print root search diagnostics |
+| StagedMovePicker | check | false | - | Enable staged move picker experiment |
+
+### UCI Tuning Options
+
+These options expose selected high-leverage search constants for SPSA,
+cutechess, and local self-play tuning without recompiling:
+
+| Option | Default | Range |
+|--------|---------|-------|
+| NmpReductionBase | 2 | 0-4 |
+| NmpReductionDiv | 6 | 3-10 |
+| RfpMargin | 25 | 10-150 |
+| RfpDepth | 8 | 5-10 |
+| LmrMinDepth | 3 | 2-5 |
+| FutilityMargin | 65 | 30-400 |
+| LmpBase | 2 | 1-4 |
+| LmpDiv | 2 | 1-4 |
 
 ## Testing
 
@@ -179,4 +203,3 @@ Mantis/
 ## Author 
 
 Built with Odin
-
