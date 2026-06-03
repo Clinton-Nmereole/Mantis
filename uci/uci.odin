@@ -139,7 +139,7 @@ uci_loop :: proc() {
 			fmt.println("option name MultiPV type spin default 1 min 1 max 500")
 			fmt.println("option name Ponder type check default false")
 			fmt.println("option name SyzygyPath type string default <empty>")
-			fmt.println("option name SyzygyProbeLimit type spin default 6 min 0 max 7")
+			fmt.println("option name SyzygyProbeLimit type spin default 7 min 0 max 7")
 			fmt.println("option name Threads type spin default 1 min 1 max 512")
 			fmt.println("option name Contempt type spin default 24 min -100 max 100")
 			fmt.println("option name SearchStats type check default false")

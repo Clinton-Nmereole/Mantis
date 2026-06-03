@@ -49,9 +49,21 @@ foreign syzygy {
 }
 
 // Syzygy state
+DEFAULT_SYZYGY_PROBE_LIMIT :: 7
 syzygy_path: string = ""
-syzygy_probe_limit: int = 6  // Probe when <= 6 pieces
+syzygy_probe_limit: int = DEFAULT_SYZYGY_PROBE_LIMIT
 syzygy_enabled: bool = false
+
+effective_probe_limit :: proc() -> int {
+	loaded_limit := int(TB_LARGEST)
+	if loaded_limit <= 0 {
+		return 0
+	}
+	if syzygy_probe_limit < loaded_limit {
+		return syzygy_probe_limit
+	}
+	return loaded_limit
+}
 
 // Initialize tablebases
 init_syzygy :: proc(path: string) -> bool {

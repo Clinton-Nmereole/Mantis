@@ -1708,3 +1708,52 @@ Tactical regression, perft correctness, raw stats benchmark, own-book smoke,
 `Threads=2` UCI SearchStats smoke, and `Threads=4` depth-12 UCI smoke passed.
 The raw-search benchmark remains at `473960` nodes. The latest accepted
 practice-game binary from this pass is `./mantis_thread_stop_fix`.
+
+## Accepted: 7-Man Syzygy Probe Default
+
+Change: `SyzygyProbeLimit` now defaults to 7 instead of 6, and tablebase probes
+are clamped by the loaded Fathom `TB_LARGEST` cardinality. This lets Mantis use
+7-man Syzygy files by default when they are configured, while avoiding needless
+failed probes when only smaller tablebases are present. With no Syzygy path
+loaded, normal search remains unchanged.
+
+Validation:
+
+```text
+odin build . -out:mantis_syzygy7_default -o:speed
+python3 compare_candidates.py \
+  --baseline ./mantis_thread_stop_fix \
+  --candidate ./mantis_syzygy7_default \
+  --depth 8 \
+  --timeout 60 \
+  --csv games/syzygy7_default_depth8_compare.csv
+python3 compare_candidates.py \
+  --baseline ./mantis_thread_stop_fix \
+  --candidate ./mantis_syzygy7_default \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 \
+  --timeout 90 \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv games/syzygy7_default_compare_first_collapse.csv
+python3 tactical_regression.py --binary ./mantis_syzygy7_default
+python3 correctness_test.py --binary ./mantis_syzygy7_default
+python3 stats_benchmark.py --binary ./mantis_syzygy7_default --timeout 90
+python3 stats_benchmark.py --binary ./mantis_syzygy7_default --own-book --limit 3 --timeout 30
+```
+
+Fixed-depth depth-8 comparison stayed exact across all 44 benchmark FENs:
+
+```text
+positions:        44
+bestmove_changes: 0
+nodes:            1559564 -> 1559564 (+0.00%)
+abs_score_delta:  0 cp
+max_score_delta:  0 cp
+```
+
+First-collapse clock compare had zero bestmove changes and no oracle-loss
+regressions. Tactical regression, perft correctness, raw stats benchmark, and
+own-book smoke passed. The raw-search benchmark remains at `473960` nodes, and
+UCI now reports `SyzygyProbeLimit` default `7`. The latest accepted
+practice-game binary from this pass is `./mantis_syzygy7_default`.

@@ -68,7 +68,7 @@ board_to_tb :: proc(b: ^board.Board, white, black, kings, queens, rooks, bishops
 // Probe WDL during search — returns (score, hit)
 probe_wdl :: proc(b: ^board.Board) -> (int, bool) {
 	if !syzygy_enabled { return 0, false }
-	if piece_count(b) > syzygy_probe_limit { return 0, false }
+	if piece_count(b) > effective_probe_limit() { return 0, false }
 	if b.castle != 0 { return 0, false } // TBs don't handle castling
 
 	white, black, kings, queens, rooks, bishops, knights, pawns: u64
@@ -92,7 +92,7 @@ probe_wdl :: proc(b: ^board.Board) -> (int, bool) {
 // Probe root — returns (score, best_move, hit)
 probe_root :: proc(b: ^board.Board) -> (int, moves.Move, bool) {
 	if !syzygy_enabled { return 0, moves.Move{}, false }
-	if piece_count(b) > syzygy_probe_limit { return 0, moves.Move{}, false }
+	if piece_count(b) > effective_probe_limit() { return 0, moves.Move{}, false }
 	if b.castle != 0 { return 0, moves.Move{}, false }
 
 	white, black, kings, queens, rooks, bishops, knights, pawns: u64
