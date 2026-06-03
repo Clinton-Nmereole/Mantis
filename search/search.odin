@@ -134,6 +134,7 @@ SearchThread :: struct {
 	counter_moves:        [12][64]moves.Move,
 	continuation_history: ^[6][64][6][64]int,
 	static_eval_stack:    [MAX_PLY]int,
+	extend_all_checks:    bool,
 }
 
 // Global atomic node counter for UCI reporting
@@ -2275,7 +2276,7 @@ collect_root_verify_suspect_quiets :: proc(
 	return result
 }
 
-trace_root_legal_move :: proc(b: ^board.Board, move: moves.Move) -> bool {
+is_legal_root_move :: proc(b: ^board.Board, move: moves.Move) -> bool {
 	if !board.is_castling_legal_now(b, move) {
 		return false
 	}
@@ -2290,6 +2291,20 @@ trace_root_legal_move :: proc(b: ^board.Board, move: moves.Move) -> bool {
 	board.unmake_move(b, &state)
 
 	return !illegal
+}
+
+trace_root_legal_move :: proc(b: ^board.Board, move: moves.Move) -> bool {
+	return is_legal_root_move(b, move)
+}
+
+count_legal_root_moves :: proc(b: ^board.Board, move_list: ^moves.MoveList) -> int {
+	count := 0
+	for i in 0 ..< move_list.count {
+		if is_legal_root_move(b, move_list.moves[i]) {
+			count += 1
+		}
+	}
+	return count
 }
 
 trace_capture_values :: proc(
@@ -3721,6 +3736,7 @@ trace_root_child_diagnostics :: proc(fen: string, depth: int, target_move_text: 
 init_search_thread :: proc(st: ^SearchThread, id: int) {
 	st.thread_id = id
 	st.nodes = 0
+	st.extend_all_checks = false
 	clear_killers(st)
 	clear_history(st)
 	clear_capture_history(st)
@@ -4052,15 +4068,16 @@ negamax :: proc(
 	king_sq := board.get_king_square(b, b.side)
 	in_check := board.is_square_attacked(b, king_sq, 1 - b.side)
 
-	// Check Extension - extend if in check at frontier
-	// Limited to prevent excessive searching
+	// Check Extension - normally only extend checked frontier nodes.  Very
+	// constrained root check evasions can opt into extending all checked nodes.
 	effective_depth := depth
-	if depth == 0 {
-		if in_check && ply < params.check_ext_max_ply {	// Don't extend too deep in search
-			effective_depth = 1 // Extend by 1 ply when in check
-		} else {
-			return quiescence(st, b, alpha, beta, ply)
-		}
+	if in_check &&
+	   ply < params.check_ext_max_ply &&
+	   (depth == 0 || st.extend_all_checks) {
+		effective_depth = depth + 1
+	}
+	if effective_depth == 0 {
+		return quiescence(st, b, alpha, beta, ply)
 	}
 
 	// Compute static evaluation once and cache it for improving heuristic
@@ -5440,6 +5457,21 @@ search_position :: proc(
 			pv_lines_to_search = all_moves.count
 		}
 
+		root_king_sq := board.get_king_square(b, b.side)
+		root_in_check := board.is_square_attacked(b, root_king_sq, 1 - b.side)
+		// Very short movetime check evasions can inherit a shallow PV seed
+		// that survives tied fail-low research; let current ordering lead.
+		tight_check_evasion_search :=
+			root_in_check &&
+			use_time_management &&
+			search_limits.is_movetime &&
+			search_limits.hard_time <= TIGHT_CHECK_EVASION_SEED_LIMIT_MS
+		root_legal_moves := all_moves.count
+		if tight_check_evasion_search {
+			root_legal_moves = count_legal_root_moves(b, &all_moves)
+		}
+		st.extend_all_checks = tight_check_evasion_search && root_legal_moves <= 2
+
 		for pv_index in 0 ..< pv_lines_to_search {
 			alpha := -eval.INF
 			beta := eval.INF
@@ -5497,18 +5529,8 @@ search_position :: proc(
 				}
 			}
 
-			root_king_sq := board.get_king_square(b, b.side)
-			root_in_check := board.is_square_attacked(b, root_king_sq, 1 - b.side)
-			// Very short movetime check evasions can inherit a shallow PV seed
-			// that survives tied fail-low research; let current ordering lead.
-			skip_tight_check_evasion_seed :=
-				root_in_check &&
-				use_time_management &&
-				search_limits.is_movetime &&
-				search_limits.hard_time <= TIGHT_CHECK_EVASION_SEED_LIMIT_MS
-
 			root_tt_move := moves.Move{}
-			if pv_index == 0 && !skip_tight_check_evasion_seed {
+			if pv_index == 0 && !tight_check_evasion_search {
 				root_tt_move = best_move
 				if moves.is_empty_move(root_tt_move) {
 					root_tt_move = prev_completed_best_move

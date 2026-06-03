@@ -3046,3 +3046,119 @@ but it gives under-validated aborted-depth root output too much authority in
 short check evasions.  Keep the trace as a warning and look for a safer fix that
 either completes the verification or improves the depth before the fail-low
 re-search is started.
+
+## Accepted: Scoped Two-Evasion Check Extension
+
+Change: keep the normal frontier-only check extension everywhere except a very
+narrow fast-movetime root shape: the root side is in check, post-overhead hard
+time is at most 100ms, and the root has at most two legal evasions.  In that
+shape only, the search thread extends every checked node by one ply.  The
+existing tight check-evasion root-seed suppression and fast movetime TT clear
+remain in place.
+
+Motivation: the rejected aborted-depth fallback fixed the target by trusting a
+completed narrow initial pass after the fail-low re-search timed out.  Root
+debugging showed a safer direction: the position has only two legal evasions,
+and the bad `e5c4` line is a forcing queen-check sequence.  Extending checked
+nodes only for this constrained root shape lets the 80ms search prove enough of
+the tactic without returning an aborted depth.
+
+The broad full-check-extension experiment was rejected first: it fixed the
+target but made round 20 ply 95 choose `f5g6`, an oracle mate-losing move.  The
+two-evasion gate leaves that position on the previous safe `f5g5` path.
+
+Focused target replay:
+
+```text
+python3 blunder_trace.py --pgn /tmp/mantis_current_meta40_0603.pgn \
+  --mode worst --limit 12 --candidate-indexes 4 12 \
+  --binary ./mantis_tight_two_evasion_check_ext --no-depths \
+  --movetimes-ms 80 250 --stateful-replay --warm-movetime-ms 80 \
+  --stateful-target-fen --timeout 60 \
+  --oracle-binary ./stockfish-debug/src/stockfish --oracle-depth 12 \
+  --oracle-multipv 6 --oracle-timeout 60 \
+  --report /tmp/mantis_tight_two_evasion_check_ext_candidate4_12.md \
+  --csv /tmp/mantis_tight_two_evasion_check_ext_candidate4_12.csv
+```
+
+Result:
+
+```text
+Round 20 ply 95:
+  cold/stateful 80ms:  f5g5, oracle rank 2, +0.09 cp loss
+  cold/stateful 250ms: f5g5, oracle rank 2, +0.09 cp loss
+
+Round 8 ply 43:
+  cold/stateful 80ms:  c1d2, oracle rank 1, +0.00 cp loss
+  cold/stateful 250ms: c1d2, oracle rank 1, +0.00 cp loss
+```
+
+Old round-2 guard stayed unchanged:
+
+```text
+FEN: N5k1/3bn3/7r/8/5p2/2q2B2/P1P2B2/1R2K3 w - - 0 46
+80ms:  e1f1, still mate-losing
+250ms: e1d1, oracle rank 2
+```
+
+Gates:
+
+```text
+odin build . -out:mantis_tight_two_evasion_check_ext -o:speed
+python3 tactical_regression.py --binary ./mantis_tight_two_evasion_check_ext
+python3 correctness_test.py --binary ./mantis_tight_two_evasion_check_ext \
+  --random 20 --seed 0603
+python3 stats_benchmark.py --binary ./mantis_tight_two_evasion_check_ext \
+  --limit 3 --timeout 90
+python3 compare_candidates.py --baseline ./mantis_movetime_check_clear \
+  --candidate ./mantis_tight_two_evasion_check_ext --movetimes 80 250 \
+  --timeout 60 --oracle-csv /tmp/mantis_current_meta40_0603_blunders.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv /tmp/mantis_tight_two_evasion_check_ext_compare_movetime.csv
+python3 compare_candidates.py --baseline ./mantis_movetime_check_clear \
+  --candidate ./mantis_tight_two_evasion_check_ext --movetimes 80 250 \
+  --keep-hash --timeout 60 \
+  --oracle-csv /tmp/mantis_current_meta40_0603_blunders.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv /tmp/mantis_tight_two_evasion_check_ext_compare_movetime_keephash.csv
+```
+
+Summary:
+
+```text
+Tactical regression: passed.
+Perft correctness:   passed.
+Stats benchmark:     normal.
+Default compare:     80ms 0/44 bestmove changes; 250ms 0/44.
+Keep-hash compare:   80ms 0/44 bestmove changes; 250ms 0/44.
+```
+
+Top-12 current-meta replay:
+
+```text
+python3 blunder_trace.py --pgn /tmp/mantis_current_meta40_0603.pgn \
+  --mode worst --limit 12 \
+  --binary ./mantis_tight_two_evasion_check_ext --no-depths \
+  --movetimes-ms 80 250 --stateful-replay --warm-movetime-ms 80 \
+  --stateful-target-fen --timeout 60 \
+  --oracle-binary ./stockfish-debug/src/stockfish --oracle-depth 12 \
+  --oracle-multipv 6 --oracle-timeout 60 \
+  --report /tmp/mantis_tight_two_evasion_check_ext_top12.md \
+  --csv /tmp/mantis_tight_two_evasion_check_ext_top12.csv
+```
+
+Candidate 12 remains fixed in cold and stateful 80/250.  No known oracle
+regressions appeared in the top-12 report.
+
+Self-play at 80ms was mixed rather than decisive:
+
+```text
+candidate vs baseline: 12W-10L-18D, no illegal moves.
+baseline vs candidate: 14W-11L-15D from baseline's perspective.
+```
+
+The reversed match included one `a1a1` illegal move by the baseline/current
+engine, giving the candidate one win.  Combined candidate score was `47/80`, so
+self-play is neutral-to-mildly-negative noise, not positive proof.  The patch is
+accepted on the deterministic tactical fix plus clean compare surface, with this
+self-play caveat documented.
