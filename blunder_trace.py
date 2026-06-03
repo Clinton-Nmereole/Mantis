@@ -184,6 +184,14 @@ class UCIEngine:
         return stats, wall_ms
 
 
+def apply_engine_options(
+    engine: UCIEngine,
+    engine_options: list[tuple[str, str]],
+) -> None:
+    for name, value in engine_options:
+        engine.set_option(name, value)
+
+
 @dataclass
 class BlunderCandidate:
     index: int
@@ -477,6 +485,7 @@ def run_engine_depths(
     depths: list[int],
     movetimes_ms: list[int],
     clock_ms: dict[str, int] | None,
+    engine_options: list[tuple[str, str]],
     timeout: float,
     limit: int,
 ) -> None:
@@ -512,6 +521,7 @@ def run_engine_depths(
                     timeout=timeout,
                     clear_hash=True,
                     staged_picker=False,
+                    options=engine_options,
                 )
             except subprocess.TimeoutExpired:
                 candidate.engine_rows.append(
@@ -607,6 +617,7 @@ def run_stateful_replay(
     clock_ms: dict[str, int] | None,
     warm_depth: int,
     warm_movetime_ms: int,
+    engine_options: list[tuple[str, str]],
     clear_hash_before_target: bool,
     target_from_fen: bool,
     timeout: float,
@@ -692,6 +703,7 @@ def run_stateful_replay(
             )
             engine = UCIEngine(binary, timeout)
             try:
+                apply_engine_options(engine, engine_options)
                 engine.new_game()
                 warmed = 0
                 try:
@@ -918,6 +930,7 @@ def render_markdown(
     depths: list[int],
     movetimes_ms: list[int],
     clock_ms: dict[str, int] | None,
+    engine_options: list[tuple[str, str]],
     oracle_binary: str | None,
     oracle_depth: int,
     oracle_multipv: int,
@@ -956,6 +969,9 @@ def render_markdown(
         out.write(f"Depths: `{depth_label}`\n\n")
         out.write(f"Movetimes: `{movetime_label}`\n\n")
         out.write(f"Clock: `{clock_label}`\n\n")
+        if engine_options:
+            formatted_options = ", ".join(f"{name}={value}" for name, value in engine_options)
+            out.write(f"Engine options: `{formatted_options}`\n\n")
     if stateful_replay:
         if warm_movetime_ms > 0:
             out.write(f"Stateful replay: `enabled`, warm movetime `{warm_movetime_ms}ms`\n\n")
@@ -1110,6 +1126,7 @@ def main() -> int:
         help="Only report selected candidate indexes after mode selection; preserves original candidate numbers",
     )
     parser.add_argument("--binary", help="Optional Mantis binary for fixed-depth re-search")
+    parser.add_argument("--option", action="append", default=[], help="UCI option Name=Value applied to the traced binary; repeatable")
     parser.add_argument("--depths", type=int, nargs="+", default=[8, 10], help="Depths for fixed-depth re-search")
     parser.add_argument("--no-depths", action="store_true", help="Do not run fixed-depth target searches")
     parser.add_argument("--movetimes-ms", type=int, nargs="*", default=[], help="Movetime budgets for timed target searches")
@@ -1164,6 +1181,10 @@ def main() -> int:
         parser.error("--warm-depth must be positive")
     if args.warm_movetime_ms < 0:
         parser.error("--warm-movetime-ms must be non-negative")
+    try:
+        engine_options = stats_benchmark.parse_engine_options(args.option)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     pgn_path = Path(args.pgn)
     if not pgn_path.exists():
@@ -1207,6 +1228,7 @@ def main() -> int:
             depths=depths,
             movetimes_ms=movetimes_ms,
             clock_ms=clock_ms,
+            engine_options=engine_options,
             timeout=args.timeout,
             limit=args.limit,
         )
@@ -1221,6 +1243,7 @@ def main() -> int:
             clock_ms=clock_ms,
             warm_depth=args.warm_depth,
             warm_movetime_ms=args.warm_movetime_ms,
+            engine_options=engine_options,
             clear_hash_before_target=args.clear_hash_before_target,
             target_from_fen=args.stateful_target_fen,
             timeout=args.timeout,
@@ -1244,6 +1267,7 @@ def main() -> int:
         depths=depths,
         movetimes_ms=movetimes_ms,
         clock_ms=clock_ms,
+        engine_options=engine_options,
         oracle_binary=args.oracle_binary,
         oracle_depth=args.oracle_depth,
         oracle_multipv=args.oracle_multipv,

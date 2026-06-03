@@ -2743,3 +2743,54 @@ Partial aborted-depth bestmove reuse: rejected from rootdebug evidence because
 Conclusion: the next engine candidate should focus on check-evasion horizon
 behavior or aspiration/root research timing around depth 8-10, not generic root
 TT cutoff suppression or incomplete-depth bestmove reuse.
+
+## Accepted: Blunder Trace UCI Option Probes
+
+Change: `blunder_trace.py` now accepts repeated `--option Name=Value`
+arguments and applies them to the traced Mantis binary for both cold searches
+and stateful warm/target searches.  The report records active engine options,
+matching `timed_root_trace.py` and the benchmark comparison harnesses.
+
+Smoke:
+
+```text
+python3 blunder_trace.py \
+  --pgn /tmp/mantis_goal_probe_meta40_0603.pgn \
+  --mode worst \
+  --limit 12 \
+  --candidate-indexes 5 \
+  --binary ./mantis_goal_probe \
+  --no-depths \
+  --movetimes-ms 80 \
+  --stateful-replay \
+  --warm-movetime-ms 80 \
+  --stateful-target-fen \
+  --option "Move Overhead=0" \
+  --timeout 60 \
+  --report /tmp/mantis_blunder_trace_option_smoke.md \
+  --csv /tmp/mantis_blunder_trace_option_smoke.csv
+```
+
+The smoke reproduced the same round-2 mate-evasion loss and printed:
+
+```text
+Engine options: `Move Overhead=0`
+cold 80ms:                  e1f1, -6.68
+stateful-warm80ms-fen 80ms: e1f1, -8.40
+```
+
+Rejected check-evasion candidates:
+
+```text
+Forced clean root verifier after movetime fail-low:
+  spent remaining time too early and degraded 250ms recovery.
+Unseeded fail-low research ordering when root is in check:
+  80ms still chose e1f1, and 250ms recovered only to e1d1.
+History tie-breaks during root-in-check fail-low research:
+  80ms still chose e1f1 and 250ms worsened in cold/stateful probes.
+```
+
+Conclusion: the current target is not fixed by shallow root ordering tweaks.
+Future work should either reduce the cost of the depth-9 fail-low research or
+add a more principled check-evasion extension/search rule that survives
+self-play.
