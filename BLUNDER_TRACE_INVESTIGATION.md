@@ -1847,3 +1847,42 @@ max_score_delta:  0 cp
 Tactical regression, perft correctness, raw stats benchmark, and own-book smoke
 passed. The raw-search benchmark remains at `473960` nodes. The latest accepted
 practice-game binary from this pass is `./mantis_uci_tune_options`.
+
+## Accepted: No-Rebuild UCI Tuning Harness
+
+Change: `nevergrad_tuner.py` now evaluates candidates through the UCI tuning
+options instead of rewriting `search/tuning.odin` and rebuilding for every
+parameter set. The tuner compares engine A with candidate `--option-a`
+assignments against engine B at defaults, honors the requested baseline instead
+of the old hardcoded baseline, and keeps source-edit/rebuild tuning as an
+explicit `--source-edit` fallback. It also adds a dependency-free random-search
+optimizer and uses it automatically when Nevergrad is not installed. Fresh UCI
+tuning runs now default to `tuning_progress_uci.json` and `best_params_uci.json`
+to avoid resuming stale source-edit tuning artifacts.
+
+Validation:
+
+```text
+python3 -m py_compile nevergrad_tuner.py selfplay.py
+python3 nevergrad_tuner.py --help
+python3 nevergrad_tuner.py \
+  --engine ./mantis_uci_tune_options \
+  --baseline ./mantis_uci_tune_options \
+  --optimizer auto \
+  --budget 1 \
+  --games 2 \
+  --depth 1 \
+  --max-moves 4 \
+  --concurrency 1 \
+  --no-openings \
+  --resume /tmp/mantis_tuner_final_progress.json \
+  --output /tmp/mantis_tuner_final_best.json \
+  --seed 9
+```
+
+The smoke confirmed that the local environment falls back from missing
+Nevergrad to random search, emits candidate parameters as UCI `--option-a`
+assignments, runs a self-play evaluation without rebuilding, and completes with
+zero illegal moves or failed games. Explicit `--optimizer nevergrad` without the
+package installed now reports a clean error instead of a Python traceback.
+`git diff --check` passed.

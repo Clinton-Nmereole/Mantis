@@ -57,22 +57,23 @@ cd /opt
 git clone https://github.com/yourname/Mantis.git
 cd Mantis
 
-# Build baseline
+# Build engine once; candidate params are passed through UCI options
 ./build_safe.sh
-cp mantis mantis_baseline
 
-# Setup Python environment
+# Setup Python environment (Nevergrad optional; tuner falls back to random search)
 python3 -m venv venv
 source venv/bin/activate
 pip install nevergrad
 
 # Start tuning with 100 evals (takes ~8 hours on 8 cores)
 python3 nevergrad_tuner.py \
+  --engine ./mantis \
+  --optimizer auto \
   --budget 100 \
   --games 20 \
   --movetime 200 \
   --concurrency 8 \
-  --output best_params_cloud.json \
+  --output best_params_uci_cloud.json \
   > tuning_cloud.log 2>&1 &
 ```
 
@@ -207,7 +208,7 @@ With 5 VMs × 8 cores = 40 concurrent games:
 
 ```bash
 # Find promising regions of parameter space
-python3 nevergrad_tuner.py --budget 30 --games 10 --movetime 100
+python3 nevergrad_tuner.py --engine ./mantis --budget 30 --games 10 --movetime 100
 ```
 
 **Time:** 3–4 hours | **Cost:** $0
@@ -217,6 +218,7 @@ python3 nevergrad_tuner.py --budget 30 --games 10 --movetime 100
 ```bash
 # Run 100 evaluations with more games per eval
 python3 nevergrad_tuner.py \
+  --engine ./mantis \
   --budget 100 \
   --games 20 \
   --movetime 200 \
@@ -229,9 +231,12 @@ python3 nevergrad_tuner.py \
 
 ```bash
 # Run SPRT at 3+0 to confirm the best candidate
+# Replace option values with those from best_params_uci_cloud.json.
 python3 selfplay.py \
   --engine-a ./mantis \
-  --engine-b ./mantis_baseline \
+  --engine-b ./mantis \
+  --option-a RfpMargin=<best> \
+  --option-a FutilityMargin=<best> \
   --verify \
   --concurrency 8 \
   --openings openings.epd
@@ -245,8 +250,8 @@ python3 selfplay.py \
 # Run 1,000+ games at 10+0.1 to confirm scaling
 # Use 5+ VMs in parallel, aggregate results
 cutechess-cli \
-  -engine cmd=./mantis \
-  -engine cmd=./mantis_baseline \
+  -engine cmd=./mantis proto=uci option.RfpMargin=<best> option.FutilityMargin=<best> \
+  -engine cmd=./mantis proto=uci \
   -each tc=10+0.1 -games 1000 \
   -concurrency 8
 ```

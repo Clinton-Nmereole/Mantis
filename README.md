@@ -191,7 +191,7 @@ Mantis/
 - Multi-PV support
 - Lazy SMP (parallel search, +150-200 Elo)
 - Syzygy Tablebases
-- Automated tuning
+- Large-scale automated tuning runs
 
 ## Documentation
 
