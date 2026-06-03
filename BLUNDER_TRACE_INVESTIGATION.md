@@ -1549,3 +1549,60 @@ Conclusion: the `c8c2` mismatch is still a useful root-search target, but
 two-move fail-high verification and late fail-low suspect verification are not
 safe practical fixes. Keep `./mantis_syzygy_qfrontier` as the latest accepted
 practice-game binary.
+
+## Rejected: Root Child Window Clamps
+
+The same `c8c2` trace also exposed root child searches where the propagated
+child window could become zero-width or inverted after a root fail-high. Two
+minimal clamps were tested in `run_root_search_pass`.
+
+First candidate:
+
+```text
+./mantis_root_window_clamp
+child_beta <= child_alpha -> child_beta = child_alpha + 1
+```
+
+Target compare:
+
+```text
+c8c2 -> f8c5
+oracle_loss 36 -> 0
+depth 15 -> 15
+nodes 1296320 -> 1338738 (+3.27%)
+time 7404ms -> 7434ms (+0.41%)
+```
+
+This repaired the target row, but tactical regression rejected it:
+
+```text
+queen-defense expected h7g6, got g8h8
+```
+
+Second candidate:
+
+```text
+./mantis_root_inverted_window_clamp
+child_beta < child_alpha -> child_beta = child_alpha + 1
+```
+
+Target compare:
+
+```text
+c8c2 -> c8c2
+oracle_loss 36 -> 36
+depth 15 -> 15
+nodes 1296320 -> 1543803 (+19.09%)
+time 7220ms -> 8839ms (+22.42%)
+```
+
+This did not repair the target row and tactical regression also rejected it:
+
+```text
+queen-defense expected h7g6, got b8d8
+```
+
+Conclusion: broad root child-window invariant changes are too risky against the
+accepted short-PV tactical behavior. Future work on the `c8c2` root mismatch
+should preserve the queen-defense `h7g6` result as a first-class guardrail.
+Keep `./mantis_syzygy_qfrontier` as the latest accepted practice-game binary.
