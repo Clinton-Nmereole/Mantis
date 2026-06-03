@@ -2665,3 +2665,81 @@ selfplay.py 20 games at 80ms: 3 wins, 9 losses, 8 draws
 Conclusion: do not promote root quiet-check ordering as a default.  The rescued
 round-17 target remains useful, but the candidate lost too much practical
 self-play strength.
+
+## Accepted: Fresh 40-Game Mate-Evasion Target
+
+A larger latest-vs-latest 80 ms sample was generated from the current clean
+engine source:
+
+```text
+python3 selfplay.py \
+  --engine-a ./mantis_goal_probe \
+  --engine-b ./mantis_goal_probe \
+  --games 40 \
+  --movetime 80 \
+  --max-moves 180 \
+  --concurrency 2 \
+  --openings 2moves_v1.epd \
+  --option OwnBook=false \
+  --pgn-out /tmp/mantis_goal_probe_meta40_0603.pgn
+```
+
+The match scored `18/10/12` for engine A.  Strict first-collapse mode again
+found no searchable targets, but worst-mode found one useful reproduced
+mate-evasion failure:
+
+```text
+FEN: N5k1/3bn3/7r/8/5p2/2q2B2/P1P2B2/1R2K3 w - - 0 46
+Played: e1f1, search d8 13071 nodes 46ms, eval -6.84 -> -8.40
+Stockfish d12: e1e2
+```
+
+Cold and warmed 80 ms searches both reproduce the mate-losing move, while
+250 ms recovers:
+
+```text
+cold 80ms:                   e1f1, oracle rank 3, mate loss
+cold 250ms:                  e1d1, oracle rank 2, 353 cp loss
+stateful-warm80ms-fen 80ms:  e1f1, oracle rank 3, mate loss
+stateful-warm80ms-fen 250ms: e1e2, oracle rank 1
+```
+
+Root trace command:
+
+```text
+python3 timed_root_trace.py \
+  --pgn /tmp/mantis_goal_probe_meta40_0603.pgn \
+  --binary ./mantis_goal_probe \
+  --target 2:87 \
+  --movetimes-ms 80 250 \
+  --warm-movetime-ms 80 \
+  --root-debug \
+  --multipv 6 \
+  --oracle-binary ./stockfish-debug/src/stockfish \
+  --oracle-depth 12 \
+  --oracle-multipv 6 \
+  --oracle-timeout 60 \
+  --timeout 90 \
+  --report /tmp/mantis_goal_probe_round2_ply87_root_trace.md \
+  --csv /tmp/mantis_goal_probe_round2_ply87_root_trace.csv
+```
+
+The 80 ms root is a check-evasion horizon problem.  `e1f1` is seeded from TT
+and remains best through completed depth 8.  At 250 ms, depth-9 fail-low
+research finally promotes `e1e2`; depth 10 briefly tries `e1f1` again before
+fail-high research restores `e1e2`.
+
+Rejected experiments:
+
+```text
+Shallow completed-depth fallback: wrong model for round 17; warmed search
+  already switched to c1d1 at depth 3 with only a small displayed score drop.
+Root-child TT cutoff guard: tested by skipping TT score cutoffs at ply 1;
+  round-2 ply-87 still chose e1f1 at 80 ms.
+Partial aborted-depth bestmove reuse: rejected from rootdebug evidence because
+  the round-17 aborted depth-5 partial best g8h7 was Stockfish-inferior.
+```
+
+Conclusion: the next engine candidate should focus on check-evasion horizon
+behavior or aspiration/root research timing around depth 8-10, not generic root
+TT cutoff suppression or incomplete-depth bestmove reuse.
