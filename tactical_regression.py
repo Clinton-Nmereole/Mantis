@@ -41,6 +41,13 @@ TESTS = [
         "expected": {"h7g6"},
         "timeout": 60,
     },
+    {
+        "name": "SF2700 smoke: avoid poisoned rook capture",
+        "fen": "3r4/1kp3pp/p1p5/1r6/R4p2/1P2P2q/PB6/2QR2K1 w - - 0 27",
+        "depth": 8,
+        "banned": {"d1d8"},
+        "timeout": 60,
+    },
 ]
 
 

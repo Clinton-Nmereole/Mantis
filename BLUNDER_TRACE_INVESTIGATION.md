@@ -618,6 +618,71 @@ git diff --check
 
 All passed.
 
+## Accepted: Fixed-Depth Fail-High Clamp Verification
+
+The SF2700 smoke set exposed a root aspiration failure where Mantis kept a
+poisoned root capture at shallow fixed depths even though the child position
+itself was already tactically lost:
+
+```text
+FEN: 3r4/1kp3pp/p1p5/1r6/R4p2/1P2P2q/PB6/2QR2K1 w - - 0 27
+Baseline depth 8: d1d8
+Candidate depth 8: a4f4
+```
+
+Direct child searches after `Rxd8` showed Mantis could find Black's mating
+idea, but the parent root search held the previous capture seed through a
+fail-high re-search that collapsed back to the old alpha.  Earlier broad
+fail-high clean verification was rejected under clock controls, so the accepted
+guard is fixed-depth only and much narrower:
+
+- final requested depth only,
+- first PV only,
+- depth 8 or deeper,
+- root seed is a capture or promotion,
+- fail-high re-search keeps that same root seed,
+- the re-search score is still clamped at or below the old alpha.
+
+When all of those hold, Mantis spends the already prepared clean root snapshot
+on the existing verification pass.  Time-managed searches are intentionally
+unchanged.
+
+Focused result:
+
+```text
+./mantis depth 8:                     d1d8, -1.99
+./mantis_failhigh_clamp_verify depth 8: a4f4, -2.79
+```
+
+Broad comparison:
+
+```text
+python3 compare_candidates.py --baseline ./mantis \
+  --candidate ./mantis_failhigh_clamp_verify --depths 6 8 --timeout 120 \
+  --csv /tmp/mantis_failhigh_clamp_verify_refined_compare_d6_d8.csv
+
+python3 compare_candidates.py --baseline ./mantis \
+  --candidate ./mantis_failhigh_clamp_verify --depths 9 --timeout 150 \
+  --csv /tmp/mantis_failhigh_clamp_verify_refined_compare_d9.csv
+
+python3 compare_candidates.py --baseline ./mantis \
+  --candidate ./mantis_failhigh_clamp_verify --movetimes 80 250 --timeout 60 \
+  --csv /tmp/mantis_failhigh_clamp_verify_refined_compare_movetime.csv
+```
+
+Summary:
+
+```text
+Depth 6:       0/44 bestmove changes, +0.00% nodes
+Depth 8:       0/44 bestmove changes, +5.64% nodes
+Depth 9:       0/44 bestmove changes, +5.96% nodes
+Movetime 80:   0/44 bestmove changes, +0.00% nodes
+Movetime 250:  0/44 bestmove changes, -0.91% nodes
+```
+
+The SF2700 target is also covered by `tactical_regression.py` as a banned
+depth-8 `d1d8` move so the exact fixed-depth failure cannot silently return.
+
 ## Next
 
 Validate the remaining first-collapse positions with an external oracle before

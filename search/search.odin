@@ -5558,6 +5558,7 @@ search_position :: proc(
 			}
 
 			fixed_depth_root_verify := current_depth == depth && current_depth >= 9 && pv_index == 0
+			fixed_depth_fail_high_verify := current_depth == depth && current_depth >= 8 && pv_index == 0
 			timed_root_verify_prepared := false
 			timed_mixed_root_verify_prepared := false
 			timed_root_capture_verify_prepared := false
@@ -5616,7 +5617,7 @@ search_position :: proc(
 				}
 			}
 
-			prepare_clean_root_verify := fixed_depth_root_verify || timed_root_verify_prepared
+			prepare_clean_root_verify := fixed_depth_root_verify || fixed_depth_fail_high_verify || timed_root_verify_prepared
 			if debug_root_pass || prepare_clean_root_verify {
 				actual_root_tt_move = get_tt_move(b.hash)
 			}
@@ -5988,6 +5989,76 @@ search_position :: proc(
 						found_move = research_pass.found_move
 					} else {
 						depth_completed = false
+					}
+
+					fail_high_root_seed_clamped :=
+						fixed_depth_fail_high_verify &&
+						verify_from_clean_root &&
+						depth_completed &&
+						!moves.is_empty_move(root_tt_move) &&
+						(root_tt_move.capture || root_tt_move.promoted != -1) &&
+						same_move(current_best_move, root_tt_move) &&
+						best_score <= window_alpha
+					if fail_high_root_seed_clamped {
+						stat_add(&search_stats.aspiration_verifies)
+						if debug_root_pass {
+							fmt.printf("info string rootdebug verify action=fail_high_clean_root start current_best=")
+							root_debug_print_move(current_best_move)
+							fmt.printf(" current_score=%d window_alpha=%d\n", best_score, window_alpha)
+						}
+
+						verify_pass: RootSearchPassResult
+						if current_depth >= ROOT_VERIFY_SUSPECT_MIN_DEPTH {
+							verify_candidates: RootVerifyCandidateSet
+							prepare_root_verify_candidate_set(
+								&verify_candidates,
+								&verify_st,
+								b,
+								&move_list,
+								root_tt_move,
+								false,
+								current_best_move,
+								actual_root_tt_move,
+							)
+							verify_pass = run_root_snapshot_verification_pass(
+								&verify_st,
+								b,
+								&move_list,
+								current_depth,
+								root_tt_move,
+								pv_index,
+								&root_pv_first_legal_counted,
+								verify_tt_snapshot,
+								&verify_candidates,
+								debug_root_pass,
+								"fail_high_clean_root",
+							)
+						} else {
+							restore_tt(verify_tt_snapshot)
+							verify_pass = run_root_full_window_verification_pass(
+								&verify_st,
+								b,
+								&move_list,
+								current_depth,
+								root_tt_move,
+								pv_index,
+								&root_pv_first_legal_counted,
+								debug_root_pass,
+								"fail_high_clean_root",
+								false,
+								current_best_move,
+								actual_root_tt_move,
+							)
+						}
+						st.nodes += verify_st.nodes
+						if verify_pass.completed && verify_pass.found_move {
+							best_score = verify_pass.best_score
+							current_best_move = verify_pass.best_move
+							best_pv = verify_pass.best_pv
+							found_move = verify_pass.found_move
+						} else {
+							depth_completed = false
+						}
 					}
 				}
 
