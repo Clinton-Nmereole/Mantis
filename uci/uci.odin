@@ -137,14 +137,35 @@ uci_loop :: proc() {
 			fmt.println("option name SyzygyProbeLimit type spin default 7 min 0 max 7")
 			fmt.println("option name Threads type spin default 1 min 1 max 512")
 			fmt.println("option name Contempt type spin default 12 min -100 max 100")
+			fmt.println("option name AspirationWindow type spin default 35 min 5 max 200")
+			fmt.println("option name NmpMinDepth type spin default 3 min 2 max 6")
 			fmt.println("option name NmpReductionBase type spin default 2 min 0 max 4")
 			fmt.println("option name NmpReductionDiv type spin default 6 min 3 max 10")
 			fmt.println("option name RfpMargin type spin default 25 min 10 max 150")
 			fmt.println("option name RfpDepth type spin default 8 min 5 max 10")
+			fmt.println("option name ProbcutDepth type spin default 5 min 3 max 8")
+			fmt.println("option name ProbcutMargin type spin default 40 min 0 max 300")
+			fmt.println("option name ProbcutReduce type spin default 4 min 1 max 6")
+			fmt.println("option name IirMinDepth type spin default 4 min 3 max 8")
+			fmt.println("option name SeDepth type spin default 8 min 5 max 12")
+			fmt.println("option name SeMargin type spin default 2 min 0 max 8")
+			fmt.println("option name SeReducedDiv type spin default 2 min 1 max 4")
 			fmt.println("option name LmrMinDepth type spin default 3 min 2 max 5")
+			fmt.println("option name LmrImprovingAdj type spin default -1 min -4 max 4")
+			fmt.println("option name LmrHistoryGoodAdj type spin default -1 min -4 max 4")
+			fmt.println("option name LmrHistoryBadAdj type spin default 1 min -4 max 4")
+			fmt.println("option name LmrHistoryGoodThresh type spin default 2000 min 0 max 10000")
+			fmt.println("option name LmrHistoryBadThresh type spin default -2000 min -10000 max 0")
 			fmt.println("option name FutilityMargin type spin default 65 min 30 max 400")
+			fmt.println("option name FutilityMaxDepth type spin default 3 min 1 max 6")
 			fmt.println("option name LmpBase type spin default 2 min 1 max 4")
 			fmt.println("option name LmpDiv type spin default 2 min 1 max 4")
+			fmt.println("option name LmpMaxDepth type spin default 8 min 3 max 12")
+			fmt.println("option name RazorMargin type spin default 80 min 0 max 300")
+			fmt.println("option name RazorMaxDepth type spin default 3 min 1 max 5")
+			fmt.println("option name DeltaPruningMargin type spin default 250 min 0 max 1200")
+			fmt.println("option name SeePruneThreshold type spin default -50 min -300 max 0")
+			fmt.println("option name ContinuationScoreDiv type spin default 12 min 1 max 64")
 			fmt.println("option name SearchStats type check default false")
 			fmt.println("option name RootDebugTrace type check default false")
 			fmt.println("option name StagedMovePicker type check default false")
@@ -629,136 +650,174 @@ parse_setoption :: proc(command: string) {
 	parts := strings.split(command, " ")
 	defer delete(parts)
 
-	// setoption name <Name> value <Value>
-	// 0         1    2      3     4...
+	if len(parts) < 5 || parts[1] != "name" {
+		return
+	}
 
-	if len(parts) >= 5 && parts[1] == "name" && parts[3] == "value" {
-		name := parts[2]
+	value_idx := -1
+	for i := 2; i < len(parts); i += 1 {
+		if parts[i] == "value" {
+			value_idx = i
+			break
+		}
+	}
 
-		if name == "EvalFile" {
-			// Reconstruct path
-			path_parts := parts[4:]
-			path := strings.join(path_parts, " ")
-			defer delete(path)
+	if value_idx <= 2 || value_idx + 1 >= len(parts) {
+		return
+	}
 
-			fmt.printf("Loading network from: %s\n", path)
+	name := strings.join(parts[2:value_idx], " ")
+	defer delete(name)
+	value := strings.join(parts[value_idx + 1:], " ")
+	defer delete(value)
 
-			// Try SFNNv14 first, then fall back to legacy NNUE
-			if nnue.init_sfnnv14(path) {
-				fmt.println("SFNNv14 network loaded successfully.")
-				nnue.sfnnv14_active = true
-				nnue.init_sfnnv14_features()
-			} else if nnue.init_nnue(path) {
-				fmt.println("Legacy NNUE network loaded successfully.")
-				nnue.sfnnv14_active = false
-			} else {
-				fmt.println("Failed to load network.")
-			}
-		} else if name == "Hash" {
-			val, ok := strconv.parse_int(parts[4])
-			if ok {
-				search.init_tt(val)
-			}
-		} else if name == "Move" &&
-		   len(parts) >= 6 &&
-		   parts[3] == "Overhead" &&
-		   parts[4] == "value" {
-			// Handle "Move Overhead" (two-word option name)
-			val, ok := strconv.parse_int(parts[5])
-			if ok {
-				move_overhead = val
-			}
-		} else if name == "MultiPV" {
-			val, ok := strconv.parse_int(parts[4])
-			if ok && val >= 1 && val <= 500 {
-				multi_pv = val
-			}
-		} else if name == "Ponder" {
-			// Parse boolean value (true/false)
-			if parts[4] == "true" {
-				ponder_enabled = true
-			} else if parts[4] == "false" {
-				ponder_enabled = false
-			}
-		} else if name == "OwnBook" {
-			if parts[4] == "true" {
-				own_book = true
-				// Load book if not already loaded
-				if !book.has_book() {
-					book.seed_book_random()
-					book.init_opening_book(book_file)
-				}
-			} else if parts[4] == "false" {
-				own_book = false
-			}
-		} else if name == "BookFile" {
-			// Reconstruct path (may contain spaces)
-			path_parts := parts[4:]
-			path := strings.join(path_parts, " ")
-			book_file = path
-			if own_book {
+	if name == "EvalFile" {
+		fmt.printf("Loading network from: %s\n", value)
+
+		// Try SFNNv14 first, then fall back to legacy NNUE
+		if nnue.init_sfnnv14(value) {
+			fmt.println("SFNNv14 network loaded successfully.")
+			nnue.sfnnv14_active = true
+			nnue.init_sfnnv14_features()
+		} else if nnue.init_nnue(value) {
+			fmt.println("Legacy NNUE network loaded successfully.")
+			nnue.sfnnv14_active = false
+		} else {
+			fmt.println("Failed to load network.")
+		}
+	} else if name == "Hash" {
+		val, ok := strconv.parse_int(value)
+		if ok {
+			search.init_tt(val)
+		}
+	} else if name == "Move Overhead" {
+		val, ok := strconv.parse_int(value)
+		if ok {
+			move_overhead = val
+		}
+	} else if name == "MultiPV" {
+		val, ok := strconv.parse_int(value)
+		if ok && val >= 1 && val <= 500 {
+			multi_pv = val
+		}
+	} else if name == "Ponder" {
+		if value == "true" {
+			ponder_enabled = true
+		} else if value == "false" {
+			ponder_enabled = false
+		}
+	} else if name == "OwnBook" {
+		if value == "true" {
+			own_book = true
+			// Load book if not already loaded
+			if !book.has_book() {
 				book.seed_book_random()
 				book.init_opening_book(book_file)
 			}
-		} else if name == "Threads" {
-			val, ok := strconv.parse_int(parts[4])
-			if ok && val >= 1 && val <= 512 {
-				thread_count = val
-				// Reinitialize thread pool with new count
-				search.init_thread_pool(val)
-			}
-		} else if name == "SearchStats" {
-			if parts[4] == "true" {
-				search.search_stats_enabled = true
-			} else if parts[4] == "false" {
-				search.search_stats_enabled = false
-			}
-		} else if name == "RootDebugTrace" {
-			if parts[4] == "true" {
-				search.root_debug_trace_enabled = true
-			} else if parts[4] == "false" {
-				search.root_debug_trace_enabled = false
-			}
-		} else if name == "StagedMovePicker" {
-			if parts[4] == "true" {
-				search.use_staged_move_picker = true
-			} else if parts[4] == "false" {
-				search.use_staged_move_picker = false
-			}
-		} else if name == "Contempt" {
-			set_spin_option(parts[4], -100, 100, &search.params.contempt)
-		} else if name == "NmpReductionBase" {
-			set_spin_option(parts[4], 0, 4, &search.params.nmp_reduction_base)
-		} else if name == "NmpReductionDiv" {
-			set_spin_option(parts[4], 3, 10, &search.params.nmp_reduction_div)
-		} else if name == "RfpMargin" {
-			set_spin_option(parts[4], 10, 150, &search.params.rfp_margin)
-		} else if name == "RfpDepth" {
-			set_spin_option(parts[4], 5, 10, &search.params.rfp_depth)
-		} else if name == "LmrMinDepth" {
-			set_spin_option(parts[4], 2, 5, &search.params.lmr_min_depth)
-		} else if name == "FutilityMargin" {
-			set_spin_option(parts[4], 30, 400, &search.params.futility_margin)
-		} else if name == "LmpBase" {
-			set_spin_option(parts[4], 1, 4, &search.params.lmp_base)
-		} else if name == "LmpDiv" {
-			set_spin_option(parts[4], 1, 4, &search.params.lmp_div)
-		} else if name == "SyzygyPath" {
-			// Reconstruct path (may contain spaces)
-			path_parts := parts[4:]
-			path := strings.join(path_parts, " ")
-			defer delete(path)
-
-			if tb.init_syzygy(path) {
-				fmt.printf("Syzygy: loaded %d-man tablebases from %s\n", tb.TB_LARGEST, path)
-			} else {
-				fmt.println("Syzygy: failed to load tablebases")
-			}
-		} else if name == "SyzygyProbeLimit" {
-			val, ok := strconv.parse_int(parts[4])
-			if ok && val >= 0 && val <= 7 {
-				tb.syzygy_probe_limit = val
-			}
+		} else if value == "false" {
+			own_book = false
+		}
+	} else if name == "BookFile" {
+		book_file = strings.clone(value)
+		if own_book {
+			book.seed_book_random()
+			book.init_opening_book(book_file)
+		}
+	} else if name == "Threads" {
+		val, ok := strconv.parse_int(value)
+		if ok && val >= 1 && val <= 512 {
+			thread_count = val
+			// Reinitialize thread pool with new count
+			search.init_thread_pool(val)
+		}
+	} else if name == "SearchStats" {
+		if value == "true" {
+			search.search_stats_enabled = true
+		} else if value == "false" {
+			search.search_stats_enabled = false
+		}
+	} else if name == "RootDebugTrace" {
+		if value == "true" {
+			search.root_debug_trace_enabled = true
+		} else if value == "false" {
+			search.root_debug_trace_enabled = false
+		}
+	} else if name == "StagedMovePicker" {
+		if value == "true" {
+			search.use_staged_move_picker = true
+		} else if value == "false" {
+			search.use_staged_move_picker = false
+		}
+	} else if name == "Contempt" {
+		set_spin_option(value, -100, 100, &search.params.contempt)
+	} else if name == "AspirationWindow" {
+		set_spin_option(value, 5, 200, &search.params.aspiration_window)
+	} else if name == "NmpMinDepth" {
+		set_spin_option(value, 2, 6, &search.params.nmp_min_depth)
+	} else if name == "NmpReductionBase" {
+		set_spin_option(value, 0, 4, &search.params.nmp_reduction_base)
+	} else if name == "NmpReductionDiv" {
+		set_spin_option(value, 3, 10, &search.params.nmp_reduction_div)
+	} else if name == "RfpMargin" {
+		set_spin_option(value, 10, 150, &search.params.rfp_margin)
+	} else if name == "RfpDepth" {
+		set_spin_option(value, 5, 10, &search.params.rfp_depth)
+	} else if name == "ProbcutDepth" {
+		set_spin_option(value, 3, 8, &search.params.probcut_depth)
+	} else if name == "ProbcutMargin" {
+		set_spin_option(value, 0, 300, &search.params.probcut_margin)
+	} else if name == "ProbcutReduce" {
+		set_spin_option(value, 1, 6, &search.params.probcut_reduce)
+	} else if name == "IirMinDepth" {
+		set_spin_option(value, 3, 8, &search.params.iir_min_depth)
+	} else if name == "SeDepth" {
+		set_spin_option(value, 5, 12, &search.params.se_depth)
+	} else if name == "SeMargin" {
+		set_spin_option(value, 0, 8, &search.params.se_margin)
+	} else if name == "SeReducedDiv" {
+		set_spin_option(value, 1, 4, &search.params.se_reduced_div)
+	} else if name == "LmrMinDepth" {
+		set_spin_option(value, 2, 5, &search.params.lmr_min_depth)
+	} else if name == "LmrImprovingAdj" {
+		set_spin_option(value, -4, 4, &search.params.lmr_improving_adj)
+	} else if name == "LmrHistoryGoodAdj" {
+		set_spin_option(value, -4, 4, &search.params.lmr_history_good_adj)
+	} else if name == "LmrHistoryBadAdj" {
+		set_spin_option(value, -4, 4, &search.params.lmr_history_bad_adj)
+	} else if name == "LmrHistoryGoodThresh" {
+		set_spin_option(value, 0, 10000, &search.params.lmr_history_good_thresh)
+	} else if name == "LmrHistoryBadThresh" {
+		set_spin_option(value, -10000, 0, &search.params.lmr_history_bad_thresh)
+	} else if name == "FutilityMargin" {
+		set_spin_option(value, 30, 400, &search.params.futility_margin)
+	} else if name == "FutilityMaxDepth" {
+		set_spin_option(value, 1, 6, &search.params.futility_max_depth)
+	} else if name == "LmpBase" {
+		set_spin_option(value, 1, 4, &search.params.lmp_base)
+	} else if name == "LmpDiv" {
+		set_spin_option(value, 1, 4, &search.params.lmp_div)
+	} else if name == "LmpMaxDepth" {
+		set_spin_option(value, 3, 12, &search.params.lmp_max_depth)
+	} else if name == "RazorMargin" {
+		set_spin_option(value, 0, 300, &search.params.razor_margin)
+	} else if name == "RazorMaxDepth" {
+		set_spin_option(value, 1, 5, &search.params.razor_max_depth)
+	} else if name == "DeltaPruningMargin" {
+		set_spin_option(value, 0, 1200, &search.params.delta_pruning_margin)
+	} else if name == "SeePruneThreshold" {
+		set_spin_option(value, -300, 0, &search.params.see_prune_threshold)
+	} else if name == "ContinuationScoreDiv" {
+		set_spin_option(value, 1, 64, &search.params.continuation_score_div)
+	} else if name == "SyzygyPath" {
+		if tb.init_syzygy(value) {
+			fmt.printf("Syzygy: loaded %d-man tablebases from %s\n", tb.TB_LARGEST, value)
+		} else {
+			fmt.println("Syzygy: failed to load tablebases")
+		}
+	} else if name == "SyzygyProbeLimit" {
+		val, ok := strconv.parse_int(value)
+		if ok && val >= 0 && val <= 7 {
+			tb.syzygy_probe_limit = val
 		}
 	}
 }

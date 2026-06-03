@@ -113,19 +113,40 @@ go wtime 60000 btime 60000 winc 1000 binc 1000
 
 ### UCI Tuning Options
 
-These options expose selected high-leverage search constants for SPSA,
-cutechess, and local self-play tuning without recompiling:
+These options expose bounded search constants for SPSA, cutechess, and local
+self-play tuning without recompiling:
 
 | Option | Default | Range |
 |--------|---------|-------|
+| AspirationWindow | 35 | 5-200 |
+| NmpMinDepth | 3 | 2-6 |
 | NmpReductionBase | 2 | 0-4 |
 | NmpReductionDiv | 6 | 3-10 |
 | RfpMargin | 25 | 10-150 |
 | RfpDepth | 8 | 5-10 |
+| ProbcutDepth | 5 | 3-8 |
+| ProbcutMargin | 40 | 0-300 |
+| ProbcutReduce | 4 | 1-6 |
+| IirMinDepth | 4 | 3-8 |
+| SeDepth | 8 | 5-12 |
+| SeMargin | 2 | 0-8 |
+| SeReducedDiv | 2 | 1-4 |
 | LmrMinDepth | 3 | 2-5 |
+| LmrImprovingAdj | -1 | -4 to 4 |
+| LmrHistoryGoodAdj | -1 | -4 to 4 |
+| LmrHistoryBadAdj | 1 | -4 to 4 |
+| LmrHistoryGoodThresh | 2000 | 0-10000 |
+| LmrHistoryBadThresh | -2000 | -10000 to 0 |
 | FutilityMargin | 65 | 30-400 |
+| FutilityMaxDepth | 3 | 1-6 |
 | LmpBase | 2 | 1-4 |
 | LmpDiv | 2 | 1-4 |
+| LmpMaxDepth | 8 | 3-12 |
+| RazorMargin | 80 | 0-300 |
+| RazorMaxDepth | 3 | 1-5 |
+| DeltaPruningMargin | 250 | 0-1200 |
+| SeePruneThreshold | -50 | -300 to 0 |
+| ContinuationScoreDiv | 12 | 1-64 |
 
 ## Testing
 

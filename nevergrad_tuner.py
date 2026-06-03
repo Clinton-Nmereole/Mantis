@@ -57,29 +57,74 @@ DEFAULT_ENGINE = "./mantis"
 BASELINE_ENGINE = "./mantis_baseline"
 RESULT_FILE = "tuning_progress_uci.json"
 BEST_PARAMS_FILE = "best_params_uci.json"
+DEFAULT_OPENINGS = "2moves_v1.epd"
 
-# Parameters to tune: name -> (min, max)
-# Focus on the 8 highest-leverage search parameters
+# Parameters to tune: source field name -> (min, max)
+# These ranges mirror the bounded UCI tuning options.
 PARAM_RANGES: Dict[str, Tuple[int, int]] = {
+    "aspiration_window":   (5, 200),
+    "nmp_min_depth":       (2, 6),
     "nmp_reduction_base": (0, 4),
     "nmp_reduction_div":  (3, 10),
     "rfp_margin":         (10, 150),
     "rfp_depth":          (5, 10),
+    "probcut_depth":      (3, 8),
+    "probcut_margin":     (0, 300),
+    "probcut_reduce":     (1, 6),
+    "iir_min_depth":      (3, 8),
+    "se_depth":           (5, 12),
+    "se_margin":          (0, 8),
+    "se_reduced_div":     (1, 4),
     "lmr_min_depth":      (2, 5),
+    "lmr_improving_adj":  (-4, 4),
+    "lmr_history_good_adj": (-4, 4),
+    "lmr_history_bad_adj":  (-4, 4),
+    "lmr_history_good_thresh": (0, 10000),
+    "lmr_history_bad_thresh":  (-10000, 0),
     "futility_margin":    (30, 400),
+    "futility_max_depth": (1, 6),
     "lmp_base":           (1, 4),
     "lmp_div":            (1, 4),
+    "lmp_max_depth":      (3, 12),
+    "razor_margin":       (0, 300),
+    "razor_max_depth":    (1, 5),
+    "delta_pruning_margin": (0, 1200),
+    "see_prune_threshold":  (-300, 0),
+    "continuation_score_div": (1, 64),
+    "contempt":           (-100, 100),
 }
 
 PARAM_UCI_OPTIONS: Dict[str, str] = {
+    "aspiration_window":   "AspirationWindow",
+    "nmp_min_depth":       "NmpMinDepth",
     "nmp_reduction_base": "NmpReductionBase",
     "nmp_reduction_div":  "NmpReductionDiv",
     "rfp_margin":         "RfpMargin",
     "rfp_depth":          "RfpDepth",
+    "probcut_depth":      "ProbcutDepth",
+    "probcut_margin":     "ProbcutMargin",
+    "probcut_reduce":     "ProbcutReduce",
+    "iir_min_depth":      "IirMinDepth",
+    "se_depth":           "SeDepth",
+    "se_margin":          "SeMargin",
+    "se_reduced_div":     "SeReducedDiv",
     "lmr_min_depth":      "LmrMinDepth",
+    "lmr_improving_adj":  "LmrImprovingAdj",
+    "lmr_history_good_adj": "LmrHistoryGoodAdj",
+    "lmr_history_bad_adj":  "LmrHistoryBadAdj",
+    "lmr_history_good_thresh": "LmrHistoryGoodThresh",
+    "lmr_history_bad_thresh":  "LmrHistoryBadThresh",
     "futility_margin":    "FutilityMargin",
+    "futility_max_depth": "FutilityMaxDepth",
     "lmp_base":           "LmpBase",
     "lmp_div":            "LmpDiv",
+    "lmp_max_depth":      "LmpMaxDepth",
+    "razor_margin":       "RazorMargin",
+    "razor_max_depth":    "RazorMaxDepth",
+    "delta_pruning_margin": "DeltaPruningMargin",
+    "see_prune_threshold":  "SeePruneThreshold",
+    "continuation_score_div": "ContinuationScoreDiv",
+    "contempt":           "Contempt",
 }
 
 # ---------------------------------------------------------------------------
@@ -151,7 +196,7 @@ def evaluate_params(params: Dict[str, int],
                     depth: Optional[int] = None,
                     max_moves: Optional[int] = None,
                     concurrency: int = 4,
-                    openings: Optional[str] = "openings.epd",
+                    openings: Optional[str] = DEFAULT_OPENINGS,
                     use_uci_options: bool = True) -> Optional[float]:
     """
     Run a quick tournament and return win percentage.
@@ -216,12 +261,40 @@ def evaluate_params(params: Dict[str, int],
         return None
 
 
+def params_match_current_surface(params: object) -> bool:
+    """Return True when saved params match the active tuning surface."""
+    if not isinstance(params, dict):
+        return False
+    if set(params.keys()) != set(PARAM_RANGES.keys()):
+        return False
+    for name, value in params.items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            return False
+        lo, hi = PARAM_RANGES[name]
+        if value < lo or value > hi:
+            return False
+    return True
+
+
+def entry_matches_current_surface(entry: dict) -> bool:
+    params = entry.get("params")
+    best_params = entry.get("best_params", params)
+    return params_match_current_surface(params) and params_match_current_surface(best_params)
+
+
 def load_history(resume_file: Optional[str]) -> List[dict]:
     if resume_file and os.path.exists(resume_file):
         with open(resume_file) as f:
             history = json.load(f)
-        print(f"[RESUME] Loaded {len(history)} previous evaluations")
-        return history
+        if not isinstance(history, list):
+            print("[RESUME] Ignoring progress file with unexpected format")
+            return []
+        filtered = [entry for entry in history if isinstance(entry, dict) and entry_matches_current_surface(entry)]
+        skipped = len(history) - len(filtered)
+        if skipped > 0:
+            print(f"[RESUME] Skipped {skipped} incompatible previous evaluations")
+        print(f"[RESUME] Loaded {len(filtered)} previous evaluations")
+        return filtered
     return []
 
 
@@ -292,7 +365,7 @@ def run_nevergrad(budget: int,
                   depth: Optional[int] = None,
                   max_moves: Optional[int] = None,
                   concurrency: int = 4,
-                  openings: Optional[str] = "openings.epd",
+                  openings: Optional[str] = DEFAULT_OPENINGS,
                   resume_file: Optional[str] = None,
                   use_uci_options: bool = True) -> Tuple[Dict[str, int], float]:
     """Run Nevergrad optimization loop."""
@@ -387,7 +460,7 @@ def run_random_search(budget: int,
                       depth: Optional[int] = None,
                       max_moves: Optional[int] = None,
                       concurrency: int = 4,
-                      openings: Optional[str] = "openings.epd",
+                      openings: Optional[str] = DEFAULT_OPENINGS,
                       resume_file: Optional[str] = None,
                       use_uci_options: bool = True,
                       seed: int = 1) -> Tuple[Dict[str, int], float]:
@@ -485,8 +558,8 @@ Examples:
                         help="Parallel games (default: 4)")
     parser.add_argument("--baseline", default=None,
                         help="Baseline engine; default is candidate engine in UCI mode")
-    parser.add_argument("--openings", default="openings.epd",
-                        help="Opening FEN/move file for selfplay.py (default: openings.epd)")
+    parser.add_argument("--openings", default=DEFAULT_OPENINGS,
+                        help=f"Opening FEN/move file for selfplay.py (default: {DEFAULT_OPENINGS})")
     parser.add_argument("--no-openings", action="store_true",
                         help="Do not pass an openings file to selfplay.py")
     parser.add_argument("--source-edit", action="store_true",

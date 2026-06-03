@@ -3403,3 +3403,42 @@ python3 compare_candidates.py --baseline ./mantis_after_revert \
 Summary: tactical regression passed; randomized perft passed; short stats
 benchmark was normal; depth-6 comparison over 44 positions had `0/44` bestmove
 changes, `0` node changes, and `0 cp` score delta.
+
+## Accepted: Expanded UCI Tuning Surface
+
+Change: expose the rest of the bounded `SearchParams` controls as UCI spin
+options, including aspiration windows, null-move depth, probcut, internal
+iterative reductions, singular-extension thresholds, LMR adjustments, LMP
+depth, razoring, delta pruning, SEE pruning, continuation-history scaling, and
+contempt.  The local Nevergrad/random tuner now maps the same 30 parameters to
+UCI `--option-a` arguments and defaults fresh runs to the existing
+`2moves_v1.epd` opening file.
+
+The UCI `setoption` parser now finds the `value` token and joins the preceding
+tokens into the full option name, which fixes the pre-existing multi-word
+option path for `Move Overhead` and keeps path-valued options working.  The
+tuner also filters incompatible resume entries so old 8-parameter progress
+files cannot seed or short-circuit the expanded surface.
+
+Verification:
+
+```text
+odin build . -out:mantis_uci_tune_surface -o:speed
+python3 -m py_compile nevergrad_tuner.py
+UCI smoke: Move Overhead plus representative positive and negative tuning
+  options parsed, then returned uciok/readyok.
+UCI option list: AspirationWindow, ProbcutMargin, ContinuationScoreDiv, and
+  Move Overhead advertised with expected bounds.
+python3 compare_candidates.py --baseline ./mantis_ply_guard \
+  --candidate ./mantis_uci_tune_surface --depths 6 --timeout 90 \
+  --csv /tmp/mantis_uci_tune_surface_depth6_compare.csv
+python3 nevergrad_tuner.py --engine ./mantis_uci_tune_surface \
+  --baseline ./mantis_uci_tune_surface --optimizer random --budget 1 \
+  --games 2 --movetime 20 --concurrency 1 --max-moves 20
+```
+
+Summary: depth-6 comparison over 44 positions had `0/44` bestmove changes,
+`0` node changes, and `0 cp` score delta.  The tuner smoke passed all 30 UCI
+options through `selfplay.py` against `2moves_v1.epd` with `0` illegal moves
+and `0` failed games; a stale-resume smoke skipped the incompatible old row
+and ran a fresh expanded candidate.
