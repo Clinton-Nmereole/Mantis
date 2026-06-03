@@ -626,7 +626,9 @@ itself was already tactically lost:
 
 ```text
 FEN: 3r4/1kp3pp/p1p5/1r6/R4p2/1P2P2q/PB6/2QR2K1 w - - 0 27
-Baseline depth 8: d1d8
+Baseline depth 6: d1d8
+Candidate depth 6: e3f4
+Candidate depth 7: g1f2
 Candidate depth 8: a4f4
 ```
 
@@ -638,7 +640,7 @@ guard is fixed-depth only and much narrower:
 
 - final requested depth only,
 - first PV only,
-- depth 8 or deeper,
+- depth 6 or deeper,
 - root seed is a capture or promotion,
 - fail-high re-search keeps that same root seed,
 - the re-search score is still clamped at or below the old alpha.
@@ -650,38 +652,46 @@ unchanged.
 Focused result:
 
 ```text
-./mantis depth 8:                     d1d8, -1.99
-./mantis_failhigh_clamp_verify depth 8: a4f4, -2.79
+./mantis depth 6:                  d1d8, -1.87
+./mantis_failhigh_d6_verify depth 6: e3f4, -1.66
+
+./mantis depth 7:                  d1d8, -1.93
+./mantis_failhigh_d6_verify depth 7: g1f2, -3.15
+
+./mantis depth 8:                  a4f4, -2.79
+./mantis_failhigh_d6_verify depth 8: a4f4, -2.79
 ```
 
 Broad comparison:
 
 ```text
 python3 compare_candidates.py --baseline ./mantis \
-  --candidate ./mantis_failhigh_clamp_verify --depths 6 8 --timeout 120 \
-  --csv /tmp/mantis_failhigh_clamp_verify_refined_compare_d6_d8.csv
+  --candidate ./mantis_failhigh_d6_verify --depths 5 6 7 8 --timeout 120 \
+  --csv /tmp/mantis_failhigh_d6_verify_compare_d5_d8.csv
 
 python3 compare_candidates.py --baseline ./mantis \
-  --candidate ./mantis_failhigh_clamp_verify --depths 9 --timeout 150 \
-  --csv /tmp/mantis_failhigh_clamp_verify_refined_compare_d9.csv
+  --candidate ./mantis_failhigh_d6_verify --depths 9 --timeout 150 \
+  --csv /tmp/mantis_failhigh_d6_verify_compare_d9.csv
 
 python3 compare_candidates.py --baseline ./mantis \
-  --candidate ./mantis_failhigh_clamp_verify --movetimes 80 250 --timeout 60 \
-  --csv /tmp/mantis_failhigh_clamp_verify_refined_compare_movetime.csv
+  --candidate ./mantis_failhigh_d6_verify --movetimes 80 250 --timeout 60 \
+  --csv /tmp/mantis_failhigh_d6_verify_compare_movetime.csv
 ```
 
 Summary:
 
 ```text
-Depth 6:       0/44 bestmove changes, +0.00% nodes
-Depth 8:       0/44 bestmove changes, +5.64% nodes
-Depth 9:       0/44 bestmove changes, +5.96% nodes
-Movetime 80:   0/44 bestmove changes, +0.00% nodes
-Movetime 250:  0/44 bestmove changes, -0.91% nodes
+Depth 5:       0/44 bestmove changes, +0.00% nodes
+Depth 6:       1/44 bestmove changes, +3.93% nodes, +61 cp on the changed row
+Depth 7:       0/44 bestmove changes, +1.42% nodes
+Depth 8:       0/44 bestmove changes, +0.00% nodes vs the depth-8 verifier
+Depth 9:       0/44 bestmove changes, +0.00% nodes
+Movetime 80:   0/44 bestmove changes, -0.69% nodes
+Movetime 250:  0/44 bestmove changes, -0.86% nodes
 ```
 
 The SF2700 target is also covered by `tactical_regression.py` as a banned
-depth-8 `d1d8` move so the exact fixed-depth failure cannot silently return.
+depth-6 `d1d8` move so the exact fixed-depth failure cannot silently return.
 
 ## Next
 

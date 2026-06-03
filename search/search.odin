@@ -5558,7 +5558,7 @@ search_position :: proc(
 			}
 
 			fixed_depth_root_verify := current_depth == depth && current_depth >= 9 && pv_index == 0
-			fixed_depth_fail_high_verify := current_depth == depth && current_depth >= 8 && pv_index == 0
+			fixed_depth_fail_high_verify := current_depth == depth && current_depth >= 6 && pv_index == 0
 			timed_root_verify_prepared := false
 			timed_mixed_root_verify_prepared := false
 			timed_root_capture_verify_prepared := false
