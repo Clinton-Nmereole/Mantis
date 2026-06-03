@@ -333,8 +333,9 @@ generate_all_moves :: proc(board: ^Board, move_list: ^moves.MoveList) {
 	// Generate all moves for the current side
 	side := board.side
 	occupancy := board.occupancies[constants.BOTH]
-	own_pieces := board.occupancies[side]
-	enemy_pieces := board.occupancies[1 - side]
+	opponent_king := (side == constants.WHITE) ? board.bitboards[constants.KING + 6] : board.bitboards[constants.KING]
+	own_pieces := board.occupancies[side] | opponent_king
+	enemy_pieces := board.occupancies[1 - side] & ~opponent_king
 
 	// Pawns
 	pawns :=
@@ -369,7 +370,8 @@ generate_all_moves :: proc(board: ^Board, move_list: ^moves.MoveList) {
 generate_capture_moves :: proc(board: ^Board, move_list: ^moves.MoveList) {
 	side := board.side
 	occupancy := board.occupancies[constants.BOTH]
-	enemy_pieces := board.occupancies[1 - side]
+	opponent_king := (side == constants.WHITE) ? board.bitboards[constants.KING + 6] : board.bitboards[constants.KING]
+	enemy_pieces := board.occupancies[1 - side] & ~opponent_king
 
 	pawns :=
 		(side == constants.WHITE) ? board.bitboards[constants.PAWN] : board.bitboards[constants.PAWN + 6]

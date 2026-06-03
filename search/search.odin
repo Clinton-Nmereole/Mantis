@@ -2159,8 +2159,11 @@ trace_root_legal_move :: proc(b: ^board.Board, move: moves.Move) -> bool {
 
 	state: board.StateInfo
 	board.make_move_fast(b, move, &state)
-	king_sq := board.get_king_square(b, 1 - b.side)
-	illegal := board.is_square_attacked(b, king_sq, b.side)
+	mover_king_sq := board.get_king_square(b, 1 - b.side)
+	opponent_king_sq := board.get_king_square(b, b.side)
+	illegal := mover_king_sq < 0 ||
+	           opponent_king_sq < 0 ||
+	           board.is_square_attacked(b, mover_king_sq, b.side)
 	board.unmake_move(b, &state)
 
 	return !illegal
@@ -2889,18 +2892,12 @@ run_continuation_div_root_pass :: proc(
 
 	for i in 0 ..< move_list.count {
 		move := move_list.moves[i]
-		if !board.is_castling_legal_now(b, move) {
+		if !trace_root_legal_move(b, move) {
 			continue
 		}
 
 		state: board.StateInfo
 		board.make_move_fast(b, move, &state)
-		king_sq := board.get_king_square(b, 1 - b.side)
-		if board.is_square_attacked(b, king_sq, b.side) {
-			board.unmake_move(b, &state)
-			continue
-		}
-
 		nnue.update_accumulators(&state, b, move)
 
 		alpha_before := current_alpha

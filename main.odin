@@ -119,11 +119,13 @@ main :: proc() {
 					fen = args[4]
 				} else {
 					fen_alloc = strings.join(args[4:], " ")
-					defer delete(fen_alloc)
 					fen = fen_alloc
 				}
 			}
 			search.trace_root_move_scores(fen, depth)
+			if fen_alloc != "" {
+				delete(fen_alloc)
+			}
 			return
 		}
 	}
@@ -151,11 +153,13 @@ main :: proc() {
 					fen = args[fen_arg + 1]
 				} else {
 					fen_alloc = strings.join(args[fen_arg + 1:], " ")
-					defer delete(fen_alloc)
 					fen = fen_alloc
 				}
 			}
 			search.trace_root_parity_scores(fen, depth, target_moves[:])
+			if fen_alloc != "" {
+				delete(fen_alloc)
+			}
 			return
 		}
 	}
@@ -183,11 +187,13 @@ main :: proc() {
 					fen = args[fen_arg + 1]
 				} else {
 					fen_alloc = strings.join(args[fen_arg + 1:], " ")
-					defer delete(fen_alloc)
 					fen = fen_alloc
 				}
 			}
 			search.trace_root_pipeline_scores(fen, depth, target_moves[:])
+			if fen_alloc != "" {
+				delete(fen_alloc)
+			}
 			return
 		}
 	}
@@ -203,11 +209,13 @@ main :: proc() {
 					fen = args[4]
 				} else {
 					fen_alloc = strings.join(args[4:], " ")
-					defer delete(fen_alloc)
 					fen = fen_alloc
 				}
 			}
 			search.trace_root_order_scores(fen, depth)
+			if fen_alloc != "" {
+				delete(fen_alloc)
+			}
 			return
 		}
 	}
@@ -224,11 +232,13 @@ main :: proc() {
 					fen = args[5]
 				} else {
 					fen_alloc = strings.join(args[5:], " ")
-					defer delete(fen_alloc)
 					fen = fen_alloc
 				}
 			}
 			search.trace_root_child_diagnostics(fen, depth, target_move)
+			if fen_alloc != "" {
+				delete(fen_alloc)
+			}
 			return
 		}
 	}
@@ -245,11 +255,13 @@ main :: proc() {
 					fen = args[5]
 				} else {
 					fen_alloc = strings.join(args[5:], " ")
-					defer delete(fen_alloc)
 					fen = fen_alloc
 				}
 			}
 			search.trace_child_continuation_order_scores(fen, depth, root_move)
+			if fen_alloc != "" {
+				delete(fen_alloc)
+			}
 			return
 		}
 	}
@@ -273,11 +285,13 @@ main :: proc() {
 					fen = args[fen_arg + 1]
 				} else {
 					fen_alloc = strings.join(args[fen_arg + 1:], " ")
-					defer delete(fen_alloc)
 					fen = fen_alloc
 				}
 			}
 			search.trace_continuation_line_order_scores(fen, depth, root_move, reply_move)
+			if fen_alloc != "" {
+				delete(fen_alloc)
+			}
 			return
 		}
 	}
@@ -306,11 +320,13 @@ main :: proc() {
 					fen = args[fen_arg + 1]
 				} else {
 					fen_alloc = strings.join(args[fen_arg + 1:], " ")
-					defer delete(fen_alloc)
 					fen = fen_alloc
 				}
 			}
 			search.trace_continuation_divergence(fen, depth, div_a, div_b)
+			if fen_alloc != "" {
+				delete(fen_alloc)
+			}
 			return
 		}
 	}
@@ -339,11 +355,13 @@ main :: proc() {
 					fen = args[fen_arg + 1]
 				} else {
 					fen_alloc = strings.join(args[fen_arg + 1:], " ")
-					defer delete(fen_alloc)
 					fen = fen_alloc
 				}
 			}
 			search.trace_root_aspiration(fen, depth, divisor)
+			if fen_alloc != "" {
+				delete(fen_alloc)
+			}
 			return
 		}
 	}

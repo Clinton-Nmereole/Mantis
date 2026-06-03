@@ -1951,3 +1951,79 @@ The clock smoke printed changing clocks and stopped after exactly six plies via
 smoke still reached `max moves reached`; the tuner smoke completed through the
 now-functional `--max-moves` path; and an in-memory `e2e4 e7e5` opening sequence
 smoke passed through `run_tournament()`.
+
+## Accepted: Reject Pseudo-Legal King Captures
+
+While revisiting the unresolved `c8c2` vs `f8c5` root mismatch, the root parity
+and pipeline diagnostics crashed when unquoted multi-field FEN arguments were
+used and when descendant searches reached positions where a pseudo move had
+captured the opponent king. The second issue is a core correctness problem:
+the opponent king should remain an occupancy blocker, but it must never be a
+capture target for normal all-move or capture-only generation.
+
+Change:
+
+- `generate_all_moves()` now treats the opponent king as a blocker for quiet
+  and capture generation.
+- `generate_capture_moves()` removes the opponent king from the capture target
+  mask.
+- root trace legality now rejects tentative children where either king is
+  missing, and the continuation/pipeline trace pass uses that shared helper.
+- one-shot trace commands keep joined FEN strings alive until the trace call
+  returns, so quoted and unquoted FEN arguments behave the same.
+
+Focused diagnostic result:
+
+```text
+./mantis_no_king_captures trace-root-parity 15 c8c2 f8c5 fen \
+  2r1kb1r/pp1b1ppp/1q2p3/3pP3/3n4/3BB3/PPN2PPP/R2Q1RK1 b k - 1 13
+```
+
+The unquoted command no longer crashes. It confirms the remaining root issue:
+`f8c5` has a much better comparable full-window score than `c8c2`, but the
+root PVS probe is pinned at alpha:
+
+```text
+c8c2 full=-892
+f8c5 full=-609 pvs=-892 note=PVS_MISS
+```
+
+Validation:
+
+```text
+odin build . -out:mantis_no_king_captures -o:speed
+python3 correctness_test.py --binary ./mantis_no_king_captures
+python3 tactical_regression.py --binary ./mantis_no_king_captures
+python3 compare_candidates.py \
+  --baseline ./mantis_current \
+  --candidate ./mantis_no_king_captures \
+  --depth 8 \
+  --timeout 60 \
+  --csv games/no_king_captures_depth8_compare.csv
+python3 stats_benchmark.py --binary ./mantis_no_king_captures --timeout 90
+python3 compare_candidates.py \
+  --baseline ./mantis_current \
+  --candidate ./mantis_no_king_captures \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 \
+  --timeout 90 \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv games/no_king_captures_compare_first_collapse.csv
+```
+
+Results:
+
+```text
+perft correctness: passed
+tactical regression: passed, including h7g6 queen-defense guard
+depth-8 comparison: 0/44 bestmove changes, 0 node changes, 0 score changes
+raw stats benchmark: 473960 nodes
+first-collapse clock compare: 0/13 bestmove changes, 0 node changes,
+  0 score changes, no oracle-loss regressions
+```
+
+The fixed-depth depth-15 search can still recover `f8c5`, but it takes about
+111 seconds on this machine. The 3+2-style clock search still keeps `c8c2`, so
+the next behavior target remains a cheaper timed verifier or root PVS recovery
+gate for this exact class, with `h7g6` as the first guardrail.
