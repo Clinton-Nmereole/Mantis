@@ -665,6 +665,7 @@ class Engine:
         self._queue_lock = threading.Lock()
         self._reader_thread = None
         self._running = False
+        self.last_search_info = {'depth': None, 'nodes': None, 'time_ms': None}
 
     def start(self):
         """Launch the engine process and wait for UCI initialization."""
@@ -779,6 +780,9 @@ class Engine:
 
         bestmove = None
         score = None
+        depth = None
+        nodes = None
+        time_ms = None
         start = time.time()
 
         # Compute adaptive timeout based on time control
@@ -809,6 +813,15 @@ class Engine:
                         score = 100000 if score_val > 0 else -100000
                     else:
                         score = score_val
+                depth_match = re.search(r'\bdepth\s+(\d+)', line)
+                if depth_match:
+                    depth = int(depth_match.group(1))
+                nodes_match = re.search(r'\bnodes\s+(\d+)', line)
+                if nodes_match:
+                    nodes = int(nodes_match.group(1))
+                time_match = re.search(r'\btime\s+(\d+)', line)
+                if time_match:
+                    time_ms = int(time_match.group(1))
 
             # Parse bestmove
             if line.startswith("bestmove"):
@@ -822,6 +835,7 @@ class Engine:
         if bestmove is None:
             raise TimeoutError("Engine did not return bestmove")
 
+        self.last_search_info = {'depth': depth, 'nodes': nodes, 'time_ms': time_ms}
         return bestmove, score
 
 
@@ -839,6 +853,7 @@ class GameResult:
     white_engine: str     # Name of engine playing white
     black_engine: str     # Name of engine playing black
     start_fen: Optional[str] = None
+    search_infos: List[dict] = field(default_factory=list)
 
 
 def play_game(engine_a_path: str, engine_b_path: str,
@@ -879,6 +894,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
         board = MinimalBoard(opening_fen if opening_fen else "startpos")
         moves = []
         scores: List[Optional[int]] = []
+        search_infos = []
         eval_history = []  # Track evals for adjudication
         clock_mode = (
             time_control.get('wtime') is not None and
@@ -897,6 +913,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
                 board.apply_uci_move(mv)
                 moves.append(mv)
                 scores.append(None)
+                search_infos.append({})
 
         for move_number in range(max_moves):
             # Check if game is already over
@@ -906,6 +923,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
                     print(f"Game over: {result} ({board.fen()})")
                 return GameResult(
                     result=result, moves=moves[:], scores=scores[:],
+                    search_infos=search_infos[:],
                     reason="checkmate/stalemate/draw rule",
                     white_engine=engine_a_path, black_engine=engine_b_path,
                 )
@@ -941,6 +959,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
                     if white_clock <= 0:
                         return GameResult(
                             result='0-1', moves=moves[:], scores=scores[:],
+                            search_infos=search_infos[:],
                             reason=f"time forfeit (white, elapsed {elapsed_ms} ms)",
                             white_engine=engine_a_path, black_engine=engine_b_path,
                         )
@@ -950,6 +969,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
                     if black_clock <= 0:
                         return GameResult(
                             result='1-0', moves=moves[:], scores=scores[:],
+                            search_infos=search_infos[:],
                             reason=f"time forfeit (black, elapsed {elapsed_ms} ms)",
                             white_engine=engine_a_path, black_engine=engine_b_path,
                         )
@@ -960,6 +980,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
                 result = '0-1' if is_white_turn else '1-0'
                 return GameResult(
                     result=result, moves=moves[:], scores=scores[:],
+                    search_infos=search_infos[:],
                     reason="no legal move",
                     white_engine=engine_a_path, black_engine=engine_b_path,
                 )
@@ -974,6 +995,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
                 result = '0-1' if is_white_turn else '1-0'
                 return GameResult(
                     result=result, moves=moves[:], scores=scores[:],
+                    search_infos=search_infos[:],
                     reason=f"illegal move ({bestmove})",
                     white_engine=engine_a_path, black_engine=engine_b_path,
                 )
@@ -984,6 +1006,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
 
             moves.append(bestmove)
             scores.append(white_score)
+            search_infos.append(engine.last_search_info.copy())
 
             # Track score from White's perspective
             if white_score is not None:
@@ -994,12 +1017,14 @@ def play_game(engine_a_path: str, engine_b_path: str,
                     if all(e >= adjudicate_eval for e in recent):
                         return GameResult(
                             result='1-0', moves=moves[:], scores=scores[:],
+                            search_infos=search_infos[:],
                             reason=f"adjudication (eval >= {adjudicate_eval})",
                             white_engine=engine_a_path, black_engine=engine_b_path,
                         )
                     if all(e <= -adjudicate_eval for e in recent):
                         return GameResult(
                             result='0-1', moves=moves[:], scores=scores[:],
+                            search_infos=search_infos[:],
                             reason=f"adjudication (eval <= -{adjudicate_eval})",
                             white_engine=engine_a_path, black_engine=engine_b_path,
                         )
@@ -1015,6 +1040,7 @@ def play_game(engine_a_path: str, engine_b_path: str,
         # Max moves reached — declare draw
         return GameResult(
             result='1/2-1/2', moves=moves[:], scores=scores[:],
+            search_infos=search_infos[:],
             reason="max moves reached",
             white_engine=engine_a_path, black_engine=engine_b_path,
         )
@@ -1311,6 +1337,24 @@ def pgn_eval_comment(score_cp: Optional[int]) -> str:
     return f"[%eval {score_cp / 100.0:+.2f}]"
 
 
+def pgn_search_comment(score_cp: Optional[int], search_info: Optional[dict]) -> str:
+    parts = []
+    eval_comment = pgn_eval_comment(score_cp)
+    if eval_comment:
+        parts.append(eval_comment)
+    if search_info:
+        depth = search_info.get("depth")
+        nodes = search_info.get("nodes")
+        time_ms = search_info.get("time_ms")
+        if depth is not None:
+            parts.append(f"[%depth {depth}]")
+        if nodes is not None:
+            parts.append(f"nodes {nodes}")
+        if time_ms is not None:
+            parts.append(f"time {time_ms}ms")
+    return " ".join(parts)
+
+
 def write_pgn(results: List[GameResult], pgn_path: str) -> None:
     try:
         import chess
@@ -1354,7 +1398,8 @@ def write_pgn(results: List[GameResult], pgn_path: str) -> None:
 
                 node = node.add_variation(move)
                 if ply < len(result.scores):
-                    comment = pgn_eval_comment(result.scores[ply])
+                    search_info = result.search_infos[ply] if ply < len(result.search_infos) else None
+                    comment = pgn_search_comment(result.scores[ply], search_info)
                     if comment:
                         node.comment = comment
                 board.push(move)

@@ -2329,3 +2329,52 @@ stateful-warm80ms-pgnfen:
 The original `b6b7` was not deterministic under replay, but the 80ms timed warm
 path still shifts away from the cold `b6a6` choice. This is a useful fresh
 timing-sensitive endgame target, not yet an accepted engine behavior change.
+
+## Accepted: Self-Play Search Metadata
+
+The `b6b7` target did not reproduce under an exact single-process replay matrix:
+
+```text
+searchstats=false, ucinewgame=false: 80ms b6a6 d10, 250ms b6b5 d10
+searchstats=false, ucinewgame=true:  80ms b6a6 d9,  250ms b6c5 d11
+searchstats=true,  ucinewgame=false: 80ms b6a6 d9,  250ms b6a6 d11
+searchstats=true,  ucinewgame=true:  80ms b6a6 d9,  250ms b6a6 d11
+```
+
+That leaves CPU-load and timed-depth variance as plausible explanations for the
+original self-play move. To make future mined targets more actionable,
+`selfplay.py --pgn-out` now records per-move search metadata in comments:
+
+```text
+[%eval +0.17] [%depth 2] nodes 196 time 0ms
+```
+
+`blunder_trace.py` still reads the `[%eval ...]` prefix normally.
+
+Validation:
+
+```text
+python3 -m py_compile selfplay.py
+python3 selfplay.py \
+  --engine-a ./mantis_timed_capture_verify \
+  --engine-b ./mantis_timed_capture_verify \
+  --games 1 \
+  --depth 2 \
+  --max-moves 4 \
+  --concurrency 1 \
+  --option OwnBook=false \
+  --pgn-out /tmp/mantis_selfplay_meta_smoke.pgn
+python3 blunder_trace.py \
+  --pgn /tmp/mantis_selfplay_meta_smoke.pgn \
+  --mode worst \
+  --limit 2 \
+  --binary ./mantis_timed_capture_verify \
+  --depths 1 \
+  --timeout 20 \
+  --report /tmp/mantis_selfplay_meta_smoke.md \
+  --csv /tmp/mantis_selfplay_meta_smoke.csv
+```
+
+Next: run a larger metadata-rich self-play batch under concurrency and rank only
+targets where the PGN move was made at a plausible depth/time, then promote
+stable Stockfish-confirmed targets into engine changes.
