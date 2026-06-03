@@ -4574,6 +4574,15 @@ quiescence :: proc(st: ^SearchThread, b: ^board.Board, alpha: int, beta: int, pl
 		}
 	}
 
+	if tb.syzygy_enabled {
+		stat_add(&search_stats.tb_probes)
+		tb_score, tb_hit := tb.probe_wdl(b)
+		if tb_hit {
+			stat_add(&search_stats.tb_hits)
+			return tb_score
+		}
+	}
+
 	stat_add(&search_stats.evals)
 	evaluation := eval.evaluate(b)
 

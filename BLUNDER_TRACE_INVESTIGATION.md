@@ -1422,3 +1422,47 @@ oracle regressions: none
 Tactical regression, perft correctness, raw stats benchmark, and the three-move
 own-book smoke test passed. The raw-search benchmark remains at `473960` nodes.
 The latest practice-game binary from this pass is `./mantis_syzygy_pv`.
+
+## Accepted: Quiescence Syzygy WDL Frontier
+
+Change: quiescence search now probes Syzygy WDL before static evaluation when
+tablebases are enabled. This lets exact tablebase results survive all the way
+to depth-zero frontier nodes instead of being replaced by heuristic eval plus
+capture-only quiescence. The path is still gated by `tb.syzygy_enabled`, so
+normal no-tablebase searches are unchanged.
+
+Validation:
+
+```text
+odin build . -out:mantis_syzygy_qfrontier -o:speed
+python3 compare_candidates.py \
+  --baseline ./mantis_syzygy_pv \
+  --candidate ./mantis_syzygy_qfrontier \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 \
+  --timeout 90 \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv games/syzygy_qfrontier_compare_first_collapse.csv
+python3 tactical_regression.py --binary ./mantis_syzygy_qfrontier
+python3 correctness_test.py --binary ./mantis_syzygy_qfrontier
+python3 stats_benchmark.py --binary ./mantis_syzygy_qfrontier --timeout 90
+python3 stats_benchmark.py --binary ./mantis_syzygy_qfrontier --own-book --limit 3 --timeout 30
+```
+
+First-collapse clock compare with no local Syzygy path loaded:
+
+```text
+positions:        13
+bestmove_changes: 0
+avg_depth:        14.69 -> 14.69
+nodes:            15471647 -> 15471647 (+0.00%)
+time_ms:          78437 -> 78190 (-0.31%)
+abs_score_delta:  0 cp
+max_score_delta:  0 cp
+oracle regressions: none
+```
+
+Tactical regression, perft correctness, raw stats benchmark, and the three-move
+own-book smoke test passed. The raw-search benchmark remains at `473960` nodes.
+The latest practice-game binary from this pass is `./mantis_syzygy_qfrontier`.
