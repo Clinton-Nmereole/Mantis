@@ -2027,3 +2027,94 @@ The fixed-depth depth-15 search can still recover `f8c5`, but it takes about
 111 seconds on this machine. The 3+2-style clock search still keeps `c8c2`, so
 the next behavior target remains a cheaper timed verifier or root PVS recovery
 gate for this exact class, with `h7g6` as the first guardrail.
+
+## Accepted: Late Root-Capture Timed Verification
+
+Target:
+
+```text
+FEN: 2r1kb1r/pp1b1ppp/1q2p3/3pP3/3n4/3BB3/PPN2PPP/R2Q1RK1 b k - 1 13
+Previous clock move: c8c2
+Oracle move:         f8c5
+```
+
+Root-debug confirmed the clock search reached depth 15 but never prepared clean
+verification there:
+
+```text
+depth=15 verify_clean=false
+initial c8c2 score=-633, root seed failed low
+fail-low research c8c2 score=-670
+```
+
+The accepted change adds a very narrow clock-only verifier preparation trigger:
+
+- root PV search under managed time;
+- depth 15 or deeper;
+- previous completed PV is full length;
+- aspiration history is fail-high-heavy;
+- the carried root seed is a capture.
+
+For this trigger, clean verification compares the carried baseline against only
+the top two positive-history quiets from the clean root snapshot. It skips the
+usual nonpositive-history suspect pool, which was too expensive and could spend
+the whole timed budget before reaching `f8c5`.
+
+Target result:
+
+```text
+go wtime 180000 btime 180000 winc 2000 binc 2000
+before: bestmove c8c2, depth 15, nodes 1296320
+after:  bestmove f8c5, depth 15, nodes 2096596
+```
+
+First-collapse clock compare:
+
+```text
+python3 compare_candidates.py \
+  --baseline ./mantis_no_king_captures \
+  --candidate ./mantis_timed_capture_verify \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 \
+  --timeout 90 \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv games/timed_capture_verify_compare_first_collapse.csv
+```
+
+Result:
+
+```text
+bestmove_changes: 1
+c8c2 -> f8c5, oracle_loss 36 -> 0
+avg_depth: 14.77 -> 14.77
+nodes: +4.87%
+time: +6.11%
+oracle regressions: none
+```
+
+Validation:
+
+```text
+odin build . -out:mantis_timed_capture_verify -o:speed
+python3 tactical_regression.py --binary ./mantis_timed_capture_verify
+python3 compare_candidates.py \
+  --baseline ./mantis_no_king_captures \
+  --candidate ./mantis_timed_capture_verify \
+  --depth 8 \
+  --timeout 60 \
+  --csv games/timed_capture_verify_depth8_compare.csv
+python3 correctness_test.py --binary ./mantis_timed_capture_verify
+python3 stats_benchmark.py --binary ./mantis_timed_capture_verify --timeout 90
+python3 stats_benchmark.py --binary ./mantis_timed_capture_verify --own-book --limit 3 --timeout 30
+```
+
+Fixed-depth depth-8 stayed exact across all 44 benchmark positions: zero
+bestmove, node, and score changes. Tactical regression passed, including the
+`h7g6` queen-defense guard. Perft correctness passed. The raw stats benchmark
+remains `473960` nodes, and own-book smoke still returns zero-node book moves.
+
+Next: re-run or gather fresh practice games against Viridithas using the latest
+binary, then extract a new first-collapse/oracle set. The old `c8c2` target is
+now fixed under reproduced 3+2 clock conditions; the remaining known oracle
+mismatch is `d7e7` vs `g1f1` at about 21 cp.

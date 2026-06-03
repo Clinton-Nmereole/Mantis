@@ -1930,6 +1930,7 @@ ROOT_VERIFY_SUSPECT_MIN_DEPTH :: 12
 ROOT_VERIFY_SUSPECT_PREFILTER_OFFSET :: 3
 ROOT_VERIFY_TIMED_SUSPECT_PREFILTER_OFFSET :: 7
 ROOT_VERIFY_SUSPECT_ORDER_LIMIT :: 20
+ROOT_VERIFY_TIMED_POSITIVE_QUIET_LIMIT :: 2
 ROOT_VERIFY_PRIORITY_CORE :: 0
 ROOT_VERIFY_PRIORITY_SUSPECT_BASE :: 10
 ROOT_VERIFY_PRIORITY_FORCING :: 20
@@ -2046,6 +2047,72 @@ limit_timed_root_verify_candidate_set :: proc(set: ^RootVerifyCandidateSet, incl
 		set.include[i] = false
 		set.reason[i] = "timed_verify_budget"
 		set.priority[i] = ROOT_VERIFY_PRIORITY_SKIP
+	}
+}
+
+restore_timed_positive_history_quiets :: proc(
+	set: ^RootVerifyCandidateSet,
+	st: ^SearchThread,
+	move_list: ^moves.MoveList,
+	max_count: int,
+) {
+	if max_count <= 0 {
+		return
+	}
+
+	indices: [ROOT_VERIFY_TIMED_POSITIVE_QUIET_LIMIT]int
+	scores: [ROOT_VERIFY_TIMED_POSITIVE_QUIET_LIMIT]int
+	for i in 0 ..< len(indices) {
+		indices[i] = -1
+		scores[i] = -eval.INF
+	}
+
+	limit := max_count
+	if limit > len(indices) {
+		limit = len(indices)
+	}
+
+	for i in 0 ..< set.count {
+		if i >= move_list.count {
+			break
+		}
+		move := move_list.moves[i]
+		if move.capture || move.promoted != -1 {
+			continue
+		}
+
+		history_score := get_history_score(st, move)
+		if history_score <= 0 {
+			continue
+		}
+
+		insert_at := limit
+		for j in 0 ..< limit {
+			if history_score > scores[j] {
+				insert_at = j
+				break
+			}
+		}
+		if insert_at >= limit {
+			continue
+		}
+
+		for j := limit - 1; j > insert_at; j -= 1 {
+			indices[j] = indices[j - 1]
+			scores[j] = scores[j - 1]
+		}
+		indices[insert_at] = i
+		scores[insert_at] = history_score
+	}
+
+	for rank in 0 ..< limit {
+		idx := indices[rank]
+		if idx < 0 {
+			continue
+		}
+		set.include[idx] = true
+		set.reason[idx] = "timed_positive_history_quiet"
+		set.priority[idx] = ROOT_VERIFY_PRIORITY_CORE + 1 + rank
 	}
 }
 
@@ -5351,6 +5418,7 @@ search_position :: proc(
 			fixed_depth_root_verify := current_depth == depth && current_depth >= 9 && pv_index == 0
 			timed_root_verify_prepared := false
 			timed_mixed_root_verify_prepared := false
+			timed_root_capture_verify_prepared := false
 			if current_depth >= 9 && pv_index == 0 && use_time_management {
 				timed_root_verify_prepared = should_prepare_timed_root_verify(
 					search_limits,
@@ -5369,7 +5437,6 @@ search_position :: proc(
 					timed_root_verify_prepared = true
 				}
 			}
-			prepare_clean_root_verify := fixed_depth_root_verify || timed_root_verify_prepared
 
 			root_tt_move := moves.Move{}
 			if pv_index == 0 {
@@ -5380,14 +5447,36 @@ search_position :: proc(
 			}
 			actual_root_tt_move := moves.Move{}
 			debug_root_pass := root_debug_trace_enabled && pv_index == 0 && (current_depth == depth || use_time_management)
-			if debug_root_pass || prepare_clean_root_verify {
-				actual_root_tt_move = get_tt_move(b.hash)
-			}
 
 			// Sort root moves, preserving the previous completed PV move first.
 			sort_moves(st, &move_list, b, root_tt_move, 0, moves.Move{})
 			if !moves.is_empty_move(root_tt_move) && move_list.count > 0 && same_move(move_list.moves[0], root_tt_move) {
 				stat_add(&search_stats.root_pv_first)
+			}
+
+			// Late clock searches can carry a capture root seed through a
+			// fail-low without being close enough to prepare the normal
+			// verifier.  Snapshot this narrow class before the root pass so
+			// a cheap quiet check can recover obvious full-window misses.
+			if current_depth >= 15 &&
+			   pv_index == 0 &&
+			   use_time_management &&
+			   !timed_root_verify_prepared &&
+			   previous_completed_pv_len >= current_depth - 1 &&
+			   aspiration_fail_high_count >= 5 {
+				for root_seed_idx in 0 ..< move_list.count {
+					if same_move(move_list.moves[root_seed_idx], root_tt_move) &&
+					   move_list.moves[root_seed_idx].capture {
+						timed_root_capture_verify_prepared = true
+						timed_root_verify_prepared = true
+						break
+					}
+				}
+			}
+
+			prepare_clean_root_verify := fixed_depth_root_verify || timed_root_verify_prepared
+			if debug_root_pass || prepare_clean_root_verify {
+				actual_root_tt_move = get_tt_move(b.hash)
 			}
 
 			verify_from_clean_root := false
@@ -5543,6 +5632,9 @@ search_position :: proc(
 							verify_score_drop,
 							aspiration_failures,
 						)
+						if timed_root_capture_verify_prepared {
+							run_clean_root_verify = true
+						}
 					}
 
 					if depth_completed && verify_from_clean_root && run_clean_root_verify {
@@ -5571,16 +5663,19 @@ search_position :: proc(
 								current_best_move,
 								actual_root_tt_move,
 							)
-							suspect_quiets := collect_root_verify_suspect_quiets(
-								&verify_st,
-								b,
-								&move_list,
-								current_depth,
-								&research_pass,
-								verify_tt_snapshot,
-								&base_verify_candidates,
-								timed_limited_root_verify,
-							)
+							suspect_quiets: RootVerifySuspectResult
+							if !timed_root_capture_verify_prepared {
+								suspect_quiets = collect_root_verify_suspect_quiets(
+									&verify_st,
+									b,
+									&move_list,
+									current_depth,
+									&research_pass,
+									verify_tt_snapshot,
+									&base_verify_candidates,
+									timed_limited_root_verify,
+								)
+							}
 							st.nodes += suspect_quiets.nodes
 							if debug_root_pass && suspect_quiets.count > 0 {
 								fmt.printf("info string rootdebug verify suspect_quiets count=%d nodes=%d moves=", suspect_quiets.count, suspect_quiets.nodes)
@@ -5610,7 +5705,24 @@ search_position :: proc(
 								suspect_quiets.moves[3],
 							)
 							if timed_limited_root_verify {
-								limit_timed_root_verify_candidate_set(&verify_candidates, timed_mixed_root_verify_prepared)
+								if timed_root_capture_verify_prepared {
+									// This trigger is budgeted for quiet recovery only:
+									// compare the carried baseline against a tiny
+									// high-history quiet set and skip general suspects.
+									for verify_idx in 0 ..< verify_candidates.count {
+										verify_candidates.include[verify_idx] = false
+										verify_candidates.reason[verify_idx] = "timed_capture_verify_budget"
+										verify_candidates.priority[verify_idx] = ROOT_VERIFY_PRIORITY_SKIP
+									}
+									restore_timed_positive_history_quiets(
+										&verify_candidates,
+										&verify_st,
+										&move_list,
+										ROOT_VERIFY_TIMED_POSITIVE_QUIET_LIMIT,
+									)
+								} else {
+									limit_timed_root_verify_candidate_set(&verify_candidates, timed_mixed_root_verify_prepared)
+								}
 							}
 							if depth_completed {
 								if timed_limited_root_verify && !timed_mixed_root_verify_prepared {
