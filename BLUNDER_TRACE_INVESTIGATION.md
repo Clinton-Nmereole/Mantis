@@ -693,6 +693,79 @@ Movetime 250:  0/44 bestmove changes, -0.86% nodes
 The SF2700 target is also covered by `tactical_regression.py` as a banned
 depth-6 `d1d8` move so the exact fixed-depth failure cannot silently return.
 
+## Accepted: Shallow Timed Fail-High Capture Verification
+
+The SF2700 poisoned-rook target was already fixed for fixed-depth searches, but
+normal short-clock searches could still preserve the warmed root capture:
+
+```text
+3r4/1kp3pp/p1p5/1r6/R4p2/1P2P2q/PB6/2QR2K1 w - - 0 27
+baseline go wtime 3000 btime 3000 winc 20 binc 20: d1d8
+candidate go wtime 3000 btime 3000 winc 20 binc 20: e3f4
+```
+
+Accepted change: prepare the clean-root snapshot for shallow clock-managed root
+searches when all of these are true:
+
+- current root depth is 6 through 8;
+- UCI time management is active, but exact `movetime` is not;
+- the carried root seed is a capture or promotion in the sorted root list;
+- the previous completed PV reached at least the preceding depth;
+- hard time is at least 240ms.
+
+The clean verification still only fires after a fail-high re-search collapses
+back to or below the old alpha while keeping the same root capture.  For the
+timed shallow trigger, it additionally requires the initial aspiration pass to
+have preferred a different move, which avoids replaying the broader rejected
+clocked fail-high verifier.
+
+Candidate: `./mantis_timed_shallow_capture_verify`
+
+Validation:
+
+```text
+python3 compare_candidates.py --baseline ./mantis --candidate ./mantis_timed_shallow_capture_verify \
+  --depths 6 7 --timeout 120 \
+  --csv /tmp/mantis_timed_shallow_capture_verify_corrected_d6_d7.csv
+python3 compare_candidates.py --baseline ./mantis --candidate ./mantis_timed_shallow_capture_verify \
+  --clock 3000 3000 20 20 --timeout 90 \
+  --csv /tmp/mantis_timed_shallow_capture_verify_corrected_clock3s.csv
+python3 compare_candidates.py --baseline ./mantis --candidate ./mantis_timed_shallow_capture_verify \
+  --movetimes 80 250 --timeout 60 \
+  --csv /tmp/mantis_timed_shallow_capture_verify_corrected_movetime.csv
+python3 compare_candidates.py --baseline ./mantis --candidate ./mantis_timed_shallow_capture_verify \
+  --fen-file games/mantis_vs_viridithas_0601_first_collapse.fens \
+  --clock 180000 180000 2000 2000 --timeout 90 \
+  --oracle-csv games/mantis_vs_viridithas_0601_score_parity_first_collapse_oracle.csv \
+  --fail-on-oracle-loss-regression 0 \
+  --csv /tmp/mantis_timed_shallow_capture_verify_first_collapse.csv
+python3 tactical_regression.py --binary ./mantis_timed_shallow_capture_verify
+python3 correctness_test.py --binary ./mantis_timed_shallow_capture_verify
+python3 stats_benchmark.py --binary ./mantis_timed_shallow_capture_verify --timeout 90
+```
+
+Results:
+
+```text
+Depth 6: 44/44 same bestmove, 0 cp score delta, exact node match
+Depth 7: 44/44 same bestmove, 0 cp score delta, exact node match
+Clock 3s+20ms: 44/44 same bestmove, avg depth 9.20 -> 9.14,
+  nodes -1.25%, time -0.23%, max score delta 20 cp
+Movetime 80ms: 44/44 same bestmove, avg depth unchanged,
+  nodes +1.03%, max score delta 14 cp
+Movetime 250ms: 44/44 same bestmove, avg depth unchanged,
+  nodes -0.03%, one same-move score wobble of 83 cp
+First-collapse 3+2: 13/13 same bestmove, avg depth 15.15 -> 15.23,
+  nodes -1.37%, time -1.91%, oracle regressions 0
+Tactical regression: passed
+Correctness/perft: passed
+Stats benchmark: depth-6 suite unchanged at 495171 nodes
+```
+
+This is intentionally not a general timed root verifier.  It is a narrow
+clocked extension of the fixed-depth shallow root-capture fail-high check, and
+exact `movetime` remains outside the trigger.
+
 ## Next
 
 Validate the remaining first-collapse positions with an external oracle before

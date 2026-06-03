@@ -5562,6 +5562,7 @@ search_position :: proc(
 			timed_root_verify_prepared := false
 			timed_mixed_root_verify_prepared := false
 			timed_root_capture_verify_prepared := false
+			timed_shallow_fail_high_verify := false
 			if current_depth >= 9 && pv_index == 0 && use_time_management {
 				timed_root_verify_prepared = should_prepare_timed_root_verify(
 					search_limits,
@@ -5597,6 +5598,24 @@ search_position :: proc(
 				stat_add(&search_stats.root_pv_first)
 			}
 
+			if current_depth >= 6 &&
+			   current_depth <= 8 &&
+			   pv_index == 0 &&
+			   use_time_management &&
+			   !search_limits.is_movetime &&
+			   !moves.is_empty_move(root_tt_move) &&
+			   previous_completed_pv_len >= current_depth - 1 &&
+			   search_limits.hard_time >= 240 {
+				for root_seed_idx in 0 ..< move_list.count {
+					if same_move(move_list.moves[root_seed_idx], root_tt_move) &&
+					   (move_list.moves[root_seed_idx].capture ||
+					    move_list.moves[root_seed_idx].promoted != -1) {
+						timed_shallow_fail_high_verify = true
+						break
+					}
+				}
+			}
+
 			// Late clock searches can carry a capture root seed through a
 			// fail-low without being close enough to prepare the normal
 			// verifier.  Snapshot this narrow class before the root pass so
@@ -5617,7 +5636,11 @@ search_position :: proc(
 				}
 			}
 
-			prepare_clean_root_verify := fixed_depth_root_verify || fixed_depth_fail_high_verify || timed_root_verify_prepared
+			prepare_clean_root_verify :=
+				fixed_depth_root_verify ||
+				fixed_depth_fail_high_verify ||
+				timed_root_verify_prepared ||
+				timed_shallow_fail_high_verify
 			if debug_root_pass || prepare_clean_root_verify {
 				actual_root_tt_move = get_tt_move(b.hash)
 			}
@@ -5992,13 +6015,15 @@ search_position :: proc(
 					}
 
 					fail_high_root_seed_clamped :=
-						fixed_depth_fail_high_verify &&
+						(fixed_depth_fail_high_verify || timed_shallow_fail_high_verify) &&
 						verify_from_clean_root &&
 						depth_completed &&
 						!moves.is_empty_move(root_tt_move) &&
 						(root_tt_move.capture || root_tt_move.promoted != -1) &&
 						same_move(current_best_move, root_tt_move) &&
-						best_score <= window_alpha
+						best_score <= window_alpha &&
+						(fixed_depth_fail_high_verify ||
+						 (initial_found_move && !same_move(initial_best_move, root_tt_move)))
 					if fail_high_root_seed_clamped {
 						stat_add(&search_stats.aspiration_verifies)
 						if debug_root_pass {
