@@ -135,6 +135,7 @@ SearchThread :: struct {
 	continuation_history: ^[6][64][6][64]int,
 	static_eval_stack:    [MAX_PLY]int,
 	extend_all_checks:    bool,
+	root_pawn_only_endgame: bool,
 }
 
 // Global atomic node counter for UCI reporting
@@ -3760,6 +3761,7 @@ init_search_thread :: proc(st: ^SearchThread, id: int) {
 	st.thread_id = id
 	st.nodes = 0
 	st.extend_all_checks = false
+	st.root_pawn_only_endgame = false
 	clear_killers(st)
 	clear_history(st)
 	clear_capture_history(st)
@@ -4019,6 +4021,13 @@ has_non_pawn_material :: proc(b: ^board.Board, side: int) -> bool {
 		b.bitboards[offset + constants.QUEEN]) != 0
 }
 
+is_pawn_only_endgame :: proc(b: ^board.Board) -> bool {
+	pawns := b.bitboards[constants.PAWN] | b.bitboards[constants.PAWN + 6]
+	return !has_non_pawn_material(b, constants.WHITE) &&
+	       !has_non_pawn_material(b, constants.BLACK) &&
+	       pawns != 0
+}
+
 move_gives_check_after_make :: proc(b: ^board.Board) -> bool {
 	attacker := 1 - b.side
 	king_sq := board.get_king_square(b, b.side)
@@ -4095,6 +4104,7 @@ negamax :: proc(
 	// Check if in check (used by multiple features)
 	king_sq := board.get_king_square(b, b.side)
 	in_check := board.is_square_attacked(b, king_sq, 1 - b.side)
+	pawn_only_endgame := st.root_pawn_only_endgame && is_pawn_only_endgame(b)
 
 	// Check Extension - normally only extend checked frontier nodes.  Very
 	// constrained root check evasions can opt into extending all checked nodes.
@@ -4120,6 +4130,7 @@ negamax :: proc(
 
 	// Razoring - drop into quiescence if position is hopeless
 	if !search_debug_options.disable_razor &&
+	   !pawn_only_endgame &&
 	   !is_pv && !in_check && !is_mate_window(alpha, beta) &&
 	   depth <= params.razor_max_depth && moves.is_empty_move(excluded_move) {
 		razor_margin := params.razor_margin * depth
@@ -4194,6 +4205,7 @@ negamax :: proc(
 	// Skip ply 1: root children are PV-significant even when a root-PVS probe
 	// searches them with a null window.
 	if !search_debug_options.disable_rfp &&
+	   !pawn_only_endgame &&
 	   ply > 1 &&
 	   !is_pv && !in_check && !is_mate_window(alpha, beta) &&
 	   effective_depth <= params.rfp_depth && moves.is_empty_move(excluded_move) {
@@ -4214,6 +4226,7 @@ negamax :: proc(
 	// If the position is good enough that even a reduced-depth tactical search
 	// would fail high, we can prune safely.
 	if !search_debug_options.disable_probcut &&
+	   !pawn_only_endgame &&
 	   !is_pv && !in_check && !is_mate_window(alpha, beta) &&
 	   effective_depth >= params.probcut_depth && moves.is_empty_move(excluded_move) {
 		probcut_beta := beta + params.probcut_margin
@@ -4289,6 +4302,7 @@ negamax :: proc(
 	// If we have no hash move and this is a PV node, reduce depth.
 	// We do not know what is good here, so search shallower first.
 	if !search_debug_options.disable_iir &&
+	   !pawn_only_endgame &&
 	   moves.is_empty_move(tt_move) && is_pv && effective_depth >= params.iir_min_depth {
 		effective_depth -= 1
 	}
@@ -4356,6 +4370,7 @@ negamax :: proc(
 	do_futility := false
 	futility_value := 0
 	if !search_debug_options.disable_futility &&
+	   !pawn_only_endgame &&
 	   !is_pv && !in_check && !is_mate_window(alpha, beta) &&
 	   depth <= params.futility_max_depth && moves.is_empty_move(excluded_move) {
 		futility_margin := params.futility_margin * depth
@@ -4371,6 +4386,7 @@ negamax :: proc(
 	// the remaining quiet moves are unlikely to help.
 	lmp_threshold := 9999 // Default: effectively disabled
 	if !search_debug_options.disable_lmp &&
+	   !pawn_only_endgame &&
 	   !is_pv && !in_check && !is_mate_window(alpha, beta) &&
 	   depth <= params.lmp_max_depth && moves.is_empty_move(excluded_move) {
 		// Threshold grows with depth: deeper = search more moves
@@ -4468,6 +4484,7 @@ negamax :: proc(
 			reduction := 0
 
 			if !search_debug_options.disable_lmr &&
+			   !pawn_only_endgame &&
 			   combined_depth >= params.lmr_min_depth &&
 			   !gives_check &&
 			   quiet_move {
@@ -5418,6 +5435,7 @@ search_position :: proc(
 	clear_capture_history(st)
 	clear_counter_moves(st) // Clear counter moves for new search
 	init_continuation_history(st) // Initialize continuation history
+	st.root_pawn_only_endgame = is_pawn_only_endgame(b)
 	// fmt.printf("DEBUG: NNUE Initialized: %v\n", nnue.is_initialized)
 	// os.flush(os.stdout)
 	best_move: moves.Move

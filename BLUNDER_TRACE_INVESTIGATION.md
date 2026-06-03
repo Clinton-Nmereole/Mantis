@@ -3595,3 +3595,96 @@ Candidates searched in this report: 3
 This shallow depth-2 run is only a plumbing validation, not a tactical oracle.
 The important outcome is that future external gauntlets can now be mined for
 Mantis move-loss candidates without trusting mixed-engine PGN comments.
+
+## Accepted: Root-Scoped Pawn-Only Full Search
+
+The first useful depth-5 source-rescored external scan was run on the SF2400
+smoke PGN:
+
+```sh
+python3 blunder_trace.py \
+  --pgn /tmp/mantis_vs_sf2400_smoke.pgn \
+  --rescore-binary ./mantis \
+  --rescore-depth 5 \
+  --rescore-timeout 20 \
+  --threshold-cp 150 \
+  --max-before-abs-cp 1200 \
+  --mode worst \
+  --limit 12 \
+  --binary ./mantis \
+  --depths 6 8 \
+  --timeout 40 \
+  --oracle-binary ./stockfish-debug/src/stockfish \
+  --oracle-depth 8 \
+  --oracle-multipv 5 \
+  --report /tmp/mantis_sf2400_rescore_d5_worst.md \
+  --csv /tmp/mantis_sf2400_rescore_d5_worst.csv
+```
+
+Result: 407 Mantis moves rescored, 11 candidates at the threshold.  The
+clearest actionable class was pure king-and-pawn endings.  Example:
+
+```text
+8/8/8/6kp/p7/2K3P1/1P6/8 w - - 0 48
+baseline depth 8: c3c2
+Stockfish depth 8 MultiPV best: c3b4
+```
+
+Change: when a root search starts in a position with only kings and pawns, and
+the current node still has only kings and pawns, Mantis now disables the
+selective shortcuts that are risky in quiet pawn races: razoring, reverse
+futility pruning, probcut, internal iterative reduction, futility pruning, late
+move pruning, and late move reductions.  The guard requires at least one pawn,
+so bare-king draws are left alone.  Positions that begin with non-pawn material
+keep the normal selective search even if a subtree later trades into pawns.
+
+Focused comparison:
+
+```text
+python3 compare_candidates.py --baseline ./mantis --candidate ./mantis_pawn_exact \
+  --fen-file <three mined pawn/endgame targets> --depths 8 10 --timeout 60 \
+  --csv /tmp/mantis_pawn_exact_targets_compare_final.csv
+```
+
+Summary:
+
+```text
+Depth 8 target 1: c3c2 -> c3b4, matching Stockfish's top move
+Depth 8 target set: 2/3 bestmove changes, +23.65% nodes on the tiny target set
+Depth 10 target set: 1/3 bestmove changes, +28.05% nodes on the tiny target set
+```
+
+Broad benchmark comparison:
+
+```text
+python3 compare_candidates.py --baseline ./mantis --candidate ./mantis_pawn_exact \
+  --depths 6 8 --timeout 90 \
+  --csv /tmp/mantis_pawn_exact_bench_compare_final.csv
+```
+
+Summary:
+
+```text
+Depth 6: 1/44 bestmove changes, +0.46% nodes, +1.13% time
+Depth 8: 1/44 bestmove changes, +0.75% nodes, +0.32% time
+```
+
+The only benchmark bestmove change at both depths was a pure pawn ending:
+
+```text
+6k1/5p2/6p1/8/7p/7P/6PK/8 w - - 0 1
+```
+
+Stockfish depth 12 reported the main candidate moves as drawn-equivalent, so
+this was not a tactical regression signal.
+
+Validation:
+
+```text
+odin build . -out:mantis_pawn_exact -o:speed -microarch:native
+python3 correctness_test.py --binary ./mantis_pawn_exact
+python3 tactical_regression.py --binary ./mantis_pawn_exact
+git diff --check
+```
+
+All passed.
