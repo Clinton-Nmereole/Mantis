@@ -2794,3 +2794,97 @@ Conclusion: the current target is not fixed by shallow root ordering tweaks.
 Future work should either reduce the cost of the depth-9 fail-low research or
 add a more principled check-evasion extension/search rule that survives
 self-play.
+
+## Accepted: Tight Movetime Check-Evasion Unseed
+
+Change: when the root side is in check under a very short `go movetime` budget
+(`hard_time <= 100ms`), do not preserve the previous completed root PV move as
+the root seed.  The normal TT move still exists for diagnostics, but root move
+ordering is allowed to start from current history/order signals.  Longer
+movetime searches, fixed-depth searches, and clock-managed searches keep the
+existing seed behavior.
+
+Target probe:
+
+```text
+python3 blunder_trace.py \
+  --pgn /tmp/mantis_goal_probe_meta40_0603.pgn \
+  --mode worst \
+  --limit 12 \
+  --candidate-indexes 5 \
+  --binary ./mantis_tight_check_unseed \
+  --no-depths \
+  --movetimes-ms 80 250 \
+  --stateful-replay \
+  --warm-movetime-ms 80 \
+  --stateful-target-fen \
+  --timeout 60 \
+  --oracle-binary ./stockfish-debug/src/stockfish \
+  --oracle-depth 12 \
+  --oracle-multipv 6 \
+  --oracle-timeout 60 \
+  --report /tmp/mantis_tight_check_unseed_candidate5_stateful.md \
+  --csv /tmp/mantis_tight_check_unseed_candidate5_stateful.csv
+```
+
+Result on round 2, ply 87:
+
+```text
+Baseline stateful 80ms:  e1f1, oracle rank 3, mate loss
+Candidate stateful 80ms: e1d1, oracle rank 2, +3.53 cp loss
+Candidate cold 80ms:     e1f1, still mate-losing
+Candidate 250ms:         e1d1, oracle rank 2
+```
+
+The 250ms warmed target no longer gets the baseline's lucky `e1e2` recovery,
+but it still avoids the mate-losing `e1f1`.  Wider top-drop tracing over the
+five filtered candidates in `/tmp/mantis_goal_probe_meta40_0603.pgn` did not
+expose a new worse known blunder:
+
+```text
+python3 blunder_trace.py ... --binary ./mantis_tight_check_unseed \
+  --no-depths --movetimes-ms 80 250 --stateful-replay \
+  --warm-movetime-ms 80 --stateful-target-fen
+
+report: /tmp/mantis_tight_check_unseed_top12_stateful.md
+```
+
+Gates:
+
+```text
+python3 tactical_regression.py --binary ./mantis_tight_check_unseed
+python3 correctness_test.py --binary ./mantis_tight_check_unseed --random 20 --seed 0603
+python3 stats_benchmark.py --binary ./mantis_tight_check_unseed --limit 3 --timeout 90
+```
+
+All tactical and perft checks passed.  The small stats benchmark stayed within
+expected noise.
+
+Candidate comparison:
+
+```text
+python3 compare_candidates.py --baseline ./mantis_goal_probe \
+  --candidate ./mantis_tight_check_unseed --movetimes 80 --timeout 90 \
+  --csv /tmp/mantis_tight_check_unseed_movetime80_compare.csv
+python3 compare_candidates.py --baseline ./mantis_goal_probe \
+  --candidate ./mantis_tight_check_unseed --movetimes 250 --timeout 90 \
+  --csv /tmp/mantis_tight_check_unseed_movetime250_compare.csv
+```
+
+Summary:
+
+```text
+80ms:  1/44 bestmove change, f7f8 -> c8e6, -13 cp, +1.97% nodes
+250ms: 0/44 bestmove changes, +1.22% nodes
+```
+
+Self-play at 80ms:
+
+```text
+python3 selfplay.py --engine-a ./mantis_goal_probe \
+  --engine-b ./mantis_tight_check_unseed --games 20 --movetime 80 \
+  --concurrency 2 --pgn-out /tmp/mantis_tight_check_unseed_selfplay20_80.pgn
+```
+
+The result is reported from engine A's perspective.  Baseline scored
+`3W-12L-5D`, so the candidate scored `12W-3L-5D`.

@@ -17,6 +17,7 @@ import "core:time"
 
 // Search Constants
 MAX_PLY :: 64
+TIGHT_CHECK_EVASION_SEED_LIMIT_MS :: 100
 
 // LMR Table — precomputed logarithmic reductions
 lmr_table: [64][64]int
@@ -5480,8 +5481,18 @@ search_position :: proc(
 				}
 			}
 
+			root_king_sq := board.get_king_square(b, b.side)
+			root_in_check := board.is_square_attacked(b, root_king_sq, 1 - b.side)
+			// Very short movetime check evasions can inherit a shallow PV seed
+			// that survives tied fail-low research; let current ordering lead.
+			skip_tight_check_evasion_seed :=
+				root_in_check &&
+				use_time_management &&
+				search_limits.is_movetime &&
+				search_limits.hard_time <= TIGHT_CHECK_EVASION_SEED_LIMIT_MS
+
 			root_tt_move := moves.Move{}
-			if pv_index == 0 {
+			if pv_index == 0 && !skip_tight_check_evasion_seed {
 				root_tt_move = best_move
 				if moves.is_empty_move(root_tt_move) {
 					root_tt_move = prev_completed_best_move
