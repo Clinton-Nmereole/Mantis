@@ -15,6 +15,19 @@ MOVE_PICKER_KILLER2_STAGE :: 4
 MOVE_PICKER_REST_STAGE :: 5
 MOVE_PICKER_DONE_STAGE :: 6
 LATE_ROOT_PAWN_OPENING_BIAS_DIVISOR :: 4
+LOW_MATERIAL_CONTINUATION_SCORE_DIV :: 12
+
+continuation_score_div_for_non_pawn_count :: proc(non_pawn_count: int) -> int {
+	divisor := params.continuation_score_div
+	if non_pawn_count <= 1 && divisor < LOW_MATERIAL_CONTINUATION_SCORE_DIV {
+		return LOW_MATERIAL_CONTINUATION_SCORE_DIV
+	}
+	return divisor
+}
+
+continuation_score_div_for_board :: proc(b: ^board.Board) -> int {
+	return continuation_score_div_for_non_pawn_count(non_pawn_piece_count(b))
+}
 
 root_opening_bias_score :: proc(b: ^board.Board, move: moves.Move) -> int {
 	bias := 0
@@ -26,19 +39,34 @@ root_opening_bias_score :: proc(b: ^board.Board, move: moves.Move) -> int {
 		if target == 18 || target == 21 || target == 42 || target == 45 {bias += 450} // c3, f3, c6, f6
 		if target == 26 || target == 29 || target == 34 || target == 37 {bias += 350} // c4, f4, c5, f5
 		// Penalize early wing pawn moves that commonly waste opening tempi.
-		if target == 16 || target == 17 || target == 22 || target == 23 ||
-		   target == 24 || target == 25 || target == 30 || target == 31 ||
-		   target == 32 || target == 33 || target == 38 || target == 39 ||
-		   target == 40 || target == 41 || target == 46 || target == 47 {
-			bias -= 1200
-		}
-		if b.fullmove_number > 12 {
-			bias /= LATE_ROOT_PAWN_OPENING_BIAS_DIVISOR
-		}
+			if target == 16 || target == 17 || target == 22 || target == 23 ||
+			   target == 24 || target == 25 || target == 30 || target == 31 ||
+			   target == 32 || target == 33 || target == 38 || target == 39 ||
+			   target == 40 || target == 41 || target == 46 || target == 47 {
+				bias -= 1200
+			}
+			if b.fullmove_number > 12 {
+				bias /= LATE_ROOT_PAWN_OPENING_BIAS_DIVISOR
+			}
 	} else if move.piece % 6 == constants.KNIGHT && b.fullmove_number <= 12 {
 		if target == 18 || target == 21 || target == 42 || target == 45 {bias += 350} // c3, f3, c6, f6
 		// Penalize knights on the rim.
 		if target == 16 || target == 23 || target == 40 || target == 47 {bias -= 200} // a3, h3, a6, h6
+	} else if move.piece % 6 == constants.BISHOP && b.fullmove_number <= 12 {
+		c6 := u64(1) << 42
+		e4 := u64(1) << 28
+		c3 := u64(1) << 18
+		e5 := u64(1) << 36
+		if target == 33 &&
+		   (b.bitboards[constants.KNIGHT + 6] & c6) != 0 &&
+		   (b.bitboards[constants.PAWN] & e4) != 0 {
+			bias += 500 // Bb5 pressure on Nc6 after e4
+		}
+		if target == 25 &&
+		   (b.bitboards[constants.KNIGHT] & c3) != 0 &&
+		   (b.bitboards[constants.PAWN + 6] & e5) != 0 {
+			bias += 500 // ...Bb4 pressure on Nc3 after ...e5
+		}
 	}
 
 	return bias
@@ -68,7 +96,13 @@ score_move :: proc(
 	ply: int = 0,
 	prev_move: moves.Move = moves.Move{},
 	see_score: int = SEE_SCORE_UNKNOWN,
+	continuation_div: int = 0,
 ) -> int {
+	effective_continuation_div := continuation_div
+	if effective_continuation_div <= 0 {
+		effective_continuation_div = continuation_score_div_for_board(b)
+	}
+
 	// 1. Hash Move (Highest Priority)
 	if !moves.is_empty_move(tt_move) &&
 	   move.source == tt_move.source &&
@@ -166,12 +200,12 @@ score_move :: proc(
 						abs_raw_cont_score = -abs_raw_cont_score
 					}
 					stat_add(&search_stats.continuation_score_raw_abs_sum, u64(abs_raw_cont_score))
-					if abs_raw_cont_score < params.continuation_score_div {
+					if abs_raw_cont_score < effective_continuation_div {
 						stat_add(&search_stats.continuation_score_raw_under_scale)
 					}
 				}
 
-				cont_score_for_stats := raw_cont_score / params.continuation_score_div
+				cont_score_for_stats := raw_cont_score / effective_continuation_div
 				if cont_score_for_stats != 0 {
 					stat_add(&search_stats.continuation_score_nonzero)
 					abs_cont_score := cont_score_for_stats
@@ -185,7 +219,7 @@ score_move :: proc(
 				}
 			}
 
-			hist += raw_cont_score / params.continuation_score_div
+			hist += raw_cont_score / effective_continuation_div
 		}
 
 		// Opening priority: prefer center pawn pushes at root only.
@@ -211,6 +245,7 @@ sort_moves :: proc(
 	see_scores: ^[256]int = nil,
 ) {
 	scores: [256]int
+	continuation_div := continuation_score_div_for_board(b)
 
 	for i in 0 ..< move_list.count {
 		see_score := SEE_SCORE_UNKNOWN
@@ -220,7 +255,7 @@ sort_moves :: proc(
 			}
 			see_scores[i] = see_score
 		}
-		scores[i] = score_move(st, move_list.moves[i], b, tt_move, ply, prev_move, see_score)
+		scores[i] = score_move(st, move_list.moves[i], b, tt_move, ply, prev_move, see_score, continuation_div)
 	}
 
 	if move_list.count < 2 {return}
@@ -263,7 +298,9 @@ init_move_picker :: proc(
 	mp.move_list = move_list
 	mp.index = 0
 	mp.stage = MOVE_PICKER_HASH_STAGE
-	mp.staged = use_staged_move_picker && !force_full_sort
+	non_pawn_count := non_pawn_piece_count(b)
+	continuation_div := continuation_score_div_for_non_pawn_count(non_pawn_count)
+	mp.staged = use_staged_move_picker && !force_full_sort && non_pawn_count > 4
 	mp.has_see_scores = with_see_scores
 	mp.current_ordered = false
 	mp.st = st
@@ -297,7 +334,7 @@ init_move_picker :: proc(
 		} else {
 			mp.see_scores[i] = SEE_SCORE_UNKNOWN
 		}
-		mp.scores[i] = score_move(st, move_list.moves[i], b, tt_move, ply, prev_move, see_score)
+		mp.scores[i] = score_move(st, move_list.moves[i], b, tt_move, ply, prev_move, see_score, continuation_div)
 	}
 }
 

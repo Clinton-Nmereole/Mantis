@@ -17,6 +17,9 @@ SearchLimits :: struct {
 	hard_time:    int, // Absolute abort limit (ms)
 	max_time:     int, // Backward-compatible alias for hard_time
 	optimal_time: int, // Backward-compatible alias for soft_time
+	base_hard_time: int, // Initial hard limit before instability extensions
+	root_fullmove_number: int, // Root fullmove, filled in by search_position
+	clock_time: int, // Side-to-move clock at root, for short-clock extension caps
 	start_time:   time.Time,
 	is_movetime:  bool, // True for go movetime N (no dynamic scaling)
 	is_infinite:  bool,
@@ -38,13 +41,16 @@ SCORE_DROP_LARGE :: 600
 calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> SearchLimits {
 	// movetime overrides everything
 	if tc.movetime > 0 {
-		mt := tc.movetime - overhead
+		// UCI movetime is an exact per-move budget. Move overhead is for
+		// clock-managed searches, where we must reserve time to return a move.
+		mt := tc.movetime
 		if mt < 1 { mt = 1 }
 		return SearchLimits{
 			soft_time    = mt,
 			hard_time    = mt,
 			max_time     = mt,
 			optimal_time = mt,
+			base_hard_time = mt,
 			start_time   = time.now(),
 			is_movetime  = true,
 		}
@@ -57,6 +63,7 @@ calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> Search
 			hard_time    = 999_999_999,
 			max_time     = 999_999_999,
 			optimal_time = 999_999_999,
+			base_hard_time = 999_999_999,
 			start_time   = time.now(),
 			is_infinite  = true,
 		}
@@ -84,6 +91,39 @@ calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> Search
 			hard_time    = max_limit,
 			max_time     = max_limit,
 			optimal_time = optimal,
+			base_hard_time = max_limit,
+			clock_time   = my_time,
+			start_time   = time.now(),
+		}
+	}
+
+	if my_time < 500 && my_inc <= 50 {
+		base := available / 80
+		inc_bonus := my_inc
+		optimal := base + inc_bonus
+		if optimal < 1 {
+			optimal = 1
+		}
+
+		max_limit := optimal * 12 / 10
+		if max_limit < optimal {
+			max_limit = optimal
+		}
+		cap := available / 5
+		if cap < 1 {
+			cap = 1
+		}
+		if max_limit > cap {
+			max_limit = cap
+		}
+
+		return SearchLimits{
+			soft_time    = optimal,
+			hard_time    = max_limit,
+			max_time     = max_limit,
+			optimal_time = optimal,
+			base_hard_time = max_limit,
+			clock_time   = my_time,
 			start_time   = time.now(),
 		}
 	}
@@ -144,7 +184,80 @@ calculate_time :: proc(tc: TimeControl, side: int, overhead: int = 10) -> Search
 		hard_time    = max_limit,
 		max_time     = max_limit,
 		optimal_time = optimal,
+		base_hard_time = max_limit,
+		clock_time   = my_time,
 		start_time   = time.now(),
+	}
+}
+
+short_clock_extension_cap :: proc(limits: ^SearchLimits, requested_cap: int) -> int {
+	if limits.is_movetime || limits.is_infinite {
+		return requested_cap
+	}
+	if limits.base_hard_time <= 0 || limits.root_fullmove_number <= 0 {
+		return requested_cap
+	}
+	if limits.root_fullmove_number > 2 || limits.base_hard_time > 160 {
+		return requested_cap
+	}
+
+	cap := limits.base_hard_time * 3 / 2
+	min_cap := limits.base_hard_time + 20
+	if cap < min_cap {
+		cap = min_cap
+	}
+	if cap > 160 {
+		cap = 160
+	}
+	if requested_cap < cap {
+		return requested_cap
+	}
+	return cap
+}
+
+short_clock_opening_extension_cap :: proc(limits: ^SearchLimits, requested_cap: int) -> int {
+	if limits.is_movetime || limits.is_infinite {
+		return requested_cap
+	}
+	if limits.clock_time > 800 || limits.base_hard_time <= 0 {
+		return requested_cap
+	}
+
+	cap := limits.base_hard_time * 3 / 2
+	min_cap := limits.base_hard_time + 20
+	if cap < min_cap {
+		cap = min_cap
+	}
+	if cap > 160 {
+		cap = 160
+	}
+	if requested_cap < cap {
+		return requested_cap
+	}
+	return cap
+}
+
+raise_soft_time :: proc(limits: ^SearchLimits, target: int) {
+	adjusted := target
+	cap := short_clock_extension_cap(limits, target)
+	if adjusted > cap {
+		adjusted = cap
+	}
+	if limits.soft_time < adjusted {
+		limits.soft_time = adjusted
+		limits.optimal_time = adjusted
+	}
+}
+
+raise_hard_time :: proc(limits: ^SearchLimits, target: int) {
+	adjusted := target
+	cap := short_clock_extension_cap(limits, target)
+	if adjusted > cap {
+		adjusted = cap
+	}
+	if adjusted > limits.hard_time {
+		limits.hard_time = adjusted
+		limits.max_time = adjusted
 	}
 }
 
@@ -262,11 +375,198 @@ extend_timed_root_verify_budget :: proc(limits: ^SearchLimits) {
 
 	extended := limits.hard_time + limits.soft_time
 	cap := limits.soft_time * 3
+	cap = short_clock_extension_cap(limits, cap)
 	if extended > cap {
 		extended = cap
 	}
-	if extended > limits.hard_time {
-		limits.hard_time = extended
-		limits.max_time = extended
+	raise_hard_time(limits, extended)
+}
+
+extend_short_clock_pv_instability_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
 	}
+	if limits.soft_time <= 0 {
+		return
+	}
+	raise_soft_time(limits, 120)
+
+	extended := limits.soft_time * 3
+	if extended > 240 {
+		extended = 240
+	}
+	raise_hard_time(limits, extended)
+}
+
+extend_short_clock_next_depth_margin_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+
+	extended := limits.soft_time * 2
+	if extended > 160 {
+		extended = 160
+	}
+	raise_hard_time(limits, extended)
+}
+
+extend_short_clock_opening_center_recovery_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+	raise_soft_time(limits, short_clock_opening_extension_cap(limits, 120))
+
+	extended := limits.soft_time * 2
+	if extended > 190 {
+		extended = 190
+	}
+	extended = short_clock_opening_extension_cap(limits, extended)
+	raise_hard_time(limits, extended)
+}
+
+extend_short_clock_rook_invasion_horizon_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+	raise_soft_time(limits, 120)
+
+	extended := limits.soft_time * 3
+	if extended > 190 {
+		extended = 190
+	}
+	raise_hard_time(limits, extended)
+}
+
+extend_short_clock_tactical_horizon_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+	raise_soft_time(limits, 120)
+
+	extended := limits.soft_time * 4
+	if extended > 320 {
+		extended = 320
+	}
+	raise_hard_time(limits, extended)
+}
+
+extend_short_clock_deep_tactical_horizon_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+	raise_soft_time(limits, 160)
+
+	extended := limits.soft_time * 4
+	if extended > 640 {
+		extended = 640
+	}
+	raise_hard_time(limits, extended)
+}
+
+extend_short_clock_late_rook_endgame_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+	raise_soft_time(limits, 400)
+
+	extended := limits.soft_time * 4
+	if extended > 1600 {
+		extended = 1600
+	}
+	raise_hard_time(limits, extended)
+}
+
+extend_short_clock_two_rook_passed_pawn_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+
+	raise_hard_time(limits, 220)
+}
+
+extend_short_clock_opening_center_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+	raise_soft_time(limits, short_clock_opening_extension_cap(limits, 220))
+
+	extended := limits.soft_time * 2
+	if extended > 360 {
+		extended = 360
+	}
+	extended = short_clock_opening_extension_cap(limits, extended)
+	raise_hard_time(limits, extended)
+}
+
+extend_short_clock_opening_development_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+	raise_soft_time(limits, short_clock_opening_extension_cap(limits, 520))
+
+	extended := limits.soft_time * 2
+	if extended > 640 {
+		extended = 640
+	}
+	extended = short_clock_opening_extension_cap(limits, extended)
+	raise_hard_time(limits, extended)
+}
+
+extend_low_material_stable_quiet_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+	raise_soft_time(limits, 120)
+
+	extended := limits.soft_time * 4
+	if extended > 320 {
+		extended = 320
+	}
+	raise_hard_time(limits, extended)
+}
+
+extend_low_material_passed_pawn_race_budget :: proc(limits: ^SearchLimits) {
+	if limits.is_infinite || limits.is_movetime {
+		return
+	}
+	if limits.soft_time <= 0 {
+		return
+	}
+	raise_soft_time(limits, 120)
+
+	extended := limits.soft_time * 6
+	if extended > 440 {
+		extended = 440
+	}
+	raise_hard_time(limits, extended)
 }

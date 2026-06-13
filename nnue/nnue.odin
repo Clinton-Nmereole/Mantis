@@ -307,12 +307,62 @@ simple_positional_bonus :: proc(b: ^board.Board) -> int {
 	return bonus
 }
 
+sfnnv14_opening_bishop_pin_bonus :: proc(b: ^board.Board) -> int {
+	piece_count := int(bits.count_ones(b.occupancies[constants.BOTH]))
+	if piece_count < 28 { return 0 }
+
+	white_bonus := 0
+	black_bonus := 0
+	b5 := u64(1) << 33
+	c6 := u64(1) << 42
+	e4 := u64(1) << 28
+	d4 := u64(1) << 27
+	b4 := u64(1) << 25
+	c3 := u64(1) << 18
+	e5 := u64(1) << 36
+	d5 := u64(1) << 35
+
+	// Ruy-Lopez / Nimzo-style bishop development: the bishop pressures the
+	// natural c-knight while the e-pawn has claimed the center.
+	white_bishop_pin := (b.bitboards[constants.BISHOP] & b5) != 0 &&
+	                    (b.bitboards[constants.KNIGHT + 6] & c6) != 0 &&
+	                    (b.bitboards[constants.PAWN] & e4) != 0
+	black_bishop_pin := (b.bitboards[constants.BISHOP + 6] & b4) != 0 &&
+	                    (b.bitboards[constants.KNIGHT] & c3) != 0 &&
+	                    (b.bitboards[constants.PAWN + 6] & e5) != 0
+
+	if white_bishop_pin {
+		white_bonus += 120
+	}
+	if black_bishop_pin {
+		black_bonus += 120
+	}
+
+	if white_bishop_pin &&
+	   black_bishop_pin &&
+	   (b.bitboards[constants.PAWN] & d4) != 0 &&
+	   (b.bitboards[constants.PAWN + 6] & d5) != 0 {
+		if b.side == constants.BLACK {
+			white_bonus += 220
+		} else {
+			black_bonus += 220
+		}
+	}
+
+	white_score := white_bonus - black_bonus
+	if b.side == constants.WHITE {
+		return white_score
+	}
+	return -white_score
+}
+
 // Evaluate using NNUE — dispatches to SFNNv14 or legacy based on active flag
 evaluate :: proc(b: ^board.Board) -> int {
 	// SFNNv14 path
 	if sfnnv14_active {
 		transformed, psqt, bucket := prepare_sfnnv14_evaluation(b)
-		return evaluate_sfnnv14(transformed, psqt, bucket, b.side)
+		return evaluate_sfnnv14(transformed, psqt, bucket, b.side) +
+		       sfnnv14_opening_bishop_pin_bonus(b)
 	}
 
 	// Legacy path

@@ -113,11 +113,90 @@ def load_oracle_moves(path: Path | None) -> dict[str, dict[str, dict[str, int]]]
             add_oracle_move(
                 moves,
                 row.get("bestmove"),
-                row.get("oracle_engine_rank"),
-                row.get("oracle_engine_score_cp"),
-                row.get("oracle_engine_loss_cp"),
+                row.get("oracle_engine_rank", row.get("oracle_rank")),
+                row.get("oracle_engine_score_cp", row.get("oracle_move_score_cp")),
+                row.get("oracle_engine_loss_cp", row.get("oracle_loss_cp")),
             )
     return oracle
+
+
+def oracle_entries_from_multipv(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    if not rows:
+        return {}
+
+    best_score = parse_optional_int(rows[0].get("score_cp"))
+    if best_score is None:
+        return {}
+
+    entries: dict[str, dict[str, int]] = {}
+    for row in rows:
+        move = str(row.get("root", ""))
+        score = parse_optional_int(row.get("score_cp"))
+        if not move or score is None:
+            continue
+
+        entry = {"score_cp": score, "loss_cp": best_score - score}
+        rank = parse_optional_int(row.get("rank"))
+        if rank is not None:
+            entry["rank"] = rank
+        entries[move] = entry
+
+    return entries
+
+
+def query_oracle_moves(binary: str, fen: str, depth: int, multipv: int, timeout: float) -> dict[str, dict[str, int]]:
+    import blunder_trace
+
+    engine = blunder_trace.UCIEngine(binary, timeout)
+    try:
+        engine.set_option("MultiPV", multipv)
+        _stats, _wall_ms, output = engine.search_go_output_fen(
+            fen,
+            f"go depth {depth}",
+            timeout,
+        )
+        return oracle_entries_from_multipv(blunder_trace.parse_multipv(output))
+    finally:
+        engine.close()
+
+
+def first_oracle_move(moves: dict[str, dict[str, int]]) -> str:
+    for move in moves:
+        return move
+    return ""
+
+
+def oracle_depths(args: argparse.Namespace) -> list[int]:
+    return args.oracle_depths if args.oracle_depths else [args.oracle_depth]
+
+
+def apply_oracle_pair(
+    row: dict[str, Any],
+    moves: dict[str, dict[str, int]],
+    *,
+    depth: int | None = None,
+    final: bool = True,
+) -> bool:
+    base = moves.get(str(row["base_best"]))
+    cand = moves.get(str(row["cand_best"]))
+    if base is None or cand is None:
+        return False
+
+    if depth is not None:
+        row[f"d{depth}_oracle_bestmove"] = first_oracle_move(moves)
+        row[f"d{depth}_base_oracle_rank"] = base.get("rank", "")
+        row[f"d{depth}_cand_oracle_rank"] = cand.get("rank", "")
+        row[f"d{depth}_base_oracle_loss_cp"] = base["loss_cp"]
+        row[f"d{depth}_cand_oracle_loss_cp"] = cand["loss_cp"]
+        row[f"d{depth}_oracle_loss_delta_cp"] = cand["loss_cp"] - base["loss_cp"]
+
+    if final:
+        row["base_oracle_rank"] = base.get("rank", "")
+        row["cand_oracle_rank"] = cand.get("rank", "")
+        row["base_oracle_loss_cp"] = base["loss_cp"]
+        row["cand_oracle_loss_cp"] = cand["loss_cp"]
+        row["oracle_loss_delta_cp"] = cand["loss_cp"] - base["loss_cp"]
+    return True
 
 
 def annotate_oracle(row: dict[str, Any], oracle_moves: dict[str, dict[str, dict[str, int]]]) -> None:
@@ -289,6 +368,66 @@ def oracle_loss(row: dict[str, Any], key: str) -> int | None:
     return parse_optional_int(row.get(key))
 
 
+def has_known_oracle_pair(row: dict[str, Any]) -> bool:
+    return (
+        oracle_loss(row, "base_oracle_loss_cp") is not None
+        and oracle_loss(row, "cand_oracle_loss_cp") is not None
+    )
+
+
+def unknown_oracle_bestmove_changes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        row for row in rows
+        if int_stat(row, "bestmove_changed") != 0 and not has_known_oracle_pair(row)
+    ]
+
+
+def hydrate_missing_oracle_pair(
+    row: dict[str, Any],
+    args: argparse.Namespace,
+    cache: dict[tuple[str, int], dict[str, dict[str, int]]],
+) -> None:
+    if not args.oracle_binary:
+        return
+    if int_stat(row, "bestmove_changed") == 0 or has_known_oracle_pair(row):
+        return
+
+    fen = str(row["fen"])
+    depths = oracle_depths(args)
+    bestmoves_by_depth: list[str] = []
+    known_depths = 0
+    for depth in depths:
+        cache_key = (fen, depth)
+        if cache_key not in cache:
+            depth_label = f"depth={depth} depths=" + ",".join(str(item) for item in depths)
+            if len(depths) == 1:
+                depth_label = f"depth={depth}"
+            print(
+                f"[oracle-fill] index={int_stat(row, 'index')} {depth_label} "
+                f"multipv={args.oracle_multipv}",
+                flush=True,
+            )
+            cache[cache_key] = query_oracle_moves(
+                args.oracle_binary,
+                fen,
+                depth,
+                args.oracle_multipv,
+                args.oracle_timeout,
+            )
+
+        moves = cache[cache_key]
+        bestmoves_by_depth.append(first_oracle_move(moves))
+        if apply_oracle_pair(row, moves, depth=depth, final=depth == depths[-1]):
+            known_depths += 1
+
+    if len(depths) > 1:
+        row["oracle_depths"] = ",".join(str(depth) for depth in depths)
+        row["oracle_bestmoves_by_depth"] = ",".join(bestmoves_by_depth)
+        row["oracle_stable_best"] = int(len(set(bestmoves_by_depth)) == 1)
+        row["oracle_final_depth"] = depths[-1]
+        if known_depths < len(depths):
+            row["oracle_known_depths"] = f"{known_depths}/{len(depths)}"
+
 def grouped_by_limit(rows: list[dict[str, Any]]) -> list[tuple[tuple[str, str], list[dict[str, Any]]]]:
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     order: list[tuple[str, str]] = []
@@ -305,9 +444,15 @@ def oracle_row_text(row: dict[str, Any], *, loss_key: str = "cand_oracle_loss_cp
     index = int_stat(row, "index")
     rank = row.get("cand_oracle_rank", "")
     loss = row.get(loss_key, "")
+    depth_note = ""
+    if row.get("oracle_depths"):
+        depth_note = (
+            f" depths={row.get('oracle_depths', '')}"
+            f" bests={row.get('oracle_bestmoves_by_depth', '')}"
+        )
     return (
         f"  {index:2d}: loss={loss} rank={rank} "
-        f"{row.get('base_best', '?')}->{row.get('cand_best', '?')} "
+        f"{row.get('base_best', '?')}->{row.get('cand_best', '?')}{depth_note} "
         f"fen={row.get('fen', '')}"
     )
 
@@ -320,15 +465,8 @@ def print_oracle_summary(rows: list[dict[str, Any]], row_limit: int = 5) -> None
 
     for (mode, limit_value), limit_rows in grouped_by_limit(rows):
         label = f"{mode} {limit_value}".strip()
-        known_rows = [
-            row for row in limit_rows
-            if oracle_loss(row, "base_oracle_loss_cp") is not None
-            and oracle_loss(row, "cand_oracle_loss_cp") is not None
-        ]
-        unknown_changed = [
-            row for row in limit_rows
-            if int_stat(row, "bestmove_changed") != 0 and row not in known_rows
-        ]
+        known_rows = [row for row in limit_rows if has_known_oracle_pair(row)]
+        unknown_changed = unknown_oracle_bestmove_changes(limit_rows)
 
         print(f"\n--- {label} ---", flush=True)
         print(f"positions:        {len(limit_rows)}", flush=True)
@@ -451,6 +589,16 @@ def main() -> int:
     parser.add_argument("--fen-file", type=Path, help="Optional file with one FEN per line")
     parser.add_argument("--csv", type=Path, help="Optional CSV output path")
     parser.add_argument("--oracle-csv", type=Path, help="Optional blunder_trace oracle CSV for move rank/loss annotations")
+    parser.add_argument("--oracle-binary", help="Optional UCI engine used to fill missing oracle annotations")
+    parser.add_argument("--oracle-depth", type=int, default=18, help="Depth for --oracle-binary searches")
+    parser.add_argument(
+        "--oracle-depths",
+        type=int,
+        nargs="+",
+        help="Depths for multi-depth --oracle-binary searches; final depth drives regression checks",
+    )
+    parser.add_argument("--oracle-multipv", type=int, default=12, help="MultiPV count for --oracle-binary searches")
+    parser.add_argument("--oracle-timeout", type=float, default=120.0, help="Timeout per --oracle-binary search")
     parser.add_argument("--keep-hash", action="store_true", help="Do not send ucinewgame between positions")
     parser.add_argument("--baseline-own-book", action="store_true", help="Allow OwnBook moves for the baseline binary")
     parser.add_argument("--candidate-own-book", action="store_true", help="Allow OwnBook moves for the candidate binary")
@@ -478,10 +626,15 @@ def main() -> int:
         help="Exit nonzero if known candidate oracle loss exceeds known baseline loss by more than this many centipawns",
     )
     parser.add_argument(
+        "--fail-on-unknown-bestmove-change",
+        action="store_true",
+        help="Exit nonzero if any changed bestmove lacks oracle loss for either baseline or candidate",
+    )
+    parser.add_argument(
         "--oracle-summary-limit",
         type=int,
         default=5,
-        help="Rows per oracle summary section when --oracle-csv is used; 0 suppresses row details",
+        help="Rows per oracle summary section when oracle annotations are available; 0 suppresses row details",
     )
     args = parser.parse_args()
     if args.depths and any(depth <= 0 for depth in args.depths):
@@ -504,6 +657,14 @@ def main() -> int:
         parser.error("--fail-on-oracle-loss-regression must be non-negative")
     if args.oracle_summary_limit < 0:
         parser.error("--oracle-summary-limit must be non-negative")
+    if args.oracle_depth <= 0:
+        parser.error("--oracle-depth must be positive")
+    if args.oracle_depths and any(depth <= 0 for depth in args.oracle_depths):
+        parser.error("--oracle-depths values must be positive")
+    if args.oracle_multipv <= 0:
+        parser.error("--oracle-multipv must be positive")
+    if args.oracle_timeout <= 0:
+        parser.error("--oracle-timeout must be positive")
     try:
         common_options = stats_benchmark.parse_engine_options(args.option)
         args.baseline_options = common_options + stats_benchmark.parse_engine_options(args.baseline_option)
@@ -517,6 +678,7 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 1
     oracle_moves = load_oracle_moves(args.oracle_csv)
+    oracle_engine_cache: dict[tuple[str, int], dict[str, dict[str, int]]] = {}
     all_rows: list[dict[str, Any]] = []
     total_changes = 0
     limits: list[tuple[str, Any]] = []
@@ -552,6 +714,18 @@ def main() -> int:
                 return 1
 
             annotate_oracle(row, oracle_moves)
+            try:
+                hydrate_missing_oracle_pair(row, args, oracle_engine_cache)
+            except subprocess.TimeoutExpired as exc:
+                print(
+                    f"FAIL oracle-fill {mode}={limit_value} index={index}: "
+                    f"timed out after {args.oracle_timeout}s\n{exc.output}",
+                    file=sys.stderr,
+                )
+                return 1
+            except (FileNotFoundError, RuntimeError) as exc:
+                print(f"FAIL oracle-fill {mode}={limit_value} index={index}: {exc}", file=sys.stderr)
+                return 1
             limit_rows.append(row)
             all_rows.append(row)
             marker = "!" if int(row["bestmove_changed"]) else " "
@@ -559,11 +733,10 @@ def main() -> int:
             if mode in {"movetime", "clock"}:
                 depth_note = f" depth={int(row['base_depth'])}->{int(row['cand_depth'])}"
             oracle_note = ""
-            if args.oracle_csv:
+            if has_known_oracle_pair(row):
                 base_loss = row["base_oracle_loss_cp"]
                 cand_loss = row["cand_oracle_loss_cp"]
-                if base_loss != "" or cand_loss != "":
-                    oracle_note = f" oracle_loss={base_loss}->{cand_loss}"
+                oracle_note = f" oracle_loss={base_loss}->{cand_loss}"
             print(
                 f"{marker} {limit_label(mode, limit_value)} {index:2d}/{len(fens):2d} "
                 f"{row['base_best']}->{row['cand_best']} "
@@ -582,7 +755,7 @@ def main() -> int:
         write_csv(args.csv, all_rows)
         print(f"\nWrote CSV: {args.csv}", flush=True)
 
-    if args.oracle_csv:
+    if any(has_known_oracle_pair(row) for row in all_rows):
         print_oracle_summary(all_rows, args.oracle_summary_limit)
 
     if args.fail_on_score_delta is not None:
@@ -637,6 +810,22 @@ def main() -> int:
                 flush=True,
             )
             for row in oracle_violations:
+                print(
+                    f"  {row['mode']}={row['limit']} index={int(row['index'])}: "
+                    f"oracle_loss={row['base_oracle_loss_cp']}->{row['cand_oracle_loss_cp']} "
+                    f"{row['base_best']}->{row['cand_best']} fen={row['fen']}",
+                    flush=True,
+            )
+            return 1
+
+    if args.fail_on_unknown_bestmove_change:
+        unknown_violations = unknown_oracle_bestmove_changes(all_rows)
+        if unknown_violations:
+            print(
+                f"\nFAIL: {len(unknown_violations)} changed bestmoves lack complete oracle annotations",
+                flush=True,
+            )
+            for row in unknown_violations:
                 print(
                     f"  {row['mode']}={row['limit']} index={int(row['index'])}: "
                     f"oracle_loss={row['base_oracle_loss_cp']}->{row['cand_oracle_loss_cp']} "

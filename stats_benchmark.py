@@ -178,6 +178,16 @@ def validate_fen(fen: str) -> list[str]:
     if errors:
         return errors
 
+    white_piece_count = sum(1 for piece in board if piece in WHITE_PIECES)
+    black_piece_count = sum(1 for piece in board if piece in BLACK_PIECES)
+    total_piece_count = white_piece_count + black_piece_count
+    if total_piece_count > 32:
+        errors.append(f"too many pieces: {total_piece_count}")
+    if white_piece_count > 16:
+        errors.append(f"too many white pieces: {white_piece_count}")
+    if black_piece_count > 16:
+        errors.append(f"too many black pieces: {black_piece_count}")
+
     white_kings = find_piece(board, "K")
     black_kings = find_piece(board, "k")
     if len(white_kings) != 1:
@@ -251,6 +261,13 @@ def setoption_command(option: tuple[str, str]) -> str:
     return f"setoption name {name} value {value}"
 
 
+def score_to_cp(kind: str, score: int) -> int:
+    if kind == "mate":
+        sign = 1 if score > 0 else -1
+        return sign * (MATE_SCORE - min(abs(score), 999))
+    return score
+
+
 def parse_stats(output: str) -> dict[str, int | str]:
     stats: dict[str, int | str] = {}
     for line in output.splitlines():
@@ -267,11 +284,7 @@ def parse_stats(output: str) -> dict[str, int | str]:
                 score_raw = int(score_match.group(2))
                 stats["score_kind"] = score_kind
                 stats["score_raw"] = score_raw
-                stats["score_cp"] = (
-                    score_raw
-                    if score_kind == "cp"
-                    else (MATE_SCORE if score_raw > 0 else -MATE_SCORE)
-                )
+                stats["score_cp"] = score_to_cp(score_kind, score_raw)
             if nodes_match:
                 stats["nodes"] = int(nodes_match.group(1))
             if time_match:

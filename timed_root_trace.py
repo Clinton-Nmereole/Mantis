@@ -140,6 +140,7 @@ def find_target(
         mantis_name=mantis_name,
         threshold_cp=0,
         max_before_abs_cp=None,
+        allow_mixed_engine_evals=True,
     )
     target = next(
         (
@@ -149,14 +150,14 @@ def find_target(
         ),
         None,
     )
-    if target is None:
-        raise SystemExit(f"target not found in candidate eval drops: round={round_name} ply={ply}")
 
     with pgn_path.open("r", encoding="utf-8", errors="replace") as handle:
+        game_index = 0
         while True:
             game = chess.pgn.read_game(handle)
             if game is None:
                 break
+            game_index += 1
             if game.headers.get("Round", "?") != round_name:
                 continue
             start_fen = game.headers.get("FEN") or None
@@ -168,9 +169,58 @@ def find_target(
             board = game.board()
             moves_before: list[str] = []
             warm_positions: list[list[str]] = []
+            last_eval_cp: int | None = None
+            last_eval_ply = -1
 
             for current_ply, node in enumerate(game.mainline(), start=1):
+                move = node.move
+                before_fen = board.fen()
                 if current_ply == ply:
+                    if target is None:
+                        after_eval_cp = blunder_trace.parse_eval_cp(node.comment)
+                        before_eval_cp = last_eval_cp if last_eval_ply == current_ply - 1 else None
+                        side_sign = 1 if mantis_color == chess.WHITE else -1
+                        before_mantis_cp = (
+                            before_eval_cp * side_sign
+                            if before_eval_cp is not None
+                            else 0
+                        )
+                        after_mantis_cp = (
+                            after_eval_cp * side_sign
+                            if after_eval_cp is not None
+                            else 0
+                        )
+                        delta_cp = (
+                            after_mantis_cp - before_mantis_cp
+                            if before_eval_cp is not None and after_eval_cp is not None
+                            else 0
+                        )
+                        target = blunder_trace.BlunderCandidate(
+                            index=0,
+                            game_index=game_index,
+                            round_name=game.headers.get("Round", "?"),
+                            result=game.headers.get("Result", "?"),
+                            mantis_color="white" if mantis_color == chess.WHITE else "black",
+                            mover=blunder_trace.side_name(game, board.turn),
+                            ply=current_ply,
+                            fullmove=board.fullmove_number,
+                            san=board.san(move),
+                            uci=move.uci(),
+                            fen=before_fen,
+                            eval_before_cp=before_eval_cp or 0,
+                            eval_after_cp=after_eval_cp or 0,
+                            eval_before_mantis_cp=before_mantis_cp,
+                            eval_after_mantis_cp=after_mantis_cp,
+                            delta_cp=delta_cp,
+                            comment=node.comment.strip(),
+                            eval_source="pgn-target",
+                            played_depth=blunder_trace.parse_comment_depth(node.comment),
+                            played_nodes=blunder_trace.parse_comment_int(
+                                blunder_trace.COMMENT_NODES_RE,
+                                node.comment,
+                            ),
+                            played_time_ms=blunder_trace.parse_comment_time_ms(node.comment),
+                        )
                     return TraceTarget(
                         candidate=target,
                         start_fen=start_fen,
@@ -179,9 +229,12 @@ def find_target(
                     )
                 if board.turn == mantis_color:
                     warm_positions.append(moves_before.copy())
-                move = node.move
                 moves_before.append(move.uci())
                 board.push(move)
+                after_eval_cp = blunder_trace.parse_eval_cp(node.comment)
+                if after_eval_cp is not None:
+                    last_eval_cp = after_eval_cp
+                    last_eval_ply = current_ply
 
     raise SystemExit(f"round found but ply not reached: round={round_name} ply={ply}")
 

@@ -136,36 +136,36 @@ uci_loop :: proc() {
 			fmt.println("option name SyzygyPath type string default <empty>")
 			fmt.println("option name SyzygyProbeLimit type spin default 7 min 0 max 7")
 			fmt.println("option name Threads type spin default 1 min 1 max 512")
-			fmt.println("option name Contempt type spin default 12 min -100 max 100")
-			fmt.println("option name AspirationWindow type spin default 35 min 5 max 200")
+			fmt.println("option name Contempt type spin default 28 min -100 max 100")
+			fmt.println("option name AspirationWindow type spin default 33 min 5 max 200")
 			fmt.println("option name NmpMinDepth type spin default 3 min 2 max 6")
 			fmt.println("option name NmpReductionBase type spin default 2 min 0 max 4")
 			fmt.println("option name NmpReductionDiv type spin default 6 min 3 max 10")
-			fmt.println("option name RfpMargin type spin default 25 min 10 max 150")
-			fmt.println("option name RfpDepth type spin default 8 min 5 max 10")
-			fmt.println("option name ProbcutDepth type spin default 5 min 3 max 8")
-			fmt.println("option name ProbcutMargin type spin default 40 min 0 max 300")
+			fmt.println("option name RfpMargin type spin default 13 min 10 max 150")
+			fmt.println("option name RfpDepth type spin default 10 min 5 max 10")
+			fmt.println("option name ProbcutDepth type spin default 6 min 3 max 8")
+			fmt.println("option name ProbcutMargin type spin default 90 min 0 max 300")
 			fmt.println("option name ProbcutReduce type spin default 4 min 1 max 6")
 			fmt.println("option name IirMinDepth type spin default 4 min 3 max 8")
-			fmt.println("option name SeDepth type spin default 8 min 5 max 12")
+			fmt.println("option name SeDepth type spin default 9 min 5 max 12")
 			fmt.println("option name SeMargin type spin default 2 min 0 max 8")
 			fmt.println("option name SeReducedDiv type spin default 2 min 1 max 4")
-			fmt.println("option name LmrMinDepth type spin default 3 min 2 max 5")
+			fmt.println("option name LmrMinDepth type spin default 4 min 2 max 5")
 			fmt.println("option name LmrImprovingAdj type spin default -1 min -4 max 4")
-			fmt.println("option name LmrHistoryGoodAdj type spin default -1 min -4 max 4")
+			fmt.println("option name LmrHistoryGoodAdj type spin default 0 min -4 max 4")
 			fmt.println("option name LmrHistoryBadAdj type spin default 1 min -4 max 4")
-			fmt.println("option name LmrHistoryGoodThresh type spin default 2000 min 0 max 10000")
-			fmt.println("option name LmrHistoryBadThresh type spin default -2000 min -10000 max 0")
-			fmt.println("option name FutilityMargin type spin default 65 min 30 max 400")
-			fmt.println("option name FutilityMaxDepth type spin default 3 min 1 max 6")
+			fmt.println("option name LmrHistoryGoodThresh type spin default 0 min 0 max 10000")
+			fmt.println("option name LmrHistoryBadThresh type spin default -4045 min -10000 max 0")
+			fmt.println("option name FutilityMargin type spin default 124 min 30 max 400")
+			fmt.println("option name FutilityMaxDepth type spin default 2 min 1 max 6")
 			fmt.println("option name LmpBase type spin default 2 min 1 max 4")
 			fmt.println("option name LmpDiv type spin default 2 min 1 max 4")
-			fmt.println("option name LmpMaxDepth type spin default 8 min 3 max 12")
-			fmt.println("option name RazorMargin type spin default 80 min 0 max 300")
-			fmt.println("option name RazorMaxDepth type spin default 3 min 1 max 5")
-			fmt.println("option name DeltaPruningMargin type spin default 250 min 0 max 1200")
-			fmt.println("option name SeePruneThreshold type spin default -50 min -300 max 0")
-			fmt.println("option name ContinuationScoreDiv type spin default 12 min 1 max 64")
+			fmt.println("option name LmpMaxDepth type spin default 7 min 3 max 12")
+			fmt.println("option name RazorMargin type spin default 186 min 0 max 300")
+			fmt.println("option name RazorMaxDepth type spin default 2 min 1 max 5")
+			fmt.println("option name DeltaPruningMargin type spin default 554 min 0 max 1200")
+			fmt.println("option name SeePruneThreshold type spin default -60 min -300 max 0")
+			fmt.println("option name ContinuationScoreDiv type spin default 1 min 1 max 64")
 			fmt.println("option name SearchStats type check default false")
 			fmt.println("option name RootDebugTrace type check default false")
 			fmt.println("option name StagedMovePicker type check default false")
@@ -374,7 +374,7 @@ clear_fast_movetime_check_evasion_tt :: proc(b: ^board.Board, tc: search.TimeCon
 		return
 	}
 
-	movetime_hard := tc.movetime - move_overhead
+	movetime_hard := tc.movetime
 	if movetime_hard < 1 {
 		movetime_hard = 1
 	}
@@ -532,7 +532,7 @@ BENCH_FENS := []string {
 	"rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
 	"r1bqkbnr/pp1ppppp/2n5/1Bp5/4P3/8/PPPP1PPP/RNBQK1NR w KQkq - 2 3",
 	"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1",
-	"rnbq1rk1/ppppqppp/5n2/4p1B1/1b1PP3/5N2/PPP2PPP/RN1QKB1R w KQ - 4 6",
+	"rnb2rk1/ppppqppp/5n2/4p1B1/1b1PP3/5N2/PPP2PPP/RN1QKB1R w KQ - 4 6",
 	"rnbqkb1r/pppp1ppp/7n/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 3 3",
 	"r1bqk2r/ppp2ppp/2n2n2/3pp3/1b1PP3/2N2N2/PPP2PPP/R1BQKB1R w KQkq - 5 6",
 	"r1bq1rk1/ppp2ppp/2np1n2/4p3/2PPP3/2N2N2/PP3PPP/R1BQKB1R w KQ - 2 6",

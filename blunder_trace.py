@@ -313,7 +313,8 @@ TIME_RE = re.compile(r"\btime (?P<time>\d+)\b")
 
 def score_to_cp(kind: str, score: int) -> int:
     if kind == "mate":
-        return MATE_SCORE if score > 0 else -MATE_SCORE
+        sign = 1 if score > 0 else -1
+        return sign * (MATE_SCORE - min(abs(score), 999))
     return score
 
 
